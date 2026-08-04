@@ -1,0 +1,2154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SDR→HDR10 Video Converter</title>
+<style>
+  :root{--bg:#0a0e14;--panel:#0f1420;--text:#e8ecf4;--muted:#6b7488;--accent:#5ce1e6;--purple:#7c5cff;--red:#ff5c7a;--yellow:#ffb84d;--green:#5cff9d;}
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:13px;padding:24px 60px;}
+  .slbl{font-size:.68rem;letter-spacing:.12em;text-transform:uppercase;color:var(--purple);margin:22px 0 10px;border-bottom:1px solid rgba(124,92,255,.25);padding-bottom:6px;}
+  .card{background:var(--panel);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:16px;margin-bottom:10px;}
+  .drop{border:2px dashed rgba(255,255,255,.15);border-radius:10px;padding:30px;text-align:center;cursor:pointer;color:var(--muted);transition:.15s;}
+  .drop.drag-active{border-color:var(--accent);color:var(--accent);background:rgba(92,225,230,.06);}
+  .drop:hover{border-color:var(--accent);color:var(--accent);}
+  .row{display:flex;gap:14px;flex-wrap:wrap;}
+  .field{flex:1;min-width:180px;}
+  label{display:block;font-size:.7rem;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em;}
+  input[type=text],input[type=number],select{width:100%;background:#161c2a;border:1px solid rgba(255,255,255,.1);color:var(--text);padding:8px 10px;border-radius:6px;font-family:inherit;font-size:.85rem;}
+  .ti{display:flex;align-items:center;gap:10px;padding:10px 12px;background:#161c2a;border-radius:8px;cursor:pointer;margin-bottom:8px;border:1px solid rgba(255,255,255,.06);}
+  .ti .sw{width:34px;height:19px;border-radius:10px;background:#333;position:relative;flex-shrink:0;transition:.2s;}
+  .ti .sw::after{content:'';position:absolute;width:15px;height:15px;border-radius:50%;background:#888;top:2px;left:2px;transition:.2s;}
+  .ti.on .sw{background:var(--accent);}
+  .ti.on .sw::after{background:#04141c;left:17px;}
+  .ti-txt{font-size:.78rem;color:var(--text);line-height:1.5;}
+  .info-box{background:rgba(92,225,230,.06);border:1px solid rgba(92,225,230,.2);border-radius:8px;padding:12px 14px;font-size:.75rem;line-height:1.7;color:var(--text);margin-top:8px;}
+  .warn-box{background:rgba(255,92,122,.08);border:1px solid rgba(255,92,122,.3);border-radius:8px;padding:12px 14px;font-size:.75rem;line-height:1.7;margin-top:8px;}
+  button{cursor:pointer;font-family:inherit;}
+  .btn-run{width:100%;padding:16px;background:linear-gradient(135deg,var(--accent),var(--purple));border:none;border-radius:10px;color:#04141c;font-weight:700;font-size:.9rem;letter-spacing:.05em;margin-top:16px;}
+  .btn-detect{padding:8px 14px;background:#232b3d;border:1px solid var(--accent);color:var(--accent);border-radius:6px;font-size:.72rem;}
+  .detected{color:var(--accent);font-size:.82rem;padding:8px 0;}
+  .progress-wrap{margin-top:16px;display:none;}
+  .progress-bar-bg{background:#161c2a;border-radius:8px;height:22px;overflow:hidden;border:1px solid rgba(255,255,255,.1);}
+  .progress-bar-fill{background:linear-gradient(90deg,var(--accent),var(--purple));height:100%;width:0%;transition:width .3s;}
+  .progress-stats{display:flex;justify-content:space-between;font-size:.72rem;color:var(--muted);margin-top:6px;}
+  .va{color:var(--accent);}
+  h1{font-size:1.1rem;font-weight:700;margin-bottom:4px;}
+  .sub{color:var(--muted);font-size:.78rem;margin-bottom:20px;}
+</style>
+</head>
+<body>
+  <h1>SDR → HDR10 Video Converter</h1>
+  <div class="sub">Crop detection, SDR→HDR expansion, H.265 HDR10 encode, framerate conversion — GPU accelerated where available</div>
+
+  <div class="slbl">Source File</div>
+  <div class="drop" id="dropZone" onclick="document.getElementById('fileInput').click()"
+       ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleDrop(event)">
+    Click or drag a video file here
+    <input type="file" id="fileInput" style="display:none" onchange="loadFile(this.files[0])">
+  </div>
+  <div id="fileInfo" style="display:none" class="card"></div>
+
+  <div class="slbl">Detected Source Quality</div>
+  <div class="card" id="qualityCard">
+    <div class="detected" id="qualityDisplay">Load a file to auto-detect resolution, framerate, and audio channels</div>
+  </div>
+
+  <div class="slbl">Video Track Selection</div>
+  <div class="card">
+    <div id="videoTrackList" class="detected">Load a file to detect video tracks</div>
+    <div class="path-hint" style="margin-top:8px" id="videoTrackHint"></div>
+  </div>
+
+  <div class="slbl">Audio Source</div>
+  <div class="card">
+    <div class="row">
+      <div class="field">
+        <label>Mode</label>
+        <select id="audioModeSelect" onchange="updateAudioModeUI()">
+          <option value="integrated" selected>Integrated Engine — downmix embedded track to Stereo FLAC, then upmix to 7.1 Vorbis, all in one pass</option>
+          <option value="external">External File — mux in an already-processed file</option>
+          <option value="embedded">Embedded Track — pass through a source track as-is (any channel count, including 5.1/7.1)</option>
+          <option value="none">No Audio — video only, for HDR-only conversion</option>
+        </select>
+      </div>
+    </div>
+
+    <div id="integratedEngineSection" style="margin-top:10px">
+      <div class="path-hint">
+        Runs the SAME validated logic as the audio converter tool (bass-managed fold, −6dB headroom,
+        RMS compressor, hard limiter, LUFS, ITU-grounded coefficients — everything that fixed Blade
+        Runner 2049), ported directly from that tool rather than reimplemented. Select which embedded
+        track to run through it below. Output is always 7.1 Vorbis at the end of the chain.
+        <strong>Just want the original 5.1/7.1 track passed through untouched instead of this
+        processing?</strong> Switch Mode above to "Embedded Track" — that mode works for any channel
+        count, not just stereo/mono, and copies the track as-is.
+      </div>
+      <div id="integratedTrackList" class="detected" style="margin-top:8px">Load a file to select a source track</div>
+      <div class="ti on" id="tog-lfe-derive" onclick="toggle(this)" style="margin-top:10px"><div class="sw"></div><div class="ti-txt">Derive LFE from downmixed content — ON by default, matching the audio converter tool's own default. Turn off to send silence to LFE instead, leaving all bass exactly where it already is in the front channels untouched.</div></div>
+    </div>
+
+    <div id="externalAudioSection" style="margin-top:10px;display:none">
+      <label>Processed Audio File</label>
+      <input type="text" id="externalAudioPath" placeholder="Path to the file produced by the audio converter tool">
+      <div class="path-hint" style="margin-top:8px">
+        This file replaces the video's audio entirely — video and this audio file are muxed together
+        as-is.
+      </div>
+    </div>
+  </div>
+
+  <div class="slbl">Audio Track Selection</div>
+  <div class="card" id="embeddedAudioCard" style="display:none">
+    <div id="audioTrackList" class="detected">Load a file to detect audio tracks</div>
+  </div>
+
+  <div class="slbl">Subtitle Track Selection</div>
+  <div class="card">
+    <div id="subtitleTrackList" class="detected">Load a file to detect subtitle tracks (if any)</div>
+    <div class="warn-box" style="margin-top:8px">
+      Subtitle tracks are passed through as-is — ffmpeg has no filter capability to color-convert or
+      re-crop subtitle image data, so if you crop the video and keep a bitmap subtitle track
+      (PGS/VobSub), it may appear vertically misaligned against the new frame. Text-based subtitles
+      (SRT/ASS) aren't affected the same way, since players position them relative to frame bounds
+      dynamically rather than using embedded pixel coordinates.
+    </div>
+  </div>
+
+  <div class="slbl">Black Bar Crop Detection</div>
+  <div class="card">
+    <button class="btn-detect" onclick="runCropDetect()">Detect Crop (samples across the video, like HandBrake)</button>
+    <div id="cropResult" class="detected" style="margin-top:10px"></div>
+    <div class="row" style="margin-top:10px">
+      <div class="field"><label>Crop W</label><input type="number" id="cropW"></div>
+      <div class="field"><label>Crop H</label><input type="number" id="cropH"></div>
+      <div class="field"><label>Crop X</label><input type="number" id="cropX"></div>
+      <div class="field"><label>Crop Y</label><input type="number" id="cropY"></div>
+    </div>
+    <div class="ti on" id="tog-crop" onclick="toggle(this)"><div class="sw"></div><div class="ti-txt">Apply crop (leave off to encode full frame with detected values shown for reference only)</div></div>
+    <div class="path-hint" style="margin-top:8px">
+      GPU-accelerated decode for detection samples — applies to both crop detection and brightness
+      analysis. cropdetect/signalstats themselves have no GPU version for any vendor (confirmed
+      directly against ffmpeg's own filter list), but the decode step feeding them can be offloaded,
+      meaningfully cutting CPU load for these specific ~2-minute samples. Doesn't run concurrently
+      with an active encode the way the scenario that caused an earlier NVIDIA driver crash did, so
+      NVIDIA defaults on here specifically — that's a different situation from the encode-time
+      hwdecode toggle above, which stays off by default. Only one can be active at a time (ffmpeg
+      takes a single decode method per run), so picking one turns the others off.
+    </div>
+    <div class="ti on" id="tog-gpu-detect-nvidia" onclick="selectDetectionGpu('nvidia')" style="margin-top:8px"><div class="sw"></div><div class="ti-txt">NVIDIA (CUDA) — ON by default.</div></div>
+    <div class="ti" id="tog-gpu-detect-intel" onclick="selectDetectionGpu('intel')" style="margin-top:8px"><div class="sw"></div><div class="ti-txt">Intel (QSV) — OFF by default. No confirmed crash history with this path in this build, but also not directly tested, so left off until you've verified it's stable on your specific hardware.</div></div>
+    <div class="ti" id="tog-gpu-detect-amd" onclick="selectDetectionGpu('amd')" style="margin-top:8px"><div class="sw"></div><div class="ti-txt">AMD (via D3D11VA — AMF itself is an encoder interface, not a decode method, so this is the correct real path for AMD specifically) — OFF by default, same reasoning as Intel above.</div></div>
+  </div>
+
+  <div class="slbl">SDR → HDR10 Expansion</div>
+  <div class="card">
+    <div class="ti on" id="tog-hdr" onclick="toggle(this)"><div class="sw"></div><div class="ti-txt">Expand SDR source to HDR10 (BT.2020 / PQ) — ON by default</div></div>
+    <div class="warn-box">
+      <strong>Honest limit:</strong> this is real, working color expansion (highlight gamma + saturation boost
+      into a wider BT.2020/PQ container, verified to produce valid HDR10 metadata) — but it is <em>not</em>
+      equivalent to manual grading in DaVinci Resolve's Color page. This is an automated approximation, not a
+      recreation of what DaVinci's Inverse DRT + Color Space Transform node workflow achieves. For the best
+      possible result, that manual workflow is still the better tool — this is the automatable version for
+      when that's not practical.
+    </div>
+    <div class="row" style="margin-top:10px">
+      <div class="field"><label>Highlight Gamma <span class="va" id="hdrGammaVal">1.15</span></label>
+        <input type="range" id="hdrGammaSlider" min="1.0" max="1.5" step="0.05" value="1.15" oninput="document.getElementById('hdrGammaVal').textContent=this.value">
+      </div>
+      <div class="field"><label>Saturation Boost <span class="va" id="hdrSatVal">1.25</span></label>
+        <input type="range" id="hdrSatSlider" min="1.0" max="1.6" step="0.05" value="1.25" oninput="document.getElementById('hdrSatVal').textContent=this.value">
+      </div>
+      <div class="field"><label>Brightness Reference (nits) <span class="va" id="hdrRefVal">150</span></label>
+        <input type="range" id="hdrRefSlider" min="100" max="255" step="10" value="150" oninput="document.getElementById('hdrRefVal').textContent=this.value">
+      </div>
+      <div class="field"><label>Target Peak (nits) <span class="va" id="hdrPeakVal">1000</span> — HDR10 metadata ceiling only</label>
+        <input type="range" id="hdrPeakSlider" min="400" max="4000" step="100" value="1000" oninput="document.getElementById('hdrPeakVal').textContent=this.value">
+      </div>
+    </div>
+    <button class="btn-detect" onclick="runBrightnessAnalysis()" style="margin-top:10px">Analyze Source Brightness (finds real headroom, calibrates a safe ceiling for THIS content)</button>
+    <div id="brightnessAnalysisResult" class="detected" style="margin-top:10px"></div>
+    <div class="path-hint" style="margin-top:8px">
+      <strong>Brightness Reference</strong> is the real control for how bright the actual output looks —
+      not the Target Peak slider above, which only writes metadata. Default (150) is safe for
+      worst-case content (pure, fully-saturated colors). Real footage rarely reaches that extreme —
+      "Analyze Source Brightness" samples this specific file's actual peak brightness and empirically
+      finds a calibrated, safe ceiling for it directly (the same test-then-trust method used throughout
+      this tool), which is often meaningfully higher than the generic default.
+    </div>
+    <div class="ti" id="tog-444-intermediate" onclick="toggle(this)" style="margin-top:10px"><div class="sw"></div><div class="ti-txt">Process HDR expansion in 4:4:4, output stays whatever the encoder normally uses — OFF by default. Researched directly: applying a nonlinear transfer function (exactly what the PQ/HDR conversion above does) to already-subsampled 4:2:0 chroma reconstructs measurably differently than applying it at full chroma resolution first — most noticeable in saturated colors, which this source's own saturation boost specifically pushes toward. Upsamples to 4:4:4 before the gamma/saturation/PQ conversion, downsamples back afterward — final file's chroma subsampling is unchanged either way, so this shouldn't affect compatibility or file size meaningfully, just processing precision during the actual color transform.</div></div>
+    <div class="ti" id="tog-444-output" onclick="toggle(this); updateEncoderUI();" style="margin-top:8px"><div class="sw"></div><div class="ti-txt">Output the final file itself in 4:4:4 (experimental) — OFF by default, separate from the option above. Only actually helps if your <em>source</em> has real 4:2:2/4:4:4 chroma detail to begin with — every source discussed in building this tool has been 4:2:0, where this just means a larger file for identical color information. Researched hardware support directly: AMD has no 4:4:4 support in any current GPU as of the RX 7900 series — genuinely unsupported, not just untested. NVIDIA needs GTX 16-series or newer; Intel needs 10th Gen Ice Lake or newer — older cards on either will fail outright. libx265 (CPU) supports 4:4:4 fully regardless of hardware generation, confirmed directly against its own supported pixel format list.</div></div>
+    <div class="warn-box" id="tog444Warning" style="margin-top:8px;display:none"></div>
+  </div>
+
+  <div class="slbl">Smoothing / Sharpening</div>
+  <div class="card">
+    <div class="ti" id="tog-denoise" onclick="toggle(this)"><div class="sw"></div><div class="ti-txt">Minimal smoothing (hqdn3d) — OFF by default. Turned off after a real report of visible softness on a heavily-grained film (Blade Runner 2049) resembling streaming-service processing — temporal denoising specifically is well-documented to smooth frame-to-frame-uncorrelated film grain, which is exactly the deliberate texture a film like this relies on. Worth enabling only for genuinely noisy/low-quality sources where grain isn't an intentional part of the look.</div></div>
+    <div class="ti" id="tog-sharpen" onclick="toggle(this)"><div class="sw"></div><div class="ti-txt">Minimal sharpening (unsharp) — OFF by default. Turned off alongside denoise — measured directly that this filter increases output file size versus the untouched source (adding artificial edge-enhancement complexity rather than restoring real detail), which is the same kind of over-processed signature as the softness report above, just from the opposite direction.</div></div>
+    <div class="path-hint" style="margin-top:8px">
+      If used together, smoothing runs first, then sharpening — so sharpening enhances real detail
+      rather than amplifying noise/artifacts the smoothing would otherwise remove.
+    </div>
+  </div>
+
+  <div class="slbl">Framerate Conversion</div>
+  <div class="card">
+    <div class="ti on" id="tog-video-fps" onclick="toggle(this)"><div class="sw"></div><div class="ti-txt">Convert framerate (e.g. 23.976→24fps) — ON by default, since this matches the workflow described for this tool. Turn off if this specific source doesn't need it.</div></div>
+    <div class="row" style="margin-top:10px">
+      <div class="field"><label>Target FPS</label>
+        <select id="targetFpsSelect">
+          <option value="23.976">23.976</option>
+          <option value="24" selected>24</option>
+          <option value="25">25</option>
+          <option value="29.97">29.97</option>
+          <option value="30">30</option>
+          <option value="59.94">59.94</option>
+          <option value="60">60</option>
+        </select>
+      </div>
+    </div>
+    <div class="warn-box">
+      If you're also converting audio for this file, use the same target framerate in the audio tool's
+      Framerate Sync Correction — otherwise video and audio will drift out of sync with each other.
+    </div>
+  </div>
+
+  <div class="slbl">Chapters</div>
+  <div class="card">
+    <div class="ti on" id="tog-chapters" onclick="toggle(this)"><div class="sw"></div><div class="ti-txt">Passthrough chapters — ON by default. Copies chapter markers from the source into the output. Framerate conversion doesn't require any chapter timestamp adjustment — confirmed directly that it preserves real-time duration rather than changing playback speed, so original chapter times remain accurate as-is.</div></div>
+  </div>
+
+  <div class="slbl">Encoder</div>
+  <div class="card">
+    <div class="ti on" id="tog-external-encoders" onclick="toggle(this); updateEncoderUI();"><div class="sw"></div><div class="ti-txt">Enable external encoder tools (NVEncC/QSVEncC/VCEEncC) — ON by default. These are separate downloads, not part of ffmpeg. Only useful if you actually have the matching hardware (NVIDIA/Intel/AMD) and have downloaded the tool for it — see the note below for where; turn this off if you don't.</div></div>
+    <div class="row" style="margin-top:10px">
+      <div class="field"><label>Video Encoder</label>
+        <select id="encoderSelect" onchange="updateEncoderUI()">
+          <option value="libx265">libx265 (CPU, slower, complete HDR10 metadata)</option>
+          <option value="hevc_nvenc">hevc_nvenc via ffmpeg (NVIDIA GPU, fast, incomplete HDR10 metadata)</option>
+          <option value="hevc_qsv">hevc_qsv via ffmpeg (Intel Quick Sync, HDR10 metadata via -qsv_params)</option>
+          <option value="hevc_amf">hevc_amf via ffmpeg (AMD GPU, HDR10 metadata via -mastering_display)</option>
+          <option value="nvencc" class="ext-encoder-opt" selected>NVEncC (external, NVIDIA GPU, complete HDR10 metadata)</option>
+          <option value="qsvencc" class="ext-encoder-opt">QSVEncC (external, Intel GPU/iGPU, complete HDR10 metadata)</option>
+          <option value="vceencc" class="ext-encoder-opt">VCEEncC (external, AMD GPU, complete HDR10 metadata)</option>
+        </select>
+      </div>
+      <div class="field"><label>Quality (CRF/CQ, lower = better)</label>
+        <input type="number" id="crfInput" value="15" min="0" max="51">
+      </div>
+    </div>
+    <div class="path-hint" style="margin-top:8px">
+      Default lowered from 18 to 15 after a real report of visible softness on a heavily-grained
+      film — researched this directly: NVENC hardware encoding has no real equivalent to x265's
+      grain-preserving psycho-visual tuning (confirmed by multiple user reports on NVEnc's own
+      GitHub describing this exact complaint), and adaptive quantization actually reallocates bits
+      <em>away</em> from detailed/textured regions toward flat ones, so it isn't a fix here either.
+      More bits via a lower CRF is the one lever that reliably helps across every encoder — this
+      will produce noticeably larger files in exchange for that.
+    </div>
+    <div class="path-hint" style="margin-top:10px">
+      GPU-accelerated decode during the actual encode (separate from the detection-sampling toggles
+      above) — moves video decoding onto the GPU to reduce CPU load, which may be the actual
+      bottleneck if your GPU sits well under 100% during encodes. The color/HDR filtering itself
+      stays on CPU either way, unchanged and unaffected. Confirmed by direct testing: NVIDIA off is
+      stable, on correlated with a real system crash (bugcheck 0xA, IRQL_NOT_LESS_OR_EQUAL) during
+      NVEncC encoding — likely from running concurrent CUDA decode and NVENC encode on the same GPU
+      while a driver-level bug exists. That's the opposite situation from the detection toggles
+      above (which don't run concurrently with an active encode at all), so all three default off
+      here regardless of vendor. Only one can be active at a time. Worth retrying NVIDIA after a
+      driver update if you want the CPU headroom back.
+    </div>
+    <div class="ti" id="tog-hwdecode-nvidia" onclick="selectEncodeGpu('nvidia')" style="margin-top:8px"><div class="sw"></div><div class="ti-txt">NVIDIA (CUDA) — OFF by default. Confirmed crash correlation, see above.</div></div>
+    <div class="ti" id="tog-hwdecode-intel" onclick="selectEncodeGpu('intel')" style="margin-top:8px"><div class="sw"></div><div class="ti-txt">Intel (QSV) — OFF by default. No confirmed crash history with this path, but also not directly tested here — worth verifying stability on your specific hardware before relying on it.</div></div>
+    <div class="ti" id="tog-hwdecode-amd" onclick="selectEncodeGpu('amd')" style="margin-top:8px"><div class="sw"></div><div class="ti-txt">AMD (via D3D11VA — the same real decode path used for AMD detection above) — OFF by default, same reasoning as Intel.</div></div>
+    <div class="warn-box" id="hwdecodeWarning" style="margin-top:8px;display:none">
+      <strong>Genuinely unverified — more so than anything else in this tool.</strong> I have no NVIDIA GPU
+      available to test this from where I build these fixes; even the basic command structure fails to
+      validate without real hardware present, so I can't confirm the syntax is even correct, not just the
+      speed benefit. <strong>Test this on a short clip first</strong> before trusting it on a full movie —
+      if it fails, the full error panel will show exactly why, and turning this off returns you to the
+      already-validated CPU decode path with zero other changes.
+    </div>
+    <div class="ti" id="tog-libplacebo" onclick="toggle(this); updateEncoderUI();" style="margin-top:10px"><div class="sw"></div><div class="ti-txt">GPU color/HDR processing via libplacebo (experimental) — OFF by default. Replaces the validated eq/zscale color pipeline with libplacebo's inverse_tonemapping, which is genuinely faster and scene-adaptive. Direct testing traced the corruption seen previously to the inverse-tonemapping path specifically — not the rest of the pipeline, and not the choice of curve (bt2446a and the library default produced identical corrupted output; disabling only inverse mode restored correct colors). Switched to the "spline" curve, the one a real user report found actually usable for inverse mode after finding bt2446a "insanely crushed" there specifically. Testing here is limited to a software Vulkan renderer that Mesa's own maintainers label "not a conformant Vulkan implementation, testing use only" — genuinely unclear whether the remaining corruption is specific to that non-conformant renderer or a real libplacebo limitation on actual hardware. Worth testing directly on your GPU and comparing against the default pipeline before trusting it for real output.</div></div>
+    <div class="warn-box" id="libplaceboWarning" style="margin-top:8px;display:none">
+      <strong>Tested directly and found broken, not just unverified.</strong> On both flat and gradient test
+      content, saturated reds and blues bled heavily toward white — a pure red gradient showed its green
+      channel climbing to full saturation at higher brightness, exceeding red itself. Tried disabling
+      automatic desaturation, switching to hard per-channel gamut clipping, and forcing per-channel
+      tonemapping mode — none of the three changed the output at all. This could be a real limitation of
+      the filter, or specific to the software Vulkan driver I was forced to test with (no real GPU
+      available here) — I can't tell which from this environment. If you try this on your real hardware
+      and the result looks visibly wrong (washed-out or shifted colors, especially in bright areas),
+      that's very likely this exact issue, not something new — turn it off and you're back to the
+      validated pipeline. Full raw output from both ffmpeg and the encoder appears below on any failure —
+      please send that back if you want me to dig further.
+    </div>
+    <div id="nvencPathSection" style="display:none;margin-top:8px">
+      <label>NVEncC Path</label>
+      <input type="text" id="nvencPath" placeholder="Path to NVEncC64.exe" value="C:\Users\Angel\Documents\Aviutl_NVEnc_9.29\exe_files\NVEncC\x64\NVEncC64.exe">
+      <div class="path-hint" style="margin-top:8px">
+        <strong>For NVIDIA GPUs.</strong> Download: <strong>github.com/rigaya/NVEnc/releases</strong> — get the
+        latest release, download the zip for Windows x64. The exe inside is named
+        <strong>NVEncC64.exe</strong> (confirmed directly — this exact filename shows up consistently across
+        the tool's own docs and real user reports). Extract it anywhere and either put that path here, or
+        add its folder to your system PATH and leave the field as just <strong>NVEncC64.exe</strong>.
+      </div>
+    </div>
+    <div id="qsvencPathSection" style="display:none;margin-top:8px">
+      <label>QSVEncC Path</label>
+      <input type="text" id="qsvencPath" placeholder="Path to QSVEncC64.exe" value="QSVEncC64.exe">
+      <div class="path-hint" style="margin-top:8px">
+        <strong>For Intel GPUs — this is what actually runs on Intel integrated graphics (iGPU) on most
+        systems, not a separate thing from QSV.</strong> Download: <strong>github.com/rigaya/QSVEnc/releases</strong>
+        — Windows x64 zip. Expected exe name: <strong>QSVEncC64.exe</strong> (same author, same consistent
+        naming convention as NVEncC — not independently confirmed the way NVEncC64.exe was, so double-check
+        the exact name inside the zip you download in case a release changes it).
+      </div>
+    </div>
+    <div id="vceencPathSection" style="display:none;margin-top:8px">
+      <label>VCEEncC Path</label>
+      <input type="text" id="vceencPath" placeholder="Path to VCEEncC64.exe" value="VCEEncC64.exe">
+      <div class="path-hint" style="margin-top:8px">
+        <strong>For AMD GPUs.</strong> Download: <strong>github.com/rigaya/VCEEnc/releases</strong> — Windows
+        x64 zip. Expected exe name: <strong>VCEEncC64.exe</strong> (same naming convention as the other two
+        — verify against what's actually inside the zip you get, same caveat as QSVEncC).
+      </div>
+    </div>
+    <div class="warn-box" id="nvencWarning" style="margin-top:8px;display:none">
+      <strong>NVENC HDR10 metadata is incomplete when run through ffmpeg directly</strong> — confirmed:
+      this build's hevc_nvenc rejects the mastering-display/max-cll flags outright, and it's not
+      build-specific — ffmpeg's NVENC wrapper reads this data from frame side-data that nothing in a
+      plain SDR→HDR pipeline provides, not from CLI flags. Still gets correct color space signaling
+      (primaries/transfer/matrix), just not the detailed metadata. For complete HDR10 metadata at GPU
+      speed, enable external encoders above and use NVEncC instead — genuine, working native support.
+      libx265 also has complete metadata, just CPU-speed.
+    </div>
+    <div class="warn-box" id="qsvWarning" style="margin-top:8px;display:none">
+      <strong>hevc_qsv's HDR10 support looks genuinely more complete than NVENC's</strong> — unlike
+      NVENC, Intel's own engineers added -qsv_params support for master-display/max-cll directly (a
+      real, merged ffmpeg patch), and a real, confirmed example shows actual working HDR10 metadata in
+      real output. This tool sends that flag automatically when HDR is on. I can't verify it works on
+      your exact build from here — if it fails, the full error panel will show why, and QSVEncC
+      (external tool, enable above) is the fallback with guaranteed-complete metadata.
+    </div>
+    <div class="warn-box" id="amfWarning" style="margin-top:8px;display:none">
+      <strong>hevc_amf's HDR10 metadata uses -mastering_display/-content_light</strong> — documented
+      directly on AMD's own GitHub wiki with a complete working example. I could not verify this
+      against your exact build — my own test environment's ffmpeg doesn't have AMF support compiled
+      in, so I can't confirm these flags are recognized the way the NVENC ones turned out not to be.
+      If it fails, the full error panel will show why, and VCEEncC (external tool, enable above) is
+      the fallback with guaranteed-complete metadata.
+    </div>
+  </div>
+
+  <div class="slbl">Duration Correction</div>
+  <div class="card">
+    <div class="ti" id="tog-duration-fix" onclick="toggle(this); updateDurationFixUI();"><div class="sw"></div><div class="ti-txt">Correct audio to match the video's real duration — OFF by default. Different problem than Framerate Sync above: some source audio streams decode to measurably less (or more) actual content than the video's true runtime, a property of how the source was originally encoded — confirmed via direct sample-count testing on a genuine AC3 file in the audio converter tool this was ported from. This tool already knows the video's real duration automatically, so unlike that standalone tool, there's no manual ffprobe/paste step — just compares the selected track's own decoded length against it.</div></div>
+    <div id="durationFixSection" style="display:none;margin-top:10px">
+      <div class="info-box" id="durationFixInfo">Select an audio track above to auto-detect its actual decoded duration.</div>
+    </div>
+  </div>
+
+  <div class="slbl">Audio Delay / Offset</div>
+  <div class="card">
+    <div class="ti" id="tog-audio-delay" onclick="toggle(this); updateAudioDelayUI();"><div class="sw"></div><div class="ti-txt">Shift the audio track by a fixed amount — OFF by default. For source files where audio consistently arrives early/late by roughly the same amount throughout (the AC3 offset issue diagnosed in the audio converter tool applies here too, if this video's audio track has the same source characteristics).</div></div>
+    <div id="audioDelaySection" style="display:none;margin-top:10px">
+      <div class="path-hint">
+        <strong>Positive value</strong> = delay audio (pad start with silence) — use when audio arrives too early.
+        <strong>Negative value</strong> = trim from the start — use when audio arrives too late.
+      </div>
+      <div class="row" style="margin-top:10px">
+        <div class="field">
+          <label>Offset (seconds) <span class="va" id="audioDelayVal">0.000s</span></label>
+          <input type="text" id="audioDelayInput" placeholder="e.g. 2.5 or -1.5" oninput="updateAudioDelayInfo()">
+        </div>
+      </div>
+      <div class="info-box" id="audioDelayInfo"></div>
+      <div class="warn-box" style="margin-top:8px">
+        Applying this requires re-encoding audio (a filter can't run on a stream-copied track) —
+        switches from passthrough to a lossless intermediate automatically when this is on, then
+        re-encodes back to the source track's own original codec for the final output, so it still
+        looks like passthrough rather than an obviously different, larger file.
+      </div>
+    </div>
+  </div>
+
+  <div class="slbl">Output</div>
+  <div class="card">
+    <label>FFmpeg Path</label>
+    <input type="text" id="ffmpegPath" value="C:\Users\Angel\Documents\ffmpeg-8.0.1-full_build\bin\ffmpeg.exe">
+    <div class="row" style="margin-top:10px">
+      <div class="field">
+        <label>Container</label>
+        <select id="containerSelect" onchange="renderTrackLists(detectedVideoStreams, detectedAudioStreams, detectedSubtitleStreams); updateContainerWarning();">
+          <option value="mkv" selected>MKV (Matroska — broadest codec support)</option>
+          <option value="mp4">MP4</option>
+          <option value="mov">MOV</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Output File</label>
+        <input type="text" id="outPath" placeholder="Leave blank — saves alongside source, tagged HDR10">
+      </div>
+    </div>
+    <div class="warn-box" id="containerVorbisWarning" style="margin-top:10px;display:none">
+      Integrated Engine mode always outputs Vorbis audio, and MP4/MOV have no real, standard tag for
+      it — confirmed directly: ffmpeg mux this as generic <code>mp4a</code> (normally meaning AAC),
+      which many players strictly expect to actually be AAC and may fail to play correctly, even
+      though ffmpeg itself handles it fine. MKV supports Vorbis natively with no such issue —
+      switching back is the safer choice unless you have a specific reason MP4/MOV is required here.
+    </div>
+  </div>
+
+  <div class="slbl">Encode Queue</div>
+  <div class="card">
+    <div class="row">
+      <button class="btn-detect" id="addQueueBtn" onclick="addToQueue()" style="flex:1" disabled>+ Add Current Settings to Queue</button>
+      <button class="btn-detect" onclick="startQueue()" style="flex:1;border-color:var(--green);color:var(--green)">▶ Start Queue</button>
+      <button class="btn-detect" id="stopBtn" onclick="stopCurrent()" style="flex:1;border-color:var(--red);color:var(--red)" disabled>■ Stop Current</button>
+    </div>
+    <div id="queueList" style="margin-top:12px"></div>
+  </div>
+
+  <div class="progress-wrap" id="progressWrap">
+    <div id="overallProgressBlock" style="display:none;margin-bottom:12px;">
+      <div style="font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Overall — <span id="overallStageLabel">Step 1/3</span></div>
+      <div class="progress-bar-bg"><div class="progress-bar-fill" id="overallProgressFill" style="background:linear-gradient(90deg,var(--purple),var(--accent));"></div></div>
+      <div class="progress-stats">
+        <span id="overallProgressPercent">0%</span>
+        <span id="overallElapsed">Elapsed: 0m 0s</span>
+        <span id="overallEta">Total ETA: —</span>
+      </div>
+    </div>
+    <div style="font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Current Stage</div>
+    <div class="progress-bar-bg"><div class="progress-bar-fill" id="progressFill"></div></div>
+    <div class="progress-stats">
+      <span id="progressPercent">0%</span>
+      <span id="progressSpeed"></span>
+      <span id="progressEta">ETA: —</span>
+    </div>
+  </div>
+
+  <div id="statusMsg" style="margin-top:14px;font-size:.8rem;color:var(--muted)"></div>
+  <div id="fullErrorOutput" style="display:none;margin-top:10px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+      <span style="font-size:.7rem;color:var(--red);text-transform:uppercase;letter-spacing:.05em;">Full ffmpeg output</span>
+      <button class="btn-detect" onclick="copyFullError()" style="padding:4px 10px;font-size:.68rem;">Copy</button>
+    </div>
+    <pre style="background:#161c2a;border:1px solid rgba(255,92,122,.3);border-radius:8px;padding:12px;font-size:.7rem;line-height:1.5;max-height:300px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;color:var(--text);"></pre>
+  </div>
+
+<script>
+let filePath = '';
+let videoDuration = 0;
+let detectedSourceFps = null;
+let detectedAudioTrackDuration = null;
+let detectedCrop = null;
+
+function toggle(el){ el.classList.toggle('on'); }
+
+// Only one GPU decode method can be active per ffmpeg run — clicking one
+// vendor toggle turns the other two off, rather than allowing an invalid
+// combination of simultaneous -hwaccel flags.
+function selectDetectionGpu(vendor){
+  const ids = { nvidia: 'tog-gpu-detect-nvidia', intel: 'tog-gpu-detect-intel', amd: 'tog-gpu-detect-amd' };
+  const clicked = document.getElementById(ids[vendor]);
+  const wasOn = clicked.classList.contains('on');
+  Object.values(ids).forEach(id => document.getElementById(id).classList.remove('on'));
+  if (!wasOn) clicked.classList.add('on'); // clicking an already-on toggle turns everything off (no GPU decode)
+}
+
+function getSelectedDetectionGpuVendor(){
+  if (document.getElementById('tog-gpu-detect-nvidia').classList.contains('on')) return 'nvidia';
+  if (document.getElementById('tog-gpu-detect-intel').classList.contains('on')) return 'intel';
+  if (document.getElementById('tog-gpu-detect-amd').classList.contains('on')) return 'amd';
+  return null;
+}
+
+// Same mutual-exclusivity pattern as detection GPU selection, but tracked
+// separately — encode-time and detection-time GPU decode are genuinely
+// different situations (concurrent-with-encode vs not), so one being on
+// doesn't imply anything about the other.
+function selectEncodeGpu(vendor){
+  const ids = { nvidia: 'tog-hwdecode-nvidia', intel: 'tog-hwdecode-intel', amd: 'tog-hwdecode-amd' };
+  const clicked = document.getElementById(ids[vendor]);
+  const wasOn = clicked.classList.contains('on');
+  Object.values(ids).forEach(id => document.getElementById(id).classList.remove('on'));
+  if (!wasOn) clicked.classList.add('on');
+  updateEncoderUI();
+}
+
+function getSelectedEncodeGpuVendor(){
+  if (document.getElementById('tog-hwdecode-nvidia').classList.contains('on')) return 'nvidia';
+  if (document.getElementById('tog-hwdecode-intel').classList.contains('on')) return 'intel';
+  if (document.getElementById('tog-hwdecode-amd').classList.contains('on')) return 'amd';
+  return null;
+}
+function isOn(id){ return document.getElementById(id).classList.contains('on'); }
+
+function handleDragOver(event){
+  event.preventDefault();
+  event.stopPropagation();
+  document.getElementById('dropZone').classList.add('drag-active');
+}
+
+function handleDragLeave(event){
+  event.preventDefault();
+  event.stopPropagation();
+  document.getElementById('dropZone').classList.remove('drag-active');
+}
+
+function handleDrop(event){
+  event.preventDefault();
+  event.stopPropagation();
+  document.getElementById('dropZone').classList.remove('drag-active');
+  const files = event.dataTransfer.files;
+  if (files && files.length > 0){
+    loadFile(files[0]); // same File object type and path-resolution as the file-input path
+  }
+}
+
+function loadFile(f){
+  if (!f) return;
+  filePath = window.electronAPI?.getPath?.(f) || f.path || f.name;
+  document.getElementById('fileInfo').style.display = 'block';
+  document.getElementById('fileInfo').innerHTML = `<strong>${f.name}</strong><br><span style="color:var(--muted);font-size:.75rem">${filePath}</span>`;
+  // Confirmed via a real report: a "Load a file first" error from an
+  // earlier click (before any file was loaded) stayed visible even after
+  // a file was subsequently loaded successfully — nothing cleared it,
+  // so it looked like a live error on a fully-loaded, ready file.
+  setStatus('', '');
+  // Belt-and-suspenders on top of that: disabling the button until a file
+  // is actually loaded means this can't happen at all going forward,
+  // regardless of whether the status-clearing above covers every path.
+  document.getElementById('addQueueBtn').disabled = false;
+  detectQuality();
+}
+
+let lastAudioLabel = '';
+let lastVideoStreams = [];
+let lastAudioStreams = [];
+
+async function detectQuality(){
+  const display = document.getElementById('qualityDisplay');
+  if (!window.electronAPI?.getVideoInfo){ display.textContent = 'Video info detection unavailable outside Electron'; return; }
+  const ffmpeg = document.getElementById('ffmpegPath').value.trim();
+  const result = await window.electronAPI.getVideoInfo({ ffmpeg, filePath });
+  if (result.error){ display.innerHTML = `<span style="color:var(--red)">Detection failed: ${result.error}</span>`; return; }
+
+  videoDuration = result.duration || 0;
+  lastAudioLabel = {2:'Stereo',6:'5.1',8:'7.1'}[result.audioChannels] || (result.audioChannels ? result.audioChannels+'ch' : 'unknown');
+  lastVideoStreams = result.videoStreams || [];
+
+  updateQualityDisplay(lastVideoStreams[0]); // first track by default — reactively updated later if the user picks a different one
+
+  renderTrackLists(result.videoStreams || [], result.audioStreams || [], result.subtitleStreams || []);
+
+  // Confirmed via a real report: "Integrated Engine" mode (built for
+  // downmixing multichannel audio) was left selected against a source
+  // whose only track was stereo, correctly refusing to run but only
+  // after a confusing round of debugging to discover why. Auto-pick the
+  // mode that actually fits this file's audio instead of leaving
+  // whatever was selected for a previous, different file — multichannel
+  // available anywhere means Integrated Engine is genuinely useful, so
+  // default there; stereo/mono-only means Embedded Track is the only
+  // mode that makes sense, so default there instead.
+  const audioStreams = result.audioStreams || [];
+  lastAudioStreams = audioStreams;
+  const hasMultichannel = audioStreams.some(s => (s.channels || 0) >= 6);
+  const audioModeSelect = document.getElementById('audioModeSelect');
+  audioModeSelect.value = hasMultichannel ? 'integrated' : 'embedded';
+  updateAudioModeUI();
+
+  // Round to the nearest whole-number fps, generically, for ANY detected
+  // rate — not just the handful of known NTSC-style fractions. Confirmed
+  // via a real report: the previous version only handled three hardcoded
+  // cases (23.976, 59.94, 29.97) and silently left the dropdown at its
+  // HTML default of 24 for anything else — so a clean 50.000fps source
+  // got converted down to 24fps instead of being left at (or rounded to)
+  // its own rate, with no warning that this had happened.
+  if (detectedSourceFps != null){
+    const fpsTargetSelect = document.getElementById('targetFpsSelect');
+    const rounded = Math.round(detectedSourceFps);
+    const roundedStr = String(rounded);
+    if (!Array.from(fpsTargetSelect.options).some(o => o.value === roundedStr)){
+      const opt = document.createElement('option');
+      opt.value = roundedStr;
+      opt.textContent = roundedStr;
+      fpsTargetSelect.appendChild(opt);
+    }
+    fpsTargetSelect.value = roundedStr;
+  }
+
+  // Auto-run crop and brightness detection on load rather than waiting for
+  // the manual buttons — not awaited HERE, so the rest of this function's
+  // UI updates land immediately instead of waiting on these (each samples
+  // across the whole video, so takes a few seconds). The manual buttons
+  // still work unchanged for a forced re-check. Tracked in
+  // pendingDetections so addToQueue can wait for these specifically —
+  // confirmed via a real report: starting an encode while these were
+  // still reading the same file in the background could make detection
+  // come back empty, two ffmpeg processes competing for the same file's
+  // disk I/O at once.
+  pendingDetections.push(runCropDetect());
+  pendingDetections.push(runBrightnessAnalysis());
+}
+
+// Rebuilds the "Detected Source Quality" line for a SPECIFIC video track —
+// called both on initial load (first track) and whenever the user picks a
+// different track (onVideoTrackChange), so this line never shows stale
+// info from a track that isn't actually the one being processed.
+function updateQualityDisplay(track){
+  const display = document.getElementById('qualityDisplay');
+  if (!track){ return; }
+  const fps = track.frameRate ? (eval(track.frameRate)).toFixed(3) : '?';
+  detectedSourceFps = track.frameRate ? eval(track.frameRate) : null;
+  const isHDR = track.colorTransfer === 'smpte2084' || track.colorTransfer === 'arib-std-b67';
+  display.innerHTML = `<strong>${track.width}×${track.height}</strong> @ <strong>${fps}fps</strong> · `
+    + `Audio: <strong>${lastAudioLabel}</strong> · `
+    + `Source: <strong style="color:${isHDR ? 'var(--green)' : 'var(--yellow)'}">${isHDR ? 'Already HDR' : 'SDR'}</strong> · `
+    + `Duration: <strong>${(videoDuration/60).toFixed(1)} min</strong>`;
+}
+
+const LANGUAGE_NAMES = { eng:'English', jpn:'Japanese', fre:'French', fra:'French', ger:'German', deu:'German',
+  spa:'Spanish', ita:'Italian', por:'Portuguese', rus:'Russian', chi:'Chinese', zho:'Chinese', kor:'Korean',
+  ara:'Arabic', hin:'Hindi', dut:'Dutch', nld:'Dutch', swe:'Swedish', nor:'Norwegian', dan:'Danish',
+  fin:'Finnish', pol:'Polish', tur:'Turkish', und:'Unknown/Unspecified' };
+
+function langName(code){ return LANGUAGE_NAMES[code] || code; }
+
+let detectedVideoStreams = [];
+let detectedAudioStreams = [];
+let detectedSubtitleStreams = [];
+
+function renderTrackLists(videoStreams, audioStreams, subtitleStreams){
+  detectedVideoStreams = videoStreams;
+  detectedAudioStreams = audioStreams;
+  detectedSubtitleStreams = subtitleStreams;
+  const isMkv = document.getElementById('containerSelect').value === 'mkv';
+
+  const videoEl = document.getElementById('videoTrackList');
+  const videoHint = document.getElementById('videoTrackHint');
+  if (videoStreams.length === 0){
+    videoEl.innerHTML = '<span style="color:var(--muted)">No video tracks detected.</span>';
+  } else if (videoStreams.length === 1){
+    const s = videoStreams[0];
+    const isHDR = s.colorTransfer === 'smpte2084' || s.colorTransfer === 'arib-std-b67';
+    videoEl.innerHTML = `${s.title ? s.title + ' — ' : ''}${s.width}×${s.height} · ${s.codec.toUpperCase()} · `
+      + `<span style="color:${isHDR ? 'var(--green)' : 'var(--yellow)'}">${isHDR ? 'HDR' : 'SDR'}</span>`;
+    videoHint.textContent = '';
+  } else {
+    videoEl.innerHTML = videoStreams.map((s, i) => {
+      const isHDR = s.colorTransfer === 'smpte2084' || s.colorTransfer === 'arib-std-b67';
+      const label = `${s.title ? s.title + ' — ' : ''}${s.width}×${s.height} · ${s.codec.toUpperCase()} · `
+        + `<span style="color:${isHDR ? 'var(--green)' : 'var(--yellow)'}">${isHDR ? 'Already HDR' : 'SDR'}</span>`;
+      return `<label style="display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer;">
+        <input type="radio" name="videoTrackSel" value="${s.index}" data-hdr="${isHDR}" ${i===0?'checked':''} onchange="onVideoTrackChange()">
+        <span>${label}</span>
+      </label>`;
+    }).join('');
+    videoHint.innerHTML = 'Multiple video tracks found — this file has both a pre-existing HDR encode and the original source. '
+      + 'Select whichever one you actually want this tool to process.';
+    onVideoTrackChange();
+  }
+
+  const audioEl = document.getElementById('audioTrackList');
+  if (audioStreams.length === 0){
+    audioEl.innerHTML = '<span style="color:var(--muted)">No audio tracks detected.</span>';
+  } else {
+    audioEl.innerHTML = audioStreams.map((s, i) => {
+      const label = `${s.title ? s.title + ' — ' : ''}${langName(s.language)} · ${s.codec.toUpperCase()} · ${s.channels}ch`;
+      const checkedDefault = i === 0 ? 'checked' : '';
+      return `<label style="display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer;">
+        <input type="radio" name="audioTrackSel" value="${s.index}" data-codec="${s.codec}" ${checkedDefault} onchange="onAudioTrackChange()">
+        <span>${label}</span>
+      </label>`;
+    }).join('');
+  }
+
+  const subEl = document.getElementById('subtitleTrackList');
+  if (subtitleStreams.length === 0){
+    subEl.innerHTML = '<span style="color:var(--muted)">No subtitle tracks detected.</span>';
+  } else {
+    subEl.innerHTML = subtitleStreams.map((s, i) => {
+      const label = `${s.title ? s.title + ' — ' : ''}${langName(s.language)} · ${s.codec}`;
+      const inputType = isMkv ? 'checkbox' : 'radio';
+      return `<label style="display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer;">
+        <input type="${inputType}" name="subtitleTrackSel" value="${s.index}">
+        <span>${label}</span>
+      </label>`;
+    }).join('');
+  }
+
+  const intEl = document.getElementById('integratedTrackList');
+  if (audioStreams.length === 0){
+    intEl.innerHTML = '<span style="color:var(--muted)">No audio tracks detected.</span>';
+  } else {
+    intEl.innerHTML = audioStreams.map((s, i) => {
+      const label = `${s.title ? s.title + ' — ' : ''}${langName(s.language)} · ${s.codec.toUpperCase()} · ${s.channels}ch`
+        + (s.channels < 6 ? ' <span style="color:var(--yellow)">(stereo/mono — will pass through, engine needs 5.1/7.1)</span>' : '');
+      return `<label style="display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer;">
+        <input type="radio" name="integratedTrackSel" value="${s.index}" data-channels="${s.channels}" data-codec="${s.codec}" ${i===0?'checked':''} onchange="onAudioTrackChange()">
+        <span>${label}</span>
+      </label>`;
+    }).join('');
+  }
+
+  // Confirmed via a real report: this ran before the Integrated Engine's
+  // own radio group even existed in the DOM yet (rendered further below),
+  // so its default-checked track never got the AC3 check applied — moved
+  // here, after both radio groups exist, so whichever one the current
+  // audio mode actually uses gets checked correctly on initial load too.
+  onAudioTrackChange();
+}
+
+// Auto-detects AC3 on the SELECTED audio track specifically (not just "any
+// track in the file"), and pre-fills the diagnosed 2.5s offset as a
+// starting suggestion — not a guarantee. Different AC3 sources can have
+// different offsets or none at all; this is a documented starting point
+// for a known-common case, not a blind auto-fix. Clearly flagged in the UI
+// so it's never applied silently without the person seeing why.
+// Re-evaluates the HDR expansion toggle based on whichever video track is
+// ACTUALLY selected, not just the first one ffprobe happened to list. This
+// matters specifically for files like this one — a pre-existing HDR encode
+// sitting alongside the original SDR source as a second track. Picking the
+// SDR track should re-enable HDR expansion even if the file's first track
+// was already HDR (which would otherwise have left the toggle off).
+function onVideoTrackChange(){
+  const selected = document.querySelector('input[name="videoTrackSel"]:checked');
+  if (!selected) return;
+  const isHDR = selected.dataset.hdr === 'true';
+  const hdrToggle = document.getElementById('tog-hdr');
+  if (isHDR){
+    hdrToggle.classList.remove('on');
+  } else {
+    hdrToggle.classList.add('on');
+  }
+  // Also refresh "Detected Source Quality" to reflect THIS track specifically
+  // — it was previously frozen on whichever track loaded first, which could
+  // still say "Already HDR" even after picking the SDR track underneath it.
+  const track = lastVideoStreams.find(t => String(t.index) === selected.value);
+  if (track) updateQualityDisplay(track);
+
+  // Crop and brightness were detected for whatever track was selected
+  // before — re-run for the newly selected one instead of leaving stale
+  // black-bar/brightness values from a different video track on screen.
+  // Each function's own "Detecting..." placeholder text overwrites the
+  // old result immediately, so there's no separate reset step needed.
+  // Tracked in pendingDetections for the same reason as the file-load
+  // trigger — addToQueue waits for these before proceeding.
+  pendingDetections.push(runCropDetect());
+  pendingDetections.push(runBrightnessAnalysis());
+
+  // Duration Correction's target should reflect THIS specific video
+  // track, not just the overall container duration — matters for the
+  // rare multi-video-track file where tracks could genuinely differ.
+  // Reuses the same get-duration handler built for audio track duration
+  // detection, just pointed at the video track's own index instead.
+  detectVideoTrackDuration(selected.value);
+}
+
+async function detectVideoTrackDuration(streamIndex){
+  if (!window.electronAPI?.getDuration || !filePath) return;
+  const ffmpeg = document.getElementById('ffmpegPath').value.trim();
+  const result = await window.electronAPI.getDuration({ ffmpeg, filePath, streamIndex });
+  if (!result.error && result.duration != null){
+    videoDuration = result.duration;
+    updateDurationFixInfo();
+  }
+}
+
+function onAudioTrackChange(){
+  // Both radio groups exist in the DOM at all times regardless of audio
+  // mode (only one section is visually shown), and audioTrackSel ALWAYS
+  // has its first item checked by default — so a simple "try A, fall back
+  // to B" check always matched audioTrackSel's default item and never
+  // actually reached the Integrated Engine's own selection, no matter
+  // what was picked there. Confirmed via a real report this was still
+  // broken after the first fix. Read the actual active mode instead of
+  // guessing via fallback.
+  const audioMode = document.getElementById('audioModeSelect').value;
+  const selectorName = audioMode === 'integrated' ? 'integratedTrackSel' : 'audioTrackSel';
+  const selected = document.querySelector(`input[name="${selectorName}"]:checked`);
+  const hint = document.getElementById('ac3AutoHint');
+  if (!selected) { if (hint) hint.style.display = 'none'; return; }
+  const codec = selected.dataset.codec;
+  let ac3Hint = document.getElementById('ac3AutoHint');
+  if (!ac3Hint){
+    ac3Hint = document.createElement('div');
+    ac3Hint.id = 'ac3AutoHint';
+    ac3Hint.className = 'warn-box';
+    ac3Hint.style.marginTop = '8px';
+    document.getElementById('audioDelaySection').appendChild(ac3Hint);
+  }
+  if (codec === 'ac3'){
+    document.getElementById('tog-audio-delay').classList.add('on');
+    document.getElementById('audioDelaySection').style.display = 'block';
+    if (!document.getElementById('audioDelayInput').value.trim()){
+      document.getElementById('audioDelayInput').value = '2.5';
+      updateAudioDelayInfo();
+    }
+    ac3Hint.style.display = 'block';
+    ac3Hint.innerHTML = '<strong>AC3 track selected</strong> — auto-enabled with 2.5s pre-filled, the value '
+      + 'previously diagnosed for one specific source. This is a starting suggestion, not guaranteed correct '
+      + 'for every AC3 file — verify sync after encoding and adjust the offset if this source differs.';
+  } else {
+    ac3Hint.style.display = 'none';
+  }
+
+  // Same event (track selection change) also drives Duration Correction's
+  // auto-detection — whichever track is now selected gets its own decoded
+  // duration measured fresh, since a different track could have a
+  // different mismatch (or none at all).
+  detectAudioTrackDuration(selected.value);
+}
+
+async function detectAudioTrackDuration(streamIndex){
+  detectedAudioTrackDuration = null;
+  const display = document.getElementById('durationFixInfo');
+  if (!window.electronAPI?.getDuration || !filePath) return;
+  const ffmpeg = document.getElementById('ffmpegPath').value.trim();
+  const result = await window.electronAPI.getDuration({ ffmpeg, filePath, streamIndex });
+  if (result.error || result.duration == null){
+    if (display) display.textContent = 'Could not detect this track\'s actual duration (ffprobe error).';
+    return;
+  }
+  detectedAudioTrackDuration = result.duration;
+  updateDurationFixInfo();
+}
+
+function updateDurationFixUI(){
+  document.getElementById('durationFixSection').style.display = isOn('tog-duration-fix') ? 'block' : 'none';
+  if (isOn('tog-duration-fix')) updateDurationFixInfo();
+}
+
+function updateDurationFixInfo(){
+  const display = document.getElementById('durationFixInfo');
+  if (!display) return;
+  if (detectedAudioTrackDuration == null){
+    display.textContent = 'Select an audio track above to auto-detect its actual decoded duration.';
+    return;
+  }
+  const diff = videoDuration - detectedAudioTrackDuration;
+  if (Math.abs(diff) < 0.05){
+    display.innerHTML = `Selected track: <strong>${detectedAudioTrackDuration.toFixed(6)}s</strong> vs video: <strong>${videoDuration.toFixed(6)}s</strong> — these already match closely, correction likely unnecessary for this track.`;
+  } else {
+    display.innerHTML = `Selected track: <strong>${detectedAudioTrackDuration.toFixed(6)}s</strong> vs video: <strong>${videoDuration.toFixed(6)}s</strong> — off by <strong>${diff.toFixed(3)}s</strong>. Correction will stretch/compress the audio to match the video exactly.`;
+  }
+}
+
+// Shared by any analysis function that needs to target the actual selected
+// video track (crop detection, brightness analysis) rather than whichever
+// stream ffmpeg defaults to — returns null when there's only one track
+// (no radio group rendered), matching the same fallback pattern used for
+// the encode job's own video mapping.
+function getSelectedVideoTrackIndex(){
+  const selected = document.querySelector('input[name="videoTrackSel"]:checked');
+  return selected ? selected.value : null;
+}
+
+// Needed so main.js can pick the correct hwdownload target format
+// (nv12 vs p010le) — confirmed via a real, reproduced failure that
+// hwdownload requires an explicit format matching the actual decoded
+// bit depth, not something that can be safely assumed or omitted.
+function getSelectedVideoTrackPixFmt(){
+  const idx = getSelectedVideoTrackIndex();
+  const track = idx != null
+    ? lastVideoStreams.find(t => String(t.index) === idx)
+    : lastVideoStreams[0];
+  return track ? track.pixFmt : null;
+}
+
+let pendingDetections = [];
+// Confirmed via a real report: switching video tracks right after a file
+// loads could let a slower, stale detection call for the OLD track (e.g.
+// a 4K track needing more I/O to seek/read) finish AFTER a faster,
+// correct detection for the newly-selected track, silently overwriting
+// the right result with the wrong one — no error, just quietly wrong
+// values sitting in the UI. Each call now captures a generation number
+// at start and only applies its result if nothing newer has started
+// since, discarding stale results instead of letting them win a race.
+let cropDetectGeneration = 0;
+let brightnessDetectGeneration = 0;
+
+async function runBrightnessAnalysis(){
+  const resultEl = document.getElementById('brightnessAnalysisResult');
+  if (!filePath){ resultEl.innerHTML = '<span style="color:var(--red)">Load a file first.</span>'; return; }
+  const myGeneration = ++brightnessDetectGeneration;
+  // Kill any still-running previous brightness analysis — the generation
+  // check above stops its result from overwriting this one, but without
+  // this it would keep burning CPU in the background for no reason.
+  await window.electronAPI.killFFmpegJob?.({ jobId: 'brightness-detect' }).catch(() => {});
+  resultEl.textContent = 'Analyzing source brightness... (sampling across the video)';
+  const ffmpeg = document.getElementById('ffmpegPath').value.trim();
+  const videoTrackIndex = getSelectedVideoTrackIndex();
+
+  const analysis = await window.electronAPI.analyzeBrightness({ ffmpeg, filePath, duration: videoDuration, videoTrackIndex, gpuVendor: getSelectedDetectionGpuVendor(), sourcePixFmt: getSelectedVideoTrackPixFmt() });
+  if (myGeneration !== brightnessDetectGeneration) return; // a newer call has since started — discard this stale result
+  if (analysis.error){ resultEl.innerHTML = `<span style="color:var(--red)">${analysis.error}</span>`; return; }
+
+  resultEl.textContent = `Detected peak luma: ${analysis.peakLuma}/255 (${analysis.totalSamples} samples) — calibrating safe ceiling...`;
+
+  const gamma = document.getElementById('hdrGammaSlider').value;
+  const sat = document.getElementById('hdrSatSlider').value;
+  const calibration = await window.electronAPI.calibrateNpl({
+    ffmpeg, peakLuma: analysis.peakLuma, gamma, saturation: sat
+  });
+  if (myGeneration !== brightnessDetectGeneration) return; // check again after the second await
+
+  document.getElementById('hdrRefSlider').value = calibration.safeNpl;
+  document.getElementById('hdrRefVal').textContent = calibration.safeNpl;
+
+  const headroom = calibration.safeNpl - 150;
+  resultEl.innerHTML = `Source peak luma: <strong style="color:var(--accent)">${analysis.peakLuma}/255</strong> `
+    + `(this content never reaches full white — real headroom found). `
+    + `Calibrated safe brightness: <strong style="color:var(--green)">${calibration.safeNpl} nits</strong>`
+    + (headroom > 0 ? ` — ${headroom} more than the generic default, with zero measured clipping risk for this source.` : ' (generic default was already at the safe ceiling for this content).');
+}
+
+async function runCropDetect(){
+  const resultEl = document.getElementById('cropResult');
+  if (!filePath){ resultEl.innerHTML = '<span style="color:var(--red)">Load a file first.</span>'; return; }
+  const myGeneration = ++cropDetectGeneration;
+  await window.electronAPI.killFFmpegJob?.({ jobId: 'crop-detect' }).catch(() => {});
+  resultEl.textContent = 'Detecting... (sampling across the video)';
+  const ffmpeg = document.getElementById('ffmpegPath').value.trim();
+  const videoTrackIndex = getSelectedVideoTrackIndex();
+  const result = await window.electronAPI.detectCrop({ ffmpeg, filePath, duration: videoDuration, videoTrackIndex, gpuVendor: getSelectedDetectionGpuVendor(), sourcePixFmt: getSelectedVideoTrackPixFmt() });
+  if (myGeneration !== cropDetectGeneration) return; // a newer call has since started — discard this stale result
+  if (result.error){
+    // Confirmed via a real report: a failed re-detection (e.g. triggered
+    // by a track change) left the OLD, successful crop values still
+    // sitting in the W/H/X/Y fields while this message said nothing was
+    // detected — genuinely contradictory. Clear the stale fields so a
+    // failure can't look like a completed, valid result.
+    resultEl.innerHTML = `<span style="color:var(--red)">${result.error}</span>`;
+    detectedCrop = null;
+    document.getElementById('cropW').value = '';
+    document.getElementById('cropH').value = '';
+    document.getElementById('cropX').value = '';
+    document.getElementById('cropY').value = '';
+    return;
+  }
+  detectedCrop = result.crop;
+  document.getElementById('cropW').value = result.crop.width;
+  document.getElementById('cropH').value = result.crop.height;
+  document.getElementById('cropX').value = result.crop.x;
+  document.getElementById('cropY').value = result.crop.y;
+  const confPct = (result.confidence*100).toFixed(0);
+  resultEl.innerHTML = `Detected: <strong style="color:var(--accent)">crop=${result.crop.width}:${result.crop.height}:${result.crop.x}:${result.crop.y}</strong> `
+    + `(${confPct}% agreement across ${result.totalSamples} samples)`;
+  if (result.confidence < 0.7){
+    resultEl.innerHTML += `<br><span style="color:var(--yellow)">Lower confidence — check the values look right before applying, this source may have variable framing.</span>`;
+  }
+}
+
+// ── Ported downmix/upmix engine ──────────────────────────────────────
+// Reproduces the EXACT validated filter-graph logic from the audio
+// converter tool's buildFilter() for the three directions this pipeline
+// needs (7.1->Stereo, 5.1->Stereo, Stereo->7.1) — not a re-derivation,
+// the literal same algorithm, using that tool's current validated
+// defaults (bass-managed fold, -6dB headroom pad, RMS soft-knee
+// compressor, hard peak limiter, LUFS) — everything that fixed the
+// Blade Runner 2049 distortion and the coefficient bugs found since.
+// Hardcoded rather than slider-driven here to avoid duplicating dozens
+// of UI controls into a second tool; these are that tool's own defaults,
+// already the validated, recommended settings.
+const AUDIO_ENGINE_DEFAULTS = {
+  fc: '0.7070', lfe: '0.4000', sl: '0.7070', bl: '0.7070', xo: 100,
+  cx: '0.7079', lx: '0.2985', sx: '0.6026', backRatio: 1.0,
+  compThresh: '0.354813', compRatio: '3.00',
+  peakLimit: '0.841395', peakAtk: '25.0', peakRel: '180.0',
+  lufs: -18, tp: -1.5, lra: 13,
+  headroomPad: '0.5012'
+};
+
+function buildDownmixToStereoFilter(sourceChannels, audioCorrections){
+  const d = AUDIO_ENGINE_DEFAULTS;
+  const lines = [];
+  if (sourceChannels === 8){
+    lines.push(`[0:a]channelsplit=channel_layout=7.1[m_FL][m_FR][m_FC][m_LFE][m_BL][m_BR][m_SL][m_SR]`);
+    lines.push(`[m_SL]highpass=f=${d.xo}[m_SL_hp]`);
+    lines.push(`[m_SR]highpass=f=${d.xo}[m_SR_hp]`);
+    lines.push(`[m_BL]highpass=f=${d.xo}[m_BL_hp]`);
+    lines.push(`[m_BR]highpass=f=${d.xo}[m_BR_hp]`);
+    lines.push(`[m_FC]asplit=2[m_FC_a][m_FC_b]`);
+    lines.push(`[m_LFE]asplit=2[m_LFE_a][m_LFE_b]`);
+    lines.push(`[m_FL]volume=1.0[fold_fl]`);
+    lines.push(`[m_FC_a]volume=${d.fc}[fold_fc_l]`);
+    lines.push(`[m_LFE_a]volume=${d.lfe}[fold_lfe_l]`);
+    lines.push(`[m_SL_hp]volume=${d.sl}[fold_sl]`);
+    lines.push(`[m_BL_hp]volume=${d.bl}[fold_bl]`);
+    lines.push(`[fold_fl][fold_fc_l][fold_lfe_l][fold_sl][fold_bl]amix=inputs=5:weights=1 1 1 1 1:normalize=0[fold_L]`);
+    lines.push(`[m_FR]volume=1.0[fold_fr]`);
+    lines.push(`[m_FC_b]volume=${d.fc}[fold_fc_r]`);
+    lines.push(`[m_LFE_b]volume=${d.lfe}[fold_lfe_r]`);
+    lines.push(`[m_SR_hp]volume=${d.sl}[fold_sr]`);
+    lines.push(`[m_BR_hp]volume=${d.bl}[fold_br]`);
+    lines.push(`[fold_fr][fold_fc_r][fold_lfe_r][fold_sr][fold_br]amix=inputs=5:weights=1 1 1 1 1:normalize=0[fold_R]`);
+    lines.push(`[fold_L][fold_R]amerge=inputs=2,aformat=channel_layouts=stereo[fold_raw]`);
+  } else if (sourceChannels === 6){
+    lines.push(`[0:a]channelsplit=channel_layout=5.1[FL][FR][FC][LFE][BL][BR]`);
+    lines.push(`[BL]highpass=f=${d.xo}[BLh]`);
+    lines.push(`[BR]highpass=f=${d.xo}[BRh]`);
+    lines.push(`[FC]asplit=2[FCa][FCb]`);
+    lines.push(`[LFE]asplit=2[LFEa][LFEb]`);
+    lines.push(`[FL]volume=1.0[l1]`);
+    lines.push(`[FCa]volume=${d.fc}[l2]`);
+    lines.push(`[LFEa]volume=${d.lfe}[l3]`);
+    lines.push(`[BLh]volume=${d.sl}[l4]`); // 5.1's sole surround pair uses the side coefficient, not the 7.1-specific back one
+    lines.push(`[l1][l2][l3][l4]amix=inputs=4:weights=1 1 1 1:normalize=0[Lo]`);
+    lines.push(`[FR]volume=1.0[r1]`);
+    lines.push(`[FCb]volume=${d.fc}[r2]`);
+    lines.push(`[LFEb]volume=${d.lfe}[r3]`);
+    lines.push(`[BRh]volume=${d.sl}[r4]`);
+    lines.push(`[r1][r2][r3][r4]amix=inputs=4:weights=1 1 1 1:normalize=0[Ro]`);
+    lines.push(`[Lo][Ro]amerge=inputs=2,aformat=channel_layouts=stereo[fold_raw]`);
+  } else {
+    return null; // stereo or unsupported — caller should skip the downmix stage
+  }
+
+  lines.push(`[fold_raw]volume=${d.headroomPad}[fold_safe]`);
+  lines.push(`[fold_safe]dcshift=shift=0[dc_clean]`);
+  lines.push(`[dc_clean]extrastereo=m=1.000[widened]`);
+  lines.push(`[widened]acopy[eq_out]`);
+  // Audio Delay / Framerate corrections go HERE — before the compressor/
+  // limiter/loudnorm chain, not after. Confirmed via direct testing: a
+  // downstream resample (asetrate/aresample) placed AFTER loudnorm
+  // corrupts the output duration (measured 14.6s instead of the correct
+  // ~5.5s on identical content) — a real ffmpeg interaction between
+  // loudnorm's dynamic analysis and anything resampling its output
+  // afterward. Placing corrections here instead resolves it, and matches
+  // where the audio converter tool's own Framerate Sync already lives in
+  // its chain (before Peak Limiter/LUFS, for a different but related
+  // reason — catching resample overshoot).
+  const corrections = (audioCorrections || []).filter(Boolean);
+  let postCorrectionLabel = 'eq_out';
+  if (corrections.length > 0){
+    let prevLabel = 'eq_out';
+    corrections.forEach((filt, i) => {
+      const nextLabel = `audio_correction_${i}`;
+      lines.push(`[${prevLabel}]${filt}[${nextLabel}]`);
+      prevLabel = nextLabel;
+    });
+    postCorrectionLabel = prevLabel;
+  }
+  lines.push(`[${postCorrectionLabel}]acopy[post_duration]`);
+  lines.push(`[post_duration]acompressor=threshold=${d.compThresh}:ratio=${d.compRatio}:attack=25:release=200:knee=6:makeup=1:detection=rms:link=maximum:mix=1[comp_out]`);
+  lines.push(`[comp_out]alimiter=level_in=1:level_out=1:limit=${d.peakLimit}:attack=${d.peakAtk}:release=${d.peakRel}:level=false[pre_lim]`);
+  lines.push(`[pre_lim]loudnorm=I=${d.lufs}:TP=${d.tp}:LRA=${d.lra}:linear=false:print_format=none[lufs_out]`);
+  lines.push(`[lufs_out]alimiter=level_in=1:level_out=1:limit=${d.peakLimit}:attack=${d.peakAtk}:release=${d.peakRel}:level=false[out]`);
+  return lines.join(';');
+}
+
+function buildUpmixToSevenOneFilter(){
+  const d = AUDIO_ENGINE_DEFAULTS;
+  const lines = [];
+  lines.push(`[0:a]channelsplit=channel_layout=stereo[FL][FR]`);
+  lines.push(`[FL]asplit=3[FLp][FLc][FLs]`);
+  lines.push(`[FR]asplit=3[FRp][FRc][FRs]`);
+  lines.push(`[FLc]volume=0.5[FLc2]`);
+  lines.push(`[FRc]volume=0.5[FRc2]`);
+  lines.push(`[FLc2][FRc2]amix=inputs=2:weights=1 1:normalize=0[center_raw]`);
+  lines.push(`[center_raw]asplit=2[cr1][cr2]`);
+  lines.push(`[cr1]volume=${d.cx}[FC_out]`);
+  lines.push(`[cr2]lowpass=f=120[lferaw]`);
+  // Matches the audio converter tool's own tog-lfe-derive option exactly
+  // — off sends silence instead of a derived signal, leaving all bass
+  // exactly where it already is in FL/FR, untouched.
+  if (isOn('tog-lfe-derive')){
+    lines.push(`[lferaw]volume=${d.lx}[LFE_out]`);
+  } else {
+    lines.push(`[lferaw]volume=0[LFE_out]`);
+  }
+  lines.push(`[FLs]volume=0.5[FLs2]`);
+  lines.push(`[FRs]volume=-0.5[FRs2]`);
+  lines.push(`[FLs2][FRs2]amix=inputs=2:weights=1 1:normalize=0[side_raw]`);
+  lines.push(`[side_raw]highpass=f=100[side_hp]`);
+  lines.push(`[side_hp]asplit=4[side_a][side_b][side_c][side_d]`);
+  lines.push(`[side_a]volume=${d.sx}[SL_raw]`);
+  lines.push(`[side_b]volume=-${d.sx}[SR_raw]`);
+  lines.push(`[side_c]volume=${(parseFloat(d.sx)*d.backRatio).toFixed(4)}[BL_pre]`);
+  lines.push(`[side_d]volume=-${(parseFloat(d.sx)*d.backRatio).toFixed(4)}[BR_pre]`);
+  lines.push(`[BL_pre]lowpass=f=10000[BL_out]`);
+  lines.push(`[BR_pre]lowpass=f=10000[BR_out]`);
+  lines.push(`[SL_raw]acopy[SL_out]`);
+  lines.push(`[SR_raw]acopy[SR_out]`);
+  lines.push(`[FLp][FRp][FC_out][LFE_out][BL_out][BR_out][SL_out][SR_out]amerge=inputs=8,aformat=channel_layouts=7.1[fold_raw]`);
+
+  lines.push(`[fold_raw]dcshift=shift=0[dc_clean]`);
+  lines.push(`[dc_clean]acopy[widened]`); // widener is stereo-only, skip for 7.1 output
+  // Confirmed via direct testing: this stage was running its own SECOND,
+  // independent compressor/limiter/loudnorm/limiter chain on top of what
+  // Stage 1 (the downmix) already applied — the audio is already properly
+  // mastered and timing-corrected by the time it reaches here. Running
+  // the full chain again wasn't just redundant, it was the actual source
+  // of a real, measurable sync bug: isolated by testing this stage with
+  // and without the duplicate chain, and duration matched Stage 1's
+  // output exactly with it removed, while the duplicate loudnorm pass
+  // alone (in linear=false/dynamic mode, which alters timing via its own
+  // look-ahead) pushed the final output further from correct, not closer.
+  lines.push(`[widened]acopy[out]`);
+  return lines.join(';');
+}
+
+function updateEncoderUI(){
+  const select = document.getElementById('encoderSelect');
+  const encoder = select.value;
+  const externalEnabled = isOn('tog-external-encoders');
+
+  // Gate the external-tool options behind the toggle — disable rather than
+  // hide, so a previously-made selection doesn't silently vanish, but they
+  // can't be freshly chosen while the toggle is off.
+  Array.from(select.options).forEach(opt => {
+    if (opt.classList.contains('ext-encoder-opt')) opt.disabled = !externalEnabled;
+  });
+  if (!externalEnabled && ['nvencc','qsvencc','vceencc'].includes(encoder)){
+    select.value = 'hevc_nvenc';
+    setStatus('External encoders disabled — reverted to hevc_nvenc. Enable the toggle above to use NVEncC/QSVEncC/VCEEncC.', '');
+  }
+  const finalEncoder = select.value;
+
+  document.getElementById('nvencPathSection').style.display = finalEncoder === 'nvencc' ? 'block' : 'none';
+  document.getElementById('qsvencPathSection').style.display = finalEncoder === 'qsvencc' ? 'block' : 'none';
+  document.getElementById('vceencPathSection').style.display = finalEncoder === 'vceencc' ? 'block' : 'none';
+  document.getElementById('nvencWarning').style.display = finalEncoder === 'hevc_nvenc' ? 'block' : 'none';
+  document.getElementById('qsvWarning').style.display = finalEncoder === 'hevc_qsv' ? 'block' : 'none';
+  document.getElementById('hwdecodeWarning').style.display =
+    (getSelectedEncodeGpuVendor() && ['nvencc','qsvencc','vceencc'].includes(finalEncoder)) ? 'block' : 'none';
+  document.getElementById('libplaceboWarning').style.display =
+    (isOn('tog-libplacebo') && ['nvencc','qsvencc','vceencc'].includes(finalEncoder)) ? 'block' : 'none';
+  document.getElementById('amfWarning').style.display = finalEncoder === 'hevc_amf' ? 'block' : 'none';
+  update444Warning(finalEncoder);
+}
+
+// Researched directly per vendor rather than one generic caution — AMD is
+// genuinely unsupported on any current hardware (not just untested), while
+// NVIDIA/Intel are real but generation-gated, and libx265 has no hardware
+// dependency at all since it's software.
+function update444Warning(finalEncoder){
+  const warn = document.getElementById('tog444Warning');
+  if (!isOn('tog-444-output')){ warn.style.display = 'none'; return; }
+  let msg = null;
+  if (finalEncoder === 'vceencc' || finalEncoder === 'hevc_amf'){
+    msg = 'AMD has no 4:4:4 support in any current GPU hardware, confirmed as of the RX 7900 series — this will fail outright, not just on older cards. Switch to libx265 (CPU) if 4:4:4 output is genuinely needed with AMD hardware otherwise in use.';
+  } else if (finalEncoder === 'nvencc' || finalEncoder === 'hevc_nvenc'){
+    msg = 'NVIDIA needs GTX 16-series or newer for HEVC 4:4:4 encoding — confirm your specific card meets this before relying on it, older cards will fail.';
+  } else if (finalEncoder === 'qsvencc' || finalEncoder === 'hevc_qsv'){
+    msg = 'Intel needs 10th Gen Ice Lake or newer for HEVC 4:4:4 encoding — confirm your specific hardware meets this before relying on it, older iGPUs will fail.';
+  } else if (finalEncoder === 'libx265'){
+    msg = null; // no hardware dependency, software encoder supports this fully
+  }
+  warn.style.display = msg ? 'block' : 'none';
+  if (msg) warn.textContent = msg;
+}
+
+function updateAudioModeUI(){
+  const mode = document.getElementById('audioModeSelect').value;
+  document.getElementById('integratedEngineSection').style.display = mode === 'integrated' ? 'block' : 'none';
+  document.getElementById('externalAudioSection').style.display = mode === 'external' ? 'block' : 'none';
+  document.getElementById('embeddedAudioCard').style.display = mode === 'embedded' ? 'block' : 'none';
+  // Which radio group is actually relevant changes with the mode — the
+  // AC3 check needs re-running against whichever one that now is,
+  // otherwise switching modes can leave a stale (or missing) delay
+  // suggestion from whatever the previous mode's list had selected.
+  onAudioTrackChange();
+  updateContainerWarning();
+}
+
+// Confirmed directly: Integrated Engine always outputs Vorbis, and MP4/MOV
+// have no real standard tag for it — ffmpeg mux it as generic mp4a
+// (normally meaning AAC), which many players expect to actually be AAC.
+// Checked both directions (container change, audio mode change) since
+// either one can create or resolve this specific combination.
+function updateContainerWarning(){
+  const mode = document.getElementById('audioModeSelect').value;
+  const container = document.getElementById('containerSelect').value;
+  const warn = document.getElementById('containerVorbisWarning');
+  warn.style.display = (mode === 'integrated' && container !== 'mkv') ? 'block' : 'none';
+}
+
+function updateAudioDelayUI(){
+  document.getElementById('audioDelaySection').style.display = isOn('tog-audio-delay') ? 'block' : 'none';
+  if (isOn('tog-audio-delay')) updateAudioDelayInfo();
+}
+
+function updateAudioDelayInfo(){
+  const info = document.getElementById('audioDelayInfo');
+  const valSpan = document.getElementById('audioDelayVal');
+  const raw = document.getElementById('audioDelayInput').value.trim();
+  const val = parseFloat(raw);
+
+  if (!raw){
+    if (valSpan) valSpan.textContent = '0.000s';
+    info.innerHTML = 'Enter an offset above. Positive delays audio; negative trims from the start.';
+    return;
+  }
+  if (Number.isNaN(val)){
+    info.innerHTML = '<strong style="color:var(--red)">Not a valid number.</strong> Plain seconds only, e.g. 2.5 or -1.5.';
+    return;
+  }
+  if (valSpan) valSpan.textContent = `${val >= 0 ? '+' : ''}${val.toFixed(3)}s`;
+  if (Math.abs(val) > 30){
+    info.innerHTML = `<strong style="color:var(--red)">${Math.abs(val).toFixed(1)}s is a large offset</strong> — double check this is really what you measured before running.`;
+    return;
+  }
+  if (val === 0){
+    info.innerHTML = 'Zero offset — this stage will be a no-op even though the toggle is on.';
+    return;
+  }
+  info.innerHTML = val > 0
+    ? `Will <strong style="color:var(--accent)">delay audio by ${val.toFixed(3)}s</strong> (pad the start with silence).`
+    : `Will <strong style="color:var(--accent)">trim ${Math.abs(val).toFixed(3)}s from the start</strong> of the audio.`;
+}
+
+// Returns the -af filter string for the audio delay/offset (or null if
+// none needed), same tested mechanism as the audio converter tool:
+// positive = adelay (pad silence), negative = atrim (cut from start).
+function buildAudioDelayFilter(){
+  if (!isOn('tog-audio-delay')) return null;
+  const raw = document.getElementById('audioDelayInput').value.trim();
+  const val = parseFloat(raw);
+  if (!raw || Number.isNaN(val) || val === 0) return null;
+  if (val > 0){
+    const ms = Math.round(val * 1000);
+    return `adelay=${ms}|${ms}:all=1`;
+  } else {
+    const secs = Math.abs(val).toFixed(6);
+    return `atrim=start=${secs},asetpts=PTS-STARTPTS`;
+  }
+}
+
+// Ported directly from the audio converter tool's validated Duration
+// Correction, formula unchanged: newRate = origRate * (srcDur/targetDur),
+// NOT targetDur/srcDur — to make output LONGER (target > src), the
+// effective playback rate must be LOWER than original, so newRate must
+// land BELOW origRate in that case. Confirmed there against real audio to
+// land on the target duration within float precision. Same validated
+// resample technique as Framerate Sync, just driven by a directly
+// measured source/target pair instead of a broadcast-standard fps ratio.
+function buildDurationCorrectionFilter(){
+  if (!isOn('tog-duration-fix')) return null;
+  const targetDur = videoDuration;
+  const srcDur = detectedAudioTrackDuration;
+  if (!targetDur || srcDur == null || srcDur <= 0) return null;
+  if (Math.abs(targetDur - srcDur) < 0.001) return null; // already matches, no-op
+  const newRate = Math.round(48000 * (srcDur / targetDur));
+  return `asetrate=${newRate},aresample=48000`;
+}
+
+// Maps a source codec name (from ffprobe) to the actual ffmpeg ENCODER
+// name needed to re-encode back to it — verified directly against real
+// ffmpeg rather than assumed, since these don't always match (mp3 decodes
+// as "mp3" but encodes via "libmp3lame"; opus/vorbis have native encoders
+// but they're marked experimental, so the lib* versions are used instead).
+// DTS has no real ffmpeg encoder support (experimental, licensing-
+// restricted) — falls back to lossless FLAC rather than attempting a
+// re-encode that would be unreliable at best.
+const AUDIO_CODEC_ENCODER_MAP = {
+  aac: { encoder: 'aac', bitrate: '320k' },
+  ac3: { encoder: 'ac3', bitrate: '640k' },
+  eac3: { encoder: 'eac3', bitrate: '768k' },
+  mp3: { encoder: 'libmp3lame', bitrate: '320k' },
+  opus: { encoder: 'libopus', bitrate: '256k' },
+  vorbis: { encoder: 'libvorbis', bitrate: '320k' },
+  flac: { encoder: 'flac', bitrate: null }
+};
+function getAudioEncoderForCodec(codecName){
+  return AUDIO_CODEC_ENCODER_MAP[codecName] || { encoder: 'flac', bitrate: null };
+}
+
+// Confirmed directly via a real pipeline test: the fps= filter used for
+// video framerate conversion is a genuine RESAMPLE (duplicates/drops
+// frames to hit the target rate) that PRESERVES the stream's real-time
+// duration — it does not speed up or slow down playback the way a raw
+// framerate relabel (no resampling) would. Measured this directly: a
+// 300.033s source through fps=30 produced exactly 9001 frames, which at
+// a true 30fps is 300.033s — unchanged. Speed-correcting audio for this
+// conversion (the old asetrate/aresample approach here) was therefore
+// wrong for this pipeline specifically — it corrected for a speed change
+// that never actually happens, actively introducing drift where none
+// existed before. Real, per-file speed relabeling (the case this
+// technique is actually built for) is a separate, deliberate operation —
+// not something this fps= conversion path performs. Correcting for a
+// genuinely mismatched source belongs to Duration Correction above,
+// which measures the real, existing mismatch directly rather than
+// assuming one from the framerate numbers alone.
+function buildAudioFramerateFilter(){
+  return null;
+}
+
+function buildFilterChain(){
+  const filters = [];
+
+  if (isOn('tog-crop')){
+    const w = document.getElementById('cropW').value;
+    const h = document.getElementById('cropH').value;
+    const x = document.getElementById('cropX').value;
+    const y = document.getElementById('cropY').value;
+    if (w && h) filters.push(`crop=${w}:${h}:${x}:${y}`);
+  }
+
+  if (isOn('tog-video-fps')){
+    const target = document.getElementById('targetFpsSelect').value;
+    filters.push(`fps=${target}`);
+  }
+
+  // Applied here, BEFORE any HDR color-space conversion — this is the
+  // domain these were actually tested in (standard 8-bit SDR). Applying
+  // them after PQ/BT.2020 conversion would mean operating on a different
+  // value encoding I never validated these specific filters against.
+  if (isOn('tog-denoise')){
+    filters.push(`hqdn3d=1.5:1.5:3:3`);
+  }
+  if (isOn('tog-sharpen')){
+    // amount=0.15 — tested specifically against edge overshoot on a
+    // real text sample; higher values (0.5) produced visible clipping
+    // to full 0-255 beyond the source's actual range (halo artifacts).
+    // 0.15 keeps overshoot low while still being a real, measurable effect.
+    filters.push(`unsharp=5:5:0.15:5:5:0.0`);
+  }
+
+  if (isOn('tog-hdr')){
+    const gamma = document.getElementById('hdrGammaSlider').value;
+    const sat = document.getElementById('hdrSatSlider').value;
+    const use444Intermediate = isOn('tog-444-intermediate');
+    const use444Output = isOn('tog-444-output');
+    // Upsample to 4:4:4 before the nonlinear gamma/saturation/PQ transform
+    // — researched directly: running a nonlinear transfer function on
+    // already-subsampled chroma reconstructs measurably differently than
+    // running it at full chroma resolution, most visible in saturated
+    // colors (exactly what the saturation boost below pushes toward).
+    if (use444Intermediate) filters.push(`format=yuv444p10le`);
+    // Verified working combination: highlight/saturation expansion, then
+    // the confirmed-working BT.709->BT.2020/PQ colorspace conversion.
+    // contrast was removed after direct testing showed it crushing
+    // near-black detail to pure 0 — confirmed via a real test image with
+    // known pixel values (0, 5, 128, 250, 255): with contrast=1.1, value 5
+    // collapsed to identical to value 0, destroying shadow detail. Without
+    // it, gamma+saturation alone still produce a real, working expansion
+    // (confirmed against the mathematically correct PQ code value for
+    // 100-nit reference white — measured 132/255, calculated 130/255,
+    // matching almost exactly) without that clipping risk.
+    filters.push(`eq=gamma=${gamma}:saturation=${sat}`);
+    // Brightness Reference slider controls npl within a range actually
+    // tested for safety (100-220) — unlike the earlier mistake of tying
+    // this to the Target Peak metadata slider (which went up to 4000 and
+    // caused catastrophic midtone blowout at its default of 1000). This
+    // slider's own range is capped well below where testing showed
+    // clipping starts (~250), and its default (150) is a validated,
+    // real brightness lift confirmed via direct testing: a midtone that
+    // was under-lit at the pure-100 default (180,150,130 -> 198,161,129)
+    // moves to a meaningfully brighter, still-unclipped (234,193,153) at
+    // npl=150. Target Peak below remains metadata-only, unrelated to this.
+    const nplRef = document.getElementById('hdrRefSlider').value;
+    filters.push(`zscale=transferin=bt709:primariesin=bt709:matrixin=bt709:transfer=smpte2084:primaries=bt2020:matrix=bt2020nc:npl=${nplRef}:range=tv`);
+    // Final format: 4:4:4 if the output toggle wants it (whether or not
+    // intermediate processing was also on — no wasteful round-trip
+    // downsample-then-implicit-upsample-again if the actual goal is a
+    // genuinely 4:4:4 final file), otherwise back down to 4:2:0 — the
+    // one case that needs an explicit downsample is intermediate-only
+    // (better processing precision, unchanged final compatibility).
+    filters.push(`format=${use444Output ? 'yuv444p10le' : 'yuv420p10le'}`);
+  }
+
+  return filters.join(',');
+}
+
+// ── Queue system ──────────────────────────────────────────────────────
+let queue = [];          // {id, label, filePath, outPath, args, totalDuration, status}
+let queueRunning = false;
+let currentJobId = null;
+let stopRequested = false; // set by stopCurrent() BEFORE calling kill — this is
+                            // the authoritative "was this intentional" signal,
+                            // not the ffmpeg exit code (confirmed via direct
+                            // testing that exit codes on kill aren't perfectly
+                            // consistent — the renderer's own intent is the
+                            // reliable source of truth here).
+
+function buildJobFromCurrentSettings(chaptersPath){
+  if (!filePath) return null;
+  const encoder = document.getElementById('encoderSelect').value;
+  const externalToolEncoders = ['nvencc', 'qsvencc', 'vceencc'];
+  const crf = document.getElementById('crfInput').value;
+  const filterChain = buildFilterChain();
+  const peak = document.getElementById('hdrPeakSlider').value;
+  const container = document.getElementById('containerSelect').value;
+
+  let outPath = document.getElementById('outPath').value.trim();
+  if (!outPath){
+    outPath = filePath.replace(/(\.[^.]+)$/, ` - HDR10.${container}`);
+  } else if (!outPath.endsWith('.' + container)) {
+    outPath = outPath.replace(/(\.[^.]+)$/, '') + '.' + container;
+  }
+
+  const audioMode = document.getElementById('audioModeSelect').value;
+  const externalAudioPath = document.getElementById('externalAudioPath').value.trim();
+  const audioSelections = Array.from(document.querySelectorAll('input[name="audioTrackSel"]:checked')).map(el => el.value);
+  const subtitleSelections = Array.from(document.querySelectorAll('input[name="subtitleTrackSel"]:checked')).map(el => el.value);
+  const videoTrackSel = document.querySelector('input[name="videoTrackSel"]:checked');
+  const videoMapArg = videoTrackSel ? `0:${videoTrackSel.value}` : '0:v'; // falls back to generic 0:v when there's only one track (no radio group rendered)
+  const jobId = 'job_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+  const label = filePath.split(/[\\/]/).pop();
+
+  // External-tool encoding: ffmpeg does ALL filtering (crop/HDR/denoise/
+  // sharpen/fps) and pipes its output DIRECTLY into the external tool's
+  // stdin — no intermediate file. This replaces an earlier version that
+  // wrote an uncompressed Y4M temp file first, which was a real, serious
+  // bug caught on an actual full-length film: raw 10-bit video at this
+  // resolution runs ~136MB/second, so a feature-length movie needed
+  // several hundred GB of temp disk space and ran out partway through.
+  // Piping directly is also what these tools' own documentation
+  // recommends as normal usage, not a workaround invented here.
+  const preStages = [];
+  let videoSourcePath = filePath;
+  let videoSourceMapArg = videoMapArg;
+  let pipedStage = null;
+  if (externalToolEncoders.includes(encoder)){
+    const toolConfig = {
+      nvencc: { pathFieldId: 'nvencPath', label: 'NVEncC' },
+      qsvencc: { pathFieldId: 'qsvencPath', label: 'QSVEncC' },
+      vceencc: { pathFieldId: 'vceencPath', label: 'VCEEncC' }
+    }[encoder];
+    const tmpDir = filePath.substring(0, Math.max(filePath.lastIndexOf('\\'), filePath.lastIndexOf('/')) + 1);
+    const tmpEncOutPath = tmpDir + '_tmp_' + encoder + '_' + jobId + '.hevc';
+    const toolPath = document.getElementById(toolConfig.pathFieldId).value.trim();
+
+    const encodeGpuVendor = getSelectedEncodeGpuVendor();
+    const useLibplacebo = isOn('tog-libplacebo');
+    const y4mArgs = [];
+
+    // Same hwaccel flags per vendor as detection uses, and the same
+    // bit-depth-aware native format (nv12 for 8-bit, p010le for 10-bit) —
+    // confirmed via a real, reproduced failure that hwdownload needs an
+    // explicit format matching the actual decoded surface, not something
+    // that can be hardcoded to one value for every source.
+    const sourcePixFmt = getSelectedVideoTrackPixFmt();
+    const is10BitSource = !!(sourcePixFmt && /10le|10be|p010|p016|12le|12be/i.test(sourcePixFmt));
+    const encodeNativeFormat = is10BitSource ? 'p010le' : 'nv12';
+    const encodeHwaccelPre = encodeGpuVendor === 'nvidia' ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda']
+      : encodeGpuVendor === 'intel' ? ['-hwaccel', 'qsv']
+      : encodeGpuVendor === 'amd' ? ['-hwaccel', 'd3d11va', '-hwaccel_output_format', 'd3d11']
+      : [];
+
+    // Non-color filters (crop/fps/denoise/sharpen) built the same way
+    // regardless of which color path is used below.
+    const preColorFilters = [];
+    if (isOn('tog-crop')){
+      const w = document.getElementById('cropW').value, h = document.getElementById('cropH').value,
+            x = document.getElementById('cropX').value, y = document.getElementById('cropY').value;
+      if (w && h) preColorFilters.push(`crop=${w}:${h}:${x}:${y}`);
+    }
+    if (isOn('tog-video-fps')) preColorFilters.push(`fps=${document.getElementById('targetFpsSelect').value}`);
+    if (isOn('tog-denoise')) preColorFilters.push(`hqdn3d=1.5:1.5:3:3`);
+    if (isOn('tog-sharpen')) preColorFilters.push(`unsharp=5:5:0.15:5:5:0.0`);
+
+    if (useLibplacebo){
+      // Experimental, NOT mixed with the GPU decode path above — known
+      // compatibility complications combining Vulkan (what libplacebo
+      // needs) with CUDA/QSV/D3D11VA in the same pipeline, and this is
+      // already the less-validated of the two paths without adding that
+      // on top. Vulkan device setup happens at the top-level args, not
+      // inside -vf.
+      y4mArgs.push('-init_hw_device', 'vulkan=vk', '-filter_hw_device', 'vk');
+      y4mArgs.push('-i', filePath, '-map', videoMapArg);
+      const chain = [...preColorFilters, 'format=yuv420p', 'hwupload=derive_device=vulkan'];
+      if (isOn('tog-hdr')){
+        // tonemapping=spline chosen deliberately, not left as the
+        // library's unspecified default — a real user report (libplacebo
+        // GitHub discussion #303) found bt2446a "insanely crushed" in
+        // inverse mode specifically, despite being a solid choice for
+        // regular forward tonemapping; spline is the function libplacebo's
+        // own docs describe as supporting both directions well.
+        chain.push(`libplacebo=colorspace=bt2020nc:color_primaries=bt2020:color_trc=smpte2084:inverse_tonemapping=true:tonemapping=spline:format=yuv420p10le`);
+      } else {
+        chain.push('hwdownload', 'format=yuv420p10le');
+      }
+      y4mArgs.push('-vf', chain.join(','));
+      // Confirmed via direct testing this is actually required here — the
+      // y4m muxer doesn't correctly infer pixel format from this specific
+      // filter chain (hwupload/libplacebo/hwdownload) the way it does with
+      // the plain CPU zscale chain; omitting this produced a real muxer
+      // error ("incorrect codec parameters"), not just a cosmetic warning.
+      y4mArgs.push('-pix_fmt', 'yuv420p10le');
+    } else {
+      y4mArgs.push(...encodeHwaccelPre);
+      y4mArgs.push('-i', filePath, '-map', videoMapArg);
+      // hwdownload brings GPU-decoded frames back to CPU memory — required
+      // because the eq/zscale color filters are CPU-only and can't operate
+      // on frames still resident in GPU memory. This is the actual, entire
+      // benefit of this toggle: offloading decode specifically, not the
+      // color processing itself, which is unchanged either way.
+      const colorFilters = [];
+      if (isOn('tog-hdr')){
+        const gamma = document.getElementById('hdrGammaSlider').value;
+        const sat = document.getElementById('hdrSatSlider').value;
+        const nplRef = document.getElementById('hdrRefSlider').value;
+        const use444Intermediate = isOn('tog-444-intermediate');
+        const use444Output = isOn('tog-444-output');
+        if (use444Intermediate) colorFilters.push(`format=yuv444p10le`);
+        colorFilters.push(`eq=gamma=${gamma}:saturation=${sat}`,
+          `zscale=transferin=bt709:primariesin=bt709:matrixin=bt709:transfer=smpte2084:primaries=bt2020:matrix=bt2020nc:npl=${nplRef}:range=tv`,
+          `format=${use444Output ? 'yuv444p10le' : 'yuv420p10le'}`);
+      }
+      const fullChain = [...preColorFilters, ...colorFilters];
+      const hwdownloadPrefix = `hwdownload,format=${encodeNativeFormat},`;
+      const effectiveChain = encodeGpuVendor
+        ? (fullChain.length ? hwdownloadPrefix + fullChain.join(',') : `hwdownload,format=${encodeNativeFormat}`)
+        : fullChain.join(',');
+      if (effectiveChain) y4mArgs.push('-vf', effectiveChain);
+    }
+    y4mArgs.push('-strict', '-1', '-f', 'yuv4mpegpipe', 'pipe:1');
+
+    // Switched from --cqp to --qvbr: confirmed directly from NVEncC's own
+    // docs that --cqp "does not enforce [max-bitrate/vbv-bufsize] limits
+    // by itself" — meaning a pure CQP encode has genuinely no ceiling on
+    // bitrate during complex, high-detail scenes, which can spike well
+    // beyond what some decode hardware sustains in real time, causing
+    // dropped frames on playback specifically during that content. --qvbr
+    // targets the identical quality scale (0-51, lower=better) but is
+    // internally a bitrate-aware mode, so it genuinely respects the cap
+    // below. 100Mbps/1s VBV is generous — well above what typical 4K HDR
+    // needs at high quality — so this only catches genuine worst-case
+    // spikes, not everyday encoding.
+    // --qvbr chosen deliberately over --cqp (see comment above) to fix a
+    // real reported frame-drop issue — but confirmed via research this
+    // needed vendor-specific handling: VCEEncC's own documentation uses a
+    // genuinely different parameter name (--qvbr-quality, not NVEncC/
+    // QSVEncC's --vbr-quality), and a real, recent GitHub issue on
+    // VCEEnc describes ambiguity in how its --qvbr shorthand specifically
+    // interprets its value (potentially as a bitrate rather than a
+    // quality level in some versions). Using the explicit, unambiguous
+    // long-form syntax for VCEEncC avoids relying on that shorthand;
+    // NVEncC and QSVEncC share consistent, confirmed --qvbr behavior.
+    const qvbrArgs = encoder === 'vceencc'
+      ? ['--vbr', '0', '--qvbr-quality', crf]
+      : ['--qvbr', crf];
+    const use444OutputEncode = isOn('tog-444-output');
+    const toolArgs = ['--y4m', '-i', '-', '--codec', 'hevc', '--profile', use444OutputEncode ? 'main444' : 'main10',
+      '--output-depth', '10', ...qvbrArgs, '--max-bitrate', '100000', '--vbv-bufsize', '100000', '--preset', 'quality'];
+    if (use444OutputEncode) toolArgs.push('--output-csp', 'yuv444');
+    if (isOn('tog-hdr')){
+      toolArgs.push('--colormatrix', 'bt2020nc', '--colorprim', 'bt2020', '--transfer', 'smpte2084',
+        '--max-cll', `${peak},400`,
+        '--master-display', `G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(${peak}0000,1)`);
+    }
+    toolArgs.push('-o', tmpEncOutPath);
+
+    pipedStage = {
+      name: `${toolConfig.label} HDR10 encode (piped, no temp file)`,
+      piped: true,
+      ffmpegArgs: y4mArgs, toolPath, toolArgs,
+      totalDuration: videoDuration, cleanup: null
+    };
+    preStages.push(pipedStage);
+
+    // A bare .hevc elementary stream (what NVEncC/QSVEncC/VCEEncC produce)
+    // carries no container and no reliable timestamps of its own —
+    // confirmed via a real failure: muxing it directly against audio with
+    // real timestamps caused a fatal "Can't write packet with unknown
+    // timestamp" error. Tried fixing this with just -r or -fflags +genpts
+    // on the final mux directly — neither worked, confirmed by
+    // reproducing the exact failure and testing both. What actually
+    // works, verified end-to-end: remux the raw stream into a proper
+    // intermediate container first, with an explicit constant frame rate,
+    // THEN do the final mux against that instead of the raw stream.
+    const effectiveFps = isOn('tog-video-fps')
+      ? document.getElementById('targetFpsSelect').value
+      : (detectedSourceFps || 24);
+    const tmpRemuxedPath = tmpDir + '_tmp_remuxed_' + jobId + '.mp4';
+    const remuxArgs = ['-r', String(effectiveFps), '-i', tmpEncOutPath,
+      '-vsync', 'cfr', '-r', String(effectiveFps), '-c:v', 'copy',
+      '-video_track_timescale', String(Math.round(effectiveFps * 1000)),
+      '-y', tmpRemuxedPath];
+    preStages.push({
+      name: 'Fix HDR10 stream timing',
+      args: remuxArgs, totalDuration: videoDuration, cleanup: tmpEncOutPath, tool: 'ffmpeg'
+    });
+
+    videoSourcePath = tmpRemuxedPath;
+    videoSourceMapArg = '0:v';
+  }
+
+  // Builds the input/map args for a final mux stage, correctly handling
+  // the NVEncC case where video comes from a different (pre-encoded) file
+  // than audio/subtitles do — otherwise input index numbering would be
+  // wrong. otherInputs is an array of extra -i paths (e.g. external audio,
+  // upmix output); their map indices are computed relative to whether a
+  // separate original-file input was needed for subtitles.
+  function buildMuxInputsAndMaps(otherInputs, audioMapArgs){
+    const inputArgs = ['-i', videoSourcePath];
+    let nextIndex = 1;
+    const mapArgs = ['-map', `0:${videoSourceMapArg.split(':')[1]}`];
+    for (const inp of otherInputs){
+      inputArgs.push('-i', inp.path);
+      mapArgs.push('-map', `${nextIndex}:${inp.stream}`);
+      nextIndex++;
+    }
+    if (subtitleSelections.length > 0){
+      // Subtitles always come from the original file. If video source IS
+      // the original file (no NVEncC redirect), reuse that same input
+      // index instead of opening it twice.
+      const videoIsOriginal = (videoSourcePath === filePath);
+      const subInputIndex = videoIsOriginal ? 0 : nextIndex;
+      if (!videoIsOriginal){ inputArgs.push('-i', filePath); nextIndex++; }
+      for (const idx of subtitleSelections) mapArgs.push('-map', `${subInputIndex}:${idx}`);
+    }
+    if (chaptersPath){
+      // Metadata-only input — no stream map needed, just -map_metadata
+      // pointing at this input's index once it's appended.
+      inputArgs.push('-i', chaptersPath);
+      mapArgs.push('-map_metadata', String(nextIndex));
+      nextIndex++;
+    }
+    return { inputArgs, mapArgs };
+  }
+
+  function buildVideoArgs(inputArgs, audioArgs, mapArgs, finalOutPath){
+    const args = [...inputArgs, ...mapArgs];
+    if (externalToolEncoders.includes(encoder)){
+      // Video is already fully filtered and HDR10-encoded by the
+      // pre-stages above — copy it through as-is, don't re-filter or
+      // re-encode. mapArgs/inputArgs already point at videoSourcePath.
+      args.push('-c:v', 'copy');
+      args.push(...audioArgs);
+      if (subtitleSelections.length > 0) args.push('-c:s', 'copy');
+      args.push('-y', finalOutPath);
+      return args;
+    }
+    if (filterChain) args.push('-vf', filterChain);
+    args.push('-c:v', encoder);
+    if (encoder === 'libx265'){
+      args.push('-crf', crf, '-preset', 'slow');
+      if (isOn('tog-444-output')) args.push('-profile:v', 'main444-10');
+      // psy-rd/psy-rdoq: libx265's own psycho-visual tuning for detail and
+      // grain retention, researched directly (x265's own documentation) —
+      // moderate values (2.0/4.0) meaningfully favor preserving high-
+      // frequency detail over default rate-distortion smoothing, well
+      // short of the aggressive end (10-15) reserved for very heavy grain,
+      // to avoid the bitrate/artifact tradeoffs the docs warn come with
+      // pushing this too far.
+      const x265Params = ['psy-rd=2.0', 'psy-rdoq=4.0'];
+      if (isOn('tog-hdr')){
+        x265Params.push('hdr10=1', 'hdr10-opt=1',
+          `master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(${peak}0000,1)`,
+          `max-cll=${peak},400`);
+      }
+      args.push('-x265-params', x265Params.join(':'));
+    } else if (encoder === 'hevc_qsv'){
+      args.push('-global_quality', crf, '-look_ahead', '1');
+      // -qsv_params: a real, merged Intel-authored ffmpeg patch, structurally
+      // similar to x265's -x265-params. Confirmed against a real, recent
+      // (2025) example showing actual working HDR10 metadata in real
+      // output — stronger evidence than what NVENC had. Not verified
+      // against the person's own exact build from here.
+      if (isOn('tog-hdr')){
+        args.push('-qsv_params',
+          `master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(${peak}0000,1):max-cll=${peak},400:colorprim=bt2020:colormatrix=bt2020nc:transfer=smpte2084:range=tv`);
+      }
+    } else if (encoder === 'hevc_amf'){
+      args.push('-qp_i', crf, '-qp_p', crf, '-quality', 'quality');
+      // -mastering_display/-content_light: documented directly on AMD's
+      // own GitHub wiki with a complete working example command. Global
+      // output-level flags, not a params sub-string like x265/qsv use.
+      // Could not verify against a real build — this sandbox's ffmpeg
+      // doesn't have AMF compiled in, so these flags are untestable here
+      // the way the (also-untestable-until-tried) NVENC ones were.
+      if (isOn('tog-hdr')){
+        args.push('-mastering_display', `G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(${peak}0000,1)`,
+          '-content_light', `${peak},400`);
+      }
+    } else {
+      args.push('-cq', crf);
+      // REMOVED: -sei/-master_display/-max_cll — confirmed via a real
+      // failure that this specific ffmpeg build's hevc_nvenc genuinely
+      // does not recognize -master_display at all ("Unrecognized option").
+      // This isn't a syntax mistake to retry — the ffmpeg-devel patch that
+      // added these to nvenc exists, but isn't present (or is exposed
+      // differently) in this particular Windows build. Checked whether
+      // the hevc_metadata bitstream filter could inject this instead —
+      // it can't; that filter only covers VUI-level params (color
+      // primaries/transfer/crop/level), not SEI mastering-display/max-cll
+      // data at all. Real, honest limitation: NVENC on this build gets
+      // correct color space signaling only (primaries/transfer/matrix,
+      // below) — not the detailed mastering-display/light-level metadata.
+      // libx265 remains the only path here for complete HDR10 metadata.
+    }
+    if (isOn('tog-hdr')){
+      args.push('-color_primaries', 'bt2020', '-color_trc', 'smpte2084', '-colorspace', 'bt2020nc');
+    }
+    args.push(...audioArgs);
+    if (subtitleSelections.length > 0) args.push('-c:s', 'copy');
+    args.push('-y', finalOutPath);
+    return args;
+  }
+
+  if (audioMode === 'integrated'){
+    const trackSel = document.querySelector('input[name="integratedTrackSel"]:checked');
+    if (!trackSel){ setStatus('Select a source track for the integrated engine first.', 'red'); return null; }
+    const srcChannels = parseInt(trackSel.dataset.channels);
+    const srcIndex = trackSel.value;
+    const tmpDir = filePath.substring(0, Math.max(filePath.lastIndexOf('\\'), filePath.lastIndexOf('/')) + 1);
+    const tmpStereoPath = tmpDir + '_tmp_stereo_' + jobId + '.flac';
+    const tmpUpmixPath = tmpDir + '_tmp_71vorbis_' + jobId + '.ogg';
+
+    const fpsFilter = buildAudioFramerateFilter();
+    const delayFilter = buildAudioDelayFilter();
+    const durationFilter = buildDurationCorrectionFilter();
+    const downmixFilter = buildDownmixToStereoFilter(srcChannels, [fpsFilter, durationFilter, delayFilter]);
+    if (!downmixFilter){
+      setStatus('Selected track is already stereo/mono — nothing to downmix. Use "Embedded Track" mode instead.', 'red');
+      return null;
+    }
+
+    const stage1FilterFinal = downmixFilter.replace('[0:a]', `[0:${srcIndex}]`);
+
+    const stage1ArgsFixed = ['-i', filePath, '-filter_complex',
+      stage1FilterFinal,
+      '-map', '[out]', '-c:a', 'flac', '-sample_fmt', 's32', '-ar', '48000', '-y', tmpStereoPath];
+
+    const upmixFilter = buildUpmixToSevenOneFilter();
+    const stage2Args = ['-i', tmpStereoPath, '-filter_complex', upmixFilter, '-map', '[out]',
+      '-c:a', 'libvorbis', '-b:a', '640k', '-ar', '48000', '-y', tmpUpmixPath];
+
+    const stage3Mux = buildMuxInputsAndMaps([{ path: tmpUpmixPath, stream: 'a' }]);
+    const stage3Args = buildVideoArgs(stage3Mux.inputArgs, ['-c:a', 'copy'], stage3Mux.mapArgs, outPath);
+
+    return {
+      id: jobId, label, filePath, outPath,
+      stages: [
+        ...preStages,
+        { name: 'Downmix to Stereo FLAC', args: stage1ArgsFixed, totalDuration: videoDuration, cleanup: null },
+        { name: 'Upmix to 7.1 Vorbis', args: stage2Args, totalDuration: videoDuration, cleanup: tmpStereoPath },
+        { name: 'Encode video + mux final MKV', args: stage3Args, totalDuration: videoDuration,
+          cleanup: [tmpUpmixPath, ...(encoder === 'nvencc' ? [videoSourcePath] : []), ...(chaptersPath ? [chaptersPath] : [])] }
+      ],
+      currentStage: 0,
+      totalDuration: videoDuration,
+      status: 'pending'
+    };
+  }
+
+  let args;
+  if (audioMode === 'none'){
+    const mux = buildMuxInputsAndMaps([]);
+    args = buildVideoArgs(mux.inputArgs, ['-an'], mux.mapArgs, outPath);
+  } else if (audioMode === 'external' && externalAudioPath){
+    const mux = buildMuxInputsAndMaps([{ path: externalAudioPath, stream: 'a' }]);
+    args = buildVideoArgs(mux.inputArgs, ['-c:a', 'copy'], mux.mapArgs, outPath);
+  } else {
+    // Same combined correction as the integrated engine — Audio Delay,
+    // Duration Correction, and the audio-side Framerate match, chained
+    // together if active, applied identically to every selected audio
+    // track.
+    const fpsFilter = buildAudioFramerateFilter();
+    const delayFilter = buildAudioDelayFilter();
+    const durationFilter = buildDurationCorrectionFilter();
+    const audioCorrections = [fpsFilter, durationFilter, delayFilter].filter(Boolean);
+    const videoIsOriginal = (videoSourcePath === filePath);
+
+    if (audioCorrections.length === 0){
+      // No correction needed — genuine stream copy, no re-encode at all.
+      const audioArgs = ['-c:a', 'copy'];
+      const inputArgs = videoIsOriginal ? ['-i', filePath] : ['-i', videoSourcePath, '-i', filePath];
+      const origIndex = videoIsOriginal ? 0 : 1;
+      const mapArgs = [
+        '-map', `0:${videoSourceMapArg.split(':')[1]}`,
+        ...audioSelections.flatMap(idx => ['-map', `${origIndex}:${idx}`]),
+        ...subtitleSelections.flatMap(idx => ['-map', `${origIndex}:${idx}`])
+      ];
+      if (chaptersPath){
+        const chaptersIndex = videoIsOriginal ? 1 : 2;
+        inputArgs.push('-i', chaptersPath);
+        mapArgs.push('-map_metadata', String(chaptersIndex));
+      }
+      args = buildVideoArgs(inputArgs, audioArgs, mapArgs, outPath);
+    } else {
+      // A filter forces re-encoding — can't stream-copy through a filter.
+      // Confirmed via a real report: re-encoding straight to a single
+      // fixed codec (FLAC, then AAC) either bloated file size or didn't
+      // match a source that wasn't actually AAC. Fixed properly this
+      // time: apply the filter losslessly to an intermediate (so the
+      // correction itself never costs quality), then re-encode that
+      // intermediate back to each selected track's OWN original codec —
+      // matching the Integrated Engine's own established downmix-then-
+      // upmix staging pattern, and looking like genuine passthrough
+      // rather than an obviously-converted file.
+      const combinedFilter = audioCorrections.join(',');
+      const tmpDir = filePath.substring(0, Math.max(filePath.lastIndexOf('\\'), filePath.lastIndexOf('/')) + 1);
+      const tmpAudioPath = tmpDir + '_tmp_audiofix_' + jobId + '.mkv';
+      const extractArgs = ['-i', filePath];
+      for (let i = 0; i < audioSelections.length; i++) extractArgs.push('-filter:a:' + i, combinedFilter);
+      extractArgs.push(...audioSelections.flatMap(idx => ['-map', `0:${idx}`]));
+      extractArgs.push('-c:a', 'flac', '-sample_fmt', 's32', '-y', tmpAudioPath);
+      preStages.push({
+        name: 'Apply audio sync correction (lossless)',
+        args: extractArgs, totalDuration: videoDuration, cleanup: null, tool: 'ffmpeg'
+      });
+
+      const inputArgs = videoIsOriginal
+        ? ['-i', filePath, '-i', tmpAudioPath]
+        : ['-i', videoSourcePath, '-i', filePath, '-i', tmpAudioPath];
+      const origIndex = videoIsOriginal ? 0 : 1;
+      const audioIntermediateIndex = videoIsOriginal ? 1 : 2;
+      const mapArgs = [
+        '-map', `0:${videoSourceMapArg.split(':')[1]}`,
+        ...audioSelections.map((idx, i) => ['-map', `${audioIntermediateIndex}:${i}`]).flat(),
+        ...subtitleSelections.flatMap(idx => ['-map', `${origIndex}:${idx}`])
+      ];
+      if (chaptersPath){
+        const chaptersIndex = videoIsOriginal ? 2 : 3;
+        inputArgs.push('-i', chaptersPath);
+        mapArgs.push('-map_metadata', String(chaptersIndex));
+      }
+      // Codec looked up from the selected track's real original codec
+      // rather than assumed, so the re-encode (when one is needed) always
+      // matches this specific track's actual format.
+      const audioArgs = [];
+      audioSelections.forEach((idx, i) => {
+        const srcStream = lastAudioStreams.find(s => String(s.index) === String(idx));
+        const target = getAudioEncoderForCodec(srcStream ? srcStream.codec : null);
+        audioArgs.push(`-c:a:${i}`, target.encoder);
+        if (target.bitrate) audioArgs.push(`-b:a:${i}`, target.bitrate);
+      });
+      args = buildVideoArgs(inputArgs, audioArgs, mapArgs, outPath);
+      args.__extraCleanup = tmpAudioPath;
+    }
+  }
+
+  if (preStages.length > 0){
+    // videoSourcePath defaults to the user's ORIGINAL file and only ever
+    // becomes a genuine temp path via the external-tool-encoder branch —
+    // previously safe to unconditionally clean up here because preStages
+    // was only ever non-empty in that same case. The new audio-fix
+    // pre-stage breaks that assumption (preStages can now be non-empty
+    // with a regular encoder too, where videoSourcePath IS still the
+    // original file) — caught this directly before shipping, since an
+    // unconditional cleanup here would have deleted the user's source
+    // file after every encode that needed audio correction.
+    const cleanupPaths = [];
+    if (videoSourcePath !== filePath) cleanupPaths.push(videoSourcePath);
+    if (args.__extraCleanup) cleanupPaths.push(args.__extraCleanup);
+    if (chaptersPath) cleanupPaths.push(chaptersPath);
+    return {
+      id: jobId, label, filePath, outPath,
+      stages: [
+        ...preStages,
+        { name: 'Mux final file', args, totalDuration: videoDuration, cleanup: cleanupPaths }
+      ],
+      currentStage: 0,
+      totalDuration: videoDuration,
+      status: 'pending'
+    };
+  }
+  // No pre-stages needed (regular encoder, no audio correction) — still
+  // need to clean up the chapters file if one was extracted. Confirmed
+  // via a real report: this single-stage path had no cleanup field at
+  // all before, so a chapters temp file from this path was never
+  // deleted regardless of whether the job succeeded, failed, or was
+  // stopped — not something specific to the Stop button.
+  return { id: jobId, label, filePath, outPath, args, totalDuration: videoDuration, status: 'pending',
+    cleanup: chaptersPath ? [chaptersPath] : [] };
+}
+
+async function addToQueue(){
+  if (!filePath){ setStatus('Load a file first.', 'red'); return; }
+
+  // Wait for any crop/brightness detection still reading this file in the
+  // background before adding an encode that will also read it — running
+  // both at once was the actual cause of a real report where detection
+  // came back empty right around when the queue started.
+  if (pendingDetections.length > 0){
+    setStatus('Finishing crop/brightness detection before queueing...', '');
+    await Promise.allSettled(pendingDetections);
+    pendingDetections = [];
+  }
+
+  // Validate crop against the ACTUAL selected video track's known
+  // dimensions before queueing. Confirmed via a real report: a crop that
+  // looked valid in the UI still failed hours into an encode with
+  // ffmpeg's own "invalid too big" error — couldn't pin down the exact
+  // mechanism after extensive testing, but this check catches the whole
+  // class of mismatch (crop values vs whatever track ends up selected)
+  // immediately instead of after wasting hours of encode time on it.
+  if (isOn('tog-crop')){
+    const cw = parseInt(document.getElementById('cropW').value, 10);
+    const ch = parseInt(document.getElementById('cropH').value, 10);
+    const cx = parseInt(document.getElementById('cropX').value, 10);
+    const cy = parseInt(document.getElementById('cropY').value, 10);
+    const selectedVideoRadio = document.querySelector('input[name="videoTrackSel"]:checked');
+    const selectedTrack = selectedVideoRadio
+      ? lastVideoStreams.find(t => String(t.index) === selectedVideoRadio.value)
+      : lastVideoStreams[0];
+    if (selectedTrack && cw && ch){
+      const fitsWidth = (cx + cw) <= selectedTrack.width;
+      const fitsHeight = (cy + ch) <= selectedTrack.height;
+      if (!fitsWidth || !fitsHeight){
+        setStatus(`Crop (${cw}x${ch} at ${cx},${cy}) doesn't fit the selected track's actual size (${selectedTrack.width}x${selectedTrack.height}) — re-run crop detection or adjust the values before queueing.`, 'red');
+        return;
+      }
+    }
+  }
+
+  let chaptersPath = null;
+  if (isOn('tog-chapters')){
+    // Confirmed directly (see buildAudioFramerateFilter): fps= conversion
+    // preserves real-time duration rather than changing playback speed,
+    // so chapters need no rescaling for it — this previously rescaled
+    // based on the same wrong assumption audio correction did, which
+    // would have shifted chapter points that were never actually wrong.
+    const ratio = 1;
+    const ffmpeg = document.getElementById('ffmpegPath').value.trim();
+    const tmpDir = filePath.substring(0, Math.max(filePath.lastIndexOf('\\'), filePath.lastIndexOf('/')) + 1);
+    const jobId = 'job_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+    setStatus('Checking for chapters...', '');
+    const result = await window.electronAPI.extractAndScaleChapters({ ffmpeg, filePath, ratio, tmpDir, jobId });
+    if (result.hasChapters) chaptersPath = result.chaptersPath;
+  }
+
+  const job = buildJobFromCurrentSettings(chaptersPath);
+  if (!job){ setStatus('Load a file first.', 'red'); return; }
+  queue.push(job);
+  renderQueue();
+  setStatus(`Added to queue: ${job.label}`, '');
+}
+
+function renderQueue(){
+  const el = document.getElementById('queueList');
+  if (queue.length === 0){ el.innerHTML = '<div style="color:var(--muted);font-size:.8rem">Queue is empty.</div>'; return; }
+  el.innerHTML = queue.map(j => {
+    const statusColor = {pending:'var(--muted)', running:'var(--accent)', done:'var(--green)', failed:'var(--red)', skipped:'var(--yellow)'}[j.status];
+    const removeBtn = j.status === 'pending'
+      ? `<button onclick="removeFromQueue('${j.id}')" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:.9rem">✕</button>`
+      : '';
+    return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:#161c2a;border-radius:6px;margin-bottom:6px;font-size:.78rem;">
+      <span>${j.label} → ${j.outPath.split(/[\\/]/).pop()}</span>
+      <span style="color:${statusColor};font-weight:600;text-transform:uppercase;font-size:.68rem;">${j.status}</span>
+      ${removeBtn}
+    </div>`;
+  }).join('');
+}
+
+function removeFromQueue(id){
+  queue = queue.filter(j => j.id !== id || j.status !== 'pending');
+  renderQueue();
+}
+
+async function startQueue(){
+  if (queueRunning) return;
+  queueRunning = true;
+  window.electronAPI.onFFmpegProgress((data) => {
+    document.getElementById('progressFill').style.width = data.percent + '%';
+    document.getElementById('progressPercent').textContent = data.percent.toFixed(1) + '%';
+    document.getElementById('progressSpeed').textContent = data.speed ? data.speed.toFixed(2) + 'x speed' : '';
+    if (data.etaSec != null && !data.done){
+      const m = Math.floor(data.etaSec / 60);
+      const s = Math.round(data.etaSec % 60);
+      document.getElementById('progressEta').textContent = `ETA: ${m}m ${s}s`;
+    } else if (data.done){
+      document.getElementById('progressEta').textContent = 'Done';
+    }
+    updateOverallProgress(data.percent);
+  });
+  await processNextInQueue();
+  queueRunning = false;
+}
+
+// Overall progress across all stages of a multi-stage job. Stage weighting
+// is equal-share (each stage counts for 1/totalStages) since real relative
+// timing between an audio stage and the video encode stage varies hugely
+// by encoder/CRF/content and can't be known in advance — stated as an
+// approximation, not exact. ETA uses linear extrapolation from actual
+// elapsed wall-clock time (elapsed/percent × remaining), which adapts
+// automatically as real timing data comes in rather than assuming any
+// fixed per-stage duration.
+let jobStartTime = null;
+let currentJobStageInfo = null; // { stageIndex, totalStages, stageName }
+
+function updateOverallProgress(currentStagePercent){
+  if (!currentJobStageInfo || jobStartTime == null) return;
+  const { stageIndex, totalStages, stageName } = currentJobStageInfo;
+  const aggregatePercent = ((stageIndex * 100) + currentStagePercent) / totalStages;
+  const elapsedSec = (Date.now() - jobStartTime) / 1000;
+
+  document.getElementById('overallProgressFill').style.width = aggregatePercent + '%';
+  document.getElementById('overallProgressPercent').textContent = aggregatePercent.toFixed(1) + '%';
+  document.getElementById('overallStageLabel').textContent = `Step ${stageIndex+1}/${totalStages}: ${stageName}`;
+  const em = Math.floor(elapsedSec / 60), es = Math.round(elapsedSec % 60);
+  document.getElementById('overallElapsed').textContent = `Elapsed: ${em}m ${es}s`;
+
+  if (aggregatePercent > 2){ // avoid a wild extrapolation from near-zero data
+    const etaSec = (elapsedSec / aggregatePercent) * (100 - aggregatePercent);
+    const tm = Math.floor(etaSec / 60), ts = Math.round(etaSec % 60);
+    document.getElementById('overallEta').textContent = `Total ETA: ~${tm}m ${ts}s`;
+  } else {
+    document.getElementById('overallEta').textContent = 'Total ETA: calculating...';
+  }
+}
+
+async function processNextInQueue(){
+  // Re-check the LIVE queue array each time, not a snapshot — this is what
+  // makes editing the queue while it's running actually work: a job added
+  // or removed mid-run is picked up on the next iteration automatically.
+  const next = queue.find(j => j.status === 'pending');
+  if (!next){
+    setStatus('Queue complete.', 'green');
+    document.getElementById('progressWrap').style.display = 'none';
+    document.getElementById('overallProgressBlock').style.display = 'none';
+    document.getElementById('stopBtn').disabled = true;
+    currentJobStageInfo = null;
+    jobStartTime = null;
+    return;
+  }
+
+  next.status = 'running';
+  currentJobId = next.id;
+  stopRequested = false;
+  renderQueue();
+  document.getElementById('progressWrap').style.display = 'block';
+  document.getElementById('stopBtn').disabled = false;
+
+  const ffmpeg = document.getElementById('ffmpegPath').value.trim();
+  let finalResult = { code: 0 };
+
+  jobStartTime = Date.now();
+  document.getElementById('overallProgressBlock').style.display = 'block';
+
+  if (next.stages){
+    // Multi-stage job (the integrated engine) — run each stage in order,
+    // cleaning up its predecessor's temp file once no longer needed.
+    for (let i = 0; i < next.stages.length; i++){
+      const stage = next.stages[i];
+      next.currentStage = i;
+      currentJobStageInfo = { stageIndex: i, totalStages: next.stages.length, stageName: stage.name };
+      updateOverallProgress(0); // reset stage-local percent display immediately on transition
+      setStatus(`${next.label} — Step ${i+1}/${next.stages.length}: ${stage.name}...`, '');
+      renderQueue();
+      let result;
+      if (stage.piped){
+        result = await window.electronAPI.runPipedEncode({
+          ffmpeg, ffmpegArgs: stage.ffmpegArgs, tool: stage.toolPath, toolArgs: stage.toolArgs,
+          totalDuration: stage.totalDuration, jobId: next.id
+        });
+      } else {
+        const toolPathFields = { nvencc: 'nvencPath', qsvencc: 'qsvencPath', vceencc: 'vceencPath' };
+        const stageExecutable = toolPathFields[stage.tool]
+          ? document.getElementById(toolPathFields[stage.tool]).value.trim()
+          : ffmpeg;
+        result = await window.electronAPI.runFFmpegWithProgress({
+          ffmpeg: stageExecutable, args: stage.args, totalDuration: stage.totalDuration, jobId: next.id
+        });
+      }
+      if (stopRequested || result.code !== 0){
+        finalResult = result;
+        break;
+      }
+      finalResult = result;
+    }
+    // Best-effort cleanup of temp files regardless of outcome.
+    for (const stage of next.stages){
+      const cleanupPaths = Array.isArray(stage.cleanup) ? stage.cleanup : (stage.cleanup ? [stage.cleanup] : []);
+      for (const p of cleanupPaths) await window.electronAPI.deleteTempFile?.({ path: p }).catch(() => {});
+    }
+  } else {
+    currentJobStageInfo = { stageIndex: 0, totalStages: 1, stageName: 'Encoding' };
+    setStatus(`Encoding: ${next.label}...`, '');
+    finalResult = await window.electronAPI.runFFmpegWithProgress({
+      ffmpeg, args: next.args, totalDuration: next.totalDuration, jobId: next.id
+    });
+    // Single-stage jobs can still have a chapters temp file to clean up
+    // even without any pre-stages — this path had no cleanup at all
+    // before, confirmed via a real report of a leftover chapters file.
+    const cleanupPaths = Array.isArray(next.cleanup) ? next.cleanup : (next.cleanup ? [next.cleanup] : []);
+    for (const p of cleanupPaths) await window.electronAPI.deleteTempFile?.({ path: p }).catch(() => {});
+  }
+
+  currentJobStageInfo = null;
+  jobStartTime = null;
+
+  if (stopRequested){
+    next.status = 'skipped';
+    setStatus(`Stopped: ${next.label} — moving to next in queue.`, '');
+  } else if (finalResult.code === 0){
+    next.status = 'done';
+    setStatus(`✔ Complete: ${next.label}`, 'green');
+    const fullEl = document.getElementById('fullErrorOutput');
+    if (fullEl) fullEl.style.display = 'none';
+  } else {
+    next.status = 'failed';
+    setStatus(`✖ Failed: ${next.label} — ${formatFfmpegError(finalResult.stderr)}`, 'red');
+  }
+  currentJobId = null;
+  renderQueue();
+
+  // Continue to the next pending job automatically.
+  await processNextInQueue();
+}
+
+async function stopCurrent(){
+  if (!currentJobId) return;
+  stopRequested = true; // set BEFORE killing — this is what processNextInQueue checks
+  const result = await window.electronAPI.killFFmpegJob({ jobId: currentJobId });
+  if (!result.killed){
+    setStatus('Could not stop current job: ' + (result.reason || 'unknown'), 'red');
+    stopRequested = false;
+  }
+}
+
+function copyFullError(){
+  const text = document.querySelector('#fullErrorOutput pre').textContent;
+  navigator.clipboard.writeText(text).then(() => setStatus('Full error copied to clipboard.', ''));
+}
+
+function setStatus(msg, color){
+  const el = document.getElementById('statusMsg');
+  el.textContent = msg;
+  el.style.color = color === 'red' ? 'var(--red)' : color === 'green' ? 'var(--green)' : 'var(--muted)';
+  // A plain color change was too easy to miss when a NEW red message
+  // replaced an old one — confirmed directly: a genuinely different
+  // failure reason went unnoticed because it looked the same at a
+  // glance as the stale message it replaced. A bordered box for
+  // errors specifically makes a change in reason visually obvious,
+  // not just a change in wording.
+  el.style.border = color === 'red' ? '1px solid var(--red)' : 'none';
+  el.style.padding = color === 'red' ? '8px 12px' : '0';
+  el.style.borderRadius = color === 'red' ? '4px' : '0';
+}
+
+// Truncating to just the LAST 200 characters of stderr was the real bug
+// behind "failed with no useful log" — ffmpeg's actual error (encoder init
+// failure, missing filter, bad path) typically appears EARLIER, with other
+// output following it, so the tail alone often shows nothing useful. This
+// pulls out lines that actually look like errors first, falls back to
+// showing both the head and tail of the full output if none are found, and
+// writes the COMPLETE stderr to a persistent, selectable panel — not just
+// a status line that the next queue update could overwrite before it's
+// even read.
+function formatFfmpegError(stderr){
+  if (!stderr) return '(no error output captured — process may have failed to start at all; check the FFmpeg path is correct)';
+  const lines = stderr.split('\n');
+  const errorLines = lines.filter(l => /error|failed|cannot|unable|unknown|no such|invalid|not found/i.test(l));
+  const summary = errorLines.length > 0
+    ? errorLines.slice(0, 3).join(' | ')
+    : lines.slice(-3).join(' | ');
+
+  const fullEl = document.getElementById('fullErrorOutput');
+  if (fullEl){
+    fullEl.style.display = 'block';
+    fullEl.querySelector('pre').textContent = stderr;
+  }
+  return summary.slice(0, 300) + (errorLines.length > 3 || lines.length > 3 ? ' (full output below)' : '');
+}
+
+// Electron's default behavior for an unhandled drop is to try to navigate
+// to/open the file as if it were a web page — prevent that globally so a
+// drop landing slightly outside the drop zone doesn't break the window.
+document.addEventListener('dragover', (e) => e.preventDefault());
+document.addEventListener('drop', (e) => e.preventDefault());
+
+renderQueue();
+updateAudioModeUI();
+updateEncoderUI();
+</script>
+</body>
+</html>
