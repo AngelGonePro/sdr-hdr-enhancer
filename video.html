@@ -62,6 +62,7 @@
 
   <div class="slbl">Audio Source</div>
   <div class="card">
+    <div class="warn-box" id="ac3TrackSelectionWarning" style="display:none;margin-bottom:10px"></div>
     <div class="row">
       <div class="field">
         <label>Mode</label>
@@ -758,6 +759,14 @@ async function detectVideoTrackDuration(streamIndex){
   }
 }
 
+// Tracks whether Audio Delay's current on-state (and value) came from
+// AC3 auto-detection specifically, not the user manually enabling it —
+// confirmed via a real report: switching to a track/file without AC3
+// left the toggle on with the stale 2.5s value from a PREVIOUS AC3
+// track, since the non-AC3 branch only hid the hint text and never
+// actually turned anything off. Only auto-clear what was auto-set.
+let audioDelayAutoSetByAC3 = false;
+
 function onAudioTrackChange(){
   // Both radio groups exist in the DOM at all times regardless of audio
   // mode (only one section is visually shown), and audioTrackSel ALWAYS
@@ -788,12 +797,30 @@ function onAudioTrackChange(){
       document.getElementById('audioDelayInput').value = '2.5';
       updateAudioDelayInfo();
     }
+    audioDelayAutoSetByAC3 = true;
     ac3Hint.style.display = 'block';
     ac3Hint.innerHTML = '<strong>AC3 track selected</strong> — auto-enabled with 2.5s pre-filled, the value '
       + 'previously diagnosed for one specific source. This is a starting suggestion, not guaranteed correct '
       + 'for every AC3 file — verify sync after encoding and adjust the offset if this source differs.';
+    const trackWarn = document.getElementById('ac3TrackSelectionWarning');
+    trackWarn.style.display = 'block';
+    trackWarn.innerHTML = '<strong>AC3 audio selected</strong> — Audio Delay has been auto-enabled with a 2.5s offset '
+      + '(see Audio Delay / Offset section below). This was diagnosed for one specific source and isn\'t '
+      + 'guaranteed correct for every AC3 file. <strong>Test with the toggle off first</strong> to confirm '
+      + 'this specific file actually needs it before assuming it does.';
   } else {
     ac3Hint.style.display = 'none';
+    document.getElementById('ac3TrackSelectionWarning').style.display = 'none';
+    // Only clear what THIS auto-detection previously set — if the user
+    // manually enabled Audio Delay themselves (unrelated to AC3), leave
+    // their setting alone rather than silently clobbering it.
+    if (audioDelayAutoSetByAC3){
+      document.getElementById('tog-audio-delay').classList.remove('on');
+      document.getElementById('audioDelaySection').style.display = 'none';
+      document.getElementById('audioDelayInput').value = '';
+      updateAudioDelayInfo();
+      audioDelayAutoSetByAC3 = false;
+    }
   }
 
   // Same event (track selection change) also drives Duration Correction's
