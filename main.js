@@ -509,6 +509,18 @@ ipcMain.handle('delete-temp-file', async (event, payload) => {
   });
 });
 
+// Renderer processes are sandboxed and can't write files directly - needed
+// so the dynamically-generated VapourSynth (.vpy) script for RIFE
+// interpolation can be written to disk before vspipe runs it, since vspipe
+// takes a script file path rather than inline script content.
+ipcMain.handle('write-text-file', async (event, payload) => {
+  return new Promise((resolve) => {
+    fs.writeFile(payload.path, payload.content, 'utf8', (err) => {
+      resolve({ written: !err, error: err ? err.message : null });
+    });
+  });
+});
+
 // Pipes ffmpeg's video output DIRECTLY into an external encoder's stdin,
 // with ZERO intermediate disk file — this replaces an earlier design that
 // wrote an uncompressed Y4M temp file, which was a real, serious bug:
@@ -524,6 +536,13 @@ ipcMain.handle('run-piped-encode', async (event, payload) => {
     const { args: routedFfmpegArgs, tempPaths: ffmpegTemp } = routeArgsThroughTempFiles(ffmpegArgs);
     const { args: routedToolArgs, tempPaths: toolTemp } = routeArgsThroughTempFiles(toolArgs);
     const cleanupAll = () => { for (const p of [...ffmpegTemp, ...toolTemp]) fs.unlink(p, () => {}); };
+
+    console.log("\n===== PIPED ENCODE START =====\n");
+    console.log("ffmpeg:", ffmpeg);
+    console.log("ffmpeg args:", routedFfmpegArgs);
+    console.log("tool:", tool);
+    console.log("tool args:", routedToolArgs);
+    console.log("\n===============================\n");
 
     let ffmpegProc, toolProc;
     try {
@@ -620,6 +639,164 @@ ipcMain.handle('run-piped-encode', async (event, payload) => {
   });
 });
 
+// Three-stage pipe for GPU-accelerated motion interpolation via RIFE (run
+// through VapourSynth/vspipe, since the plain RIFE CLI tools only accept
+// image-sequence directories, not piped video) — vspipe (RIFE
+// interpolation) -> ffmpeg (crop/HDR color transform) -> encoder tool, all
+// connected stdout-to-stdin with no intermediate files at any stage.
+// Confirmed via research this genuinely avoids the disk-space cost a
+// file-based RIFE workflow would have (extracting a full movie to PNG
+// frames first) — everything here stays in memory/pipes the whole way
+// through, matching this tool's existing piped philosophy for the
+// ffmpeg->encoder stage. Same EPIPE/shutdown-order handling as the
+// two-stage handler above, extended one stage further: killing any one
+// process must not let an earlier stage crash trying to write to a now-
+// closed pipe, and a stage finishing naturally must let the NEXT stage
+// keep running until it's actually done consuming/producing.
+ipcMain.handle('run-triple-piped-encode', async (event, payload) => {
+  return new Promise((resolve) => {
+    const { vspipe, vspipeArgs, ffmpeg, ffmpegArgs, tool, toolArgs, totalDuration, totalOutputFrames, jobId } = payload;
+    const { args: routedFfmpegArgs, tempPaths: ffmpegTemp } = routeArgsThroughTempFiles(ffmpegArgs);
+    const { args: routedToolArgs, tempPaths: toolTemp } = routeArgsThroughTempFiles(toolArgs);
+    const cleanupAll = () => { for (const p of [...ffmpegTemp, ...toolTemp]) fs.unlink(p, () => {}); };
+
+    console.log("\n===== TRIPLE PIPED ENCODE START (RIFE via VapourSynth) =====\n");
+    console.log("vspipe:", vspipe);
+    console.log("vspipe args:", vspipeArgs);
+    console.log("ffmpeg:", ffmpeg);
+    console.log("ffmpeg args:", routedFfmpegArgs);
+    console.log("tool:", tool);
+    console.log("tool args:", routedToolArgs);
+    console.log("\n===============================\n");
+
+    let vspipeProc, ffmpegProc, toolProc;
+    try {
+      vspipeProc = spawn(vspipe, vspipeArgs, { windowsHide: true });
+      ffmpegProc = spawn(ffmpeg, routedFfmpegArgs, { windowsHide: true });
+      toolProc = spawn(tool, routedToolArgs, { windowsHide: true });
+    } catch (err) {
+      cleanupAll();
+      resolve({ code: -1, stdout: "", stderr: String(err && err.message || err) });
+      return;
+    }
+
+    const trackingEntry = { procs: [vspipeProc, ffmpegProc, toolProc], resolved: false, forceResolve: null };
+    if (jobId) activeProcesses.set(jobId, trackingEntry); // track all three - if one dies silently and leaves another hung on a pipe that'll never cleanly close, Stop still needs to find whichever is actually still alive
+
+    vspipeProc.stdout.pipe(ffmpegProc.stdin);
+    ffmpegProc.stdout.pipe(toolProc.stdin);
+    // Same real, reproduced EPIPE risk as the two-stage handler, now at
+    // both pipe junctions — each destination needs its own handler.
+    vspipeProc.stdout.on('error', () => {});
+    ffmpegProc.stdin.on('error', () => {});
+    ffmpegProc.stdout.on('error', () => {});
+    toolProc.stdin.on('error', () => {});
+
+    let vspipeStderr = "", ffmpegStderr = "", toolStderr = "";
+    // vspipe's --progress reports throughput (fps) periodically, confirmed
+    // via VapourSynth's own docs ("reports frames per second after
+    // processing for 8 seconds") - not a direct percentage, but combined
+    // with the known total output frame count (computed from duration and
+    // the interpolation target rate), this gives a real, meaningful
+    // progress estimate. This replaces relying on NVEncC's own stderr for
+    // progress here - NVEncC only sees whatever trickle of frames has made
+    // it through two upstream pipes, and RIFE interpolation is almost
+    // always the actual bottleneck stage, so its own throughput is what
+    // the person watching actually wants to see.
+    const startTimeVs = Date.now();
+    let estimatedFramesDone = 0;
+    let lastFpsUpdateTime = startTimeVs;
+    vspipeProc.stderr.on("data", d => {
+      const text = d.toString();
+      vspipeStderr += text;
+      // Real-time, not just accumulated for the final result - without
+      // this, a hung or crashed vspipe process is completely invisible
+      // until (if ever) the whole job resolves, which may never happen.
+      console.log("[vspipe]", text.trim());
+      const fpsMatch = text.match(/([\d.]+)\s*fps/i);
+      const now = Date.now();
+      if (fpsMatch && totalOutputFrames > 0) {
+        const reportedFps = parseFloat(fpsMatch[1]);
+        const elapsedSinceLastUpdate = (now - lastFpsUpdateTime) / 1000;
+        if (reportedFps > 0 && elapsedSinceLastUpdate > 0) {
+          estimatedFramesDone += reportedFps * elapsedSinceLastUpdate;
+          const percent = Math.max(0, Math.min(99, (estimatedFramesDone / totalOutputFrames) * 100));
+          const etaSec = reportedFps > 0 ? (totalOutputFrames - estimatedFramesDone) / reportedFps : null;
+          event.sender.send('ffmpeg-progress', {
+            percent: Math.round(percent * 10) / 10,
+            currentSec: (now - startTimeVs) / 1000, totalDuration,
+            speed: 0, etaSec, done: false, imprecise: false
+          });
+        }
+      }
+      lastFpsUpdateTime = now;
+    });
+    ffmpegProc.stderr.on("data", d => { ffmpegStderr += d.toString(); });
+
+    // Progress now comes from vspipe's own throughput above - NVEncC here
+    // only ever sees whatever trickle of frames survives two upstream
+    // pipes, and its stderr format was never reliably producing a percent
+    // match in practice (confirmed via a real report of this staying
+    // stuck at 0%). Just capture its stderr for error reporting.
+    toolProc.stderr.on("data", d => { toolStderr += d.toString(); });
+
+    let vspipeDone = false, ffmpegDone = false, toolDone = false;
+    let vspipeCode = null, ffmpegCode = null, toolCode = null;
+    function maybeResolve(){
+      if (!vspipeDone || !ffmpegDone || !toolDone) return;
+      trackingEntry.resolved = true;
+      if (jobId) activeProcesses.delete(jobId);
+      cleanupAll();
+      const failed = toolCode !== 0;
+      resolve({
+        code: toolCode,
+        stdout: "",
+        stderr: failed ? `[vspipe/RIFE]\n${vspipeStderr}\n[ffmpeg]\n${ffmpegStderr}\n[encoder]\n${toolStderr}` : toolStderr,
+        killed: toolCode === null
+      });
+    }
+    // Safety net for kill-ffmpeg-job's grace-period timeout - if a killed
+    // process doesn't cleanly fire its own "close" event (confirmed as a
+    // real, reproduced gap: the job's promise was left waiting forever
+    // with zero feedback), force everything closed and resolve directly
+    // rather than leave the UI stuck indefinitely.
+    trackingEntry.forceResolve = () => {
+      if (trackingEntry.resolved) return;
+      trackingEntry.resolved = true;
+      for (const p of [vspipeProc, ffmpegProc, toolProc]) {
+        try { if (p && p.exitCode === null && p.pid) p.kill('SIGKILL'); } catch(e){}
+      }
+      if (jobId) activeProcesses.delete(jobId);
+      cleanupAll();
+      resolve({
+        code: -1, stdout: "",
+        stderr: `Forcibly stopped - one or more processes did not respond to termination within the grace period.\n[vspipe/RIFE]\n${vspipeStderr}\n[ffmpeg]\n${ffmpegStderr}\n[encoder]\n${toolStderr}`,
+        killed: true
+      });
+    };
+    // Natural end-of-stream cascades forward (vspipe closing lets ffmpeg
+    // finish reading, ffmpeg closing lets the encoder finish) — the same
+    // "don't kill downstream on natural close" principle already proven
+    // correct in the two-stage handler, just chained one stage further.
+    vspipeProc.on("close", code => { vspipeDone = true; vspipeCode = code; maybeResolve(); });
+    ffmpegProc.on("close", code => { ffmpegDone = true; ffmpegCode = code; maybeResolve(); });
+    toolProc.on("close", code => {
+      toolDone = true; toolCode = code;
+      if (!ffmpegDone) { try { ffmpegProc.kill('SIGKILL'); } catch(e){} }
+      if (!vspipeDone) { try { vspipeProc.kill('SIGKILL'); } catch(e){} }
+      maybeResolve();
+    });
+    vspipeProc.on("error", err => { vspipeDone = true; vspipeStderr += '\n[vspipe spawn error] ' + err.message; maybeResolve(); });
+    ffmpegProc.on("error", err => { ffmpegDone = true; ffmpegStderr += '\n[ffmpeg spawn error] ' + err.message; if (!vspipeDone) { try { vspipeProc.kill('SIGKILL'); } catch(e){} } maybeResolve(); });
+    toolProc.on("error", err => {
+      toolDone = true; toolCode = -1; toolStderr += '\n[tool spawn error] ' + err.message;
+      if (!ffmpegDone) { try { ffmpegProc.kill('SIGKILL'); } catch(e){} }
+      if (!vspipeDone) { try { vspipeProc.kill('SIGKILL'); } catch(e){} }
+      maybeResolve();
+    });
+  });
+});
+
 
 ipcMain.handle('run-ffmpeg-with-progress', async (event, payload) => {
   return new Promise((resolve) => {
@@ -705,15 +882,43 @@ ipcMain.handle('run-ffmpeg-with-progress', async (event, payload) => {
 // rather than halting everything.
 ipcMain.handle('kill-ffmpeg-job', async (event, payload) => {
   const jobId = payload.jobId;
-  const proc = activeProcesses.get(jobId);
-  if (!proc) return { killed: false, reason: 'No matching active process (already finished?)' };
-  try {
-    proc.kill(); // Node maps this to TerminateProcess on Windows — reliably stops ffmpeg.exe
-    activeProcesses.delete(jobId);
-    return { killed: true };
-  } catch (err) {
-    return { killed: false, reason: err.message };
+  const entry = activeProcesses.get(jobId);
+  if (!entry) return { killed: false, reason: 'No matching active process (already finished?)' };
+  const isRich = entry && !Array.isArray(entry) && typeof entry === 'object' && entry.procs;
+  const procs = isRich ? entry.procs : (Array.isArray(entry) ? entry : [entry]);
+  let anyKilled = false;
+  const errors = [];
+  for (const proc of procs) {
+    try {
+      // A process that already exited on its own has no pid to signal -
+      // not an error, just nothing left to do for that one specifically.
+      if (proc && proc.exitCode === null && proc.pid) {
+        proc.kill('SIGKILL'); // explicit, most forceful signal - maps directly to TerminateProcess on Windows regardless, but explicit here for clarity and cross-platform correctness
+        anyKilled = true;
+      }
+    } catch (err) {
+      errors.push(err.message);
+    }
   }
+  // Real, reproduced gap this fixes: a killed process (especially a
+  // Python/CUDA one) can take a while to actually terminate, or in rare
+  // cases never cleanly fire its own "close" event at all - the job's
+  // promise was waiting on that close event indefinitely with zero
+  // feedback that anything was wrong. Give it a real but short grace
+  // period, then force the job to resolve regardless if it still hasn't
+  // on its own - the UI must never be left stuck with no error and no
+  // way forward.
+  if (isRich && typeof entry.forceResolve === 'function') {
+    setTimeout(() => {
+      if (!entry.resolved) {
+        console.log(`[kill-ffmpeg-job] Job ${jobId} did not close naturally within the grace period after kill - forcing resolution.`);
+        entry.forceResolve();
+      }
+    }, 5000);
+  }
+  activeProcesses.delete(jobId);
+  if (anyKilled) return { killed: true };
+  return { killed: false, reason: errors.length ? errors.join('; ') : 'All tracked processes had already exited' };
 });
 
 // Windows' spawn() has a real, fairly low effective command-line length
