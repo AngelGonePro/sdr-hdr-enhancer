@@ -24,6 +24,8 @@
   .ti-txt{font-size:.78rem;color:var(--text);line-height:1.5;}
   .info-box{background:rgba(92,225,230,.06);border:1px solid rgba(92,225,230,.2);border-radius:8px;padding:12px 14px;font-size:.75rem;line-height:1.7;color:var(--text);margin-top:8px;}
   .warn-box{background:rgba(255,92,122,.08);border:1px solid rgba(255,92,122,.3);border-radius:8px;padding:12px 14px;font-size:.75rem;line-height:1.7;margin-top:8px;}
+  .alert-box{background:rgba(255,92,122,.22);border:2px solid rgba(255,92,122,.75);border-radius:8px;padding:12px 14px;font-size:.8rem;line-height:1.7;margin-top:8px;font-weight:600;color:#ffdde1;}
+  .ti.disabled{opacity:.4;pointer-events:none;}
   button{cursor:pointer;font-family:inherit;}
   .btn-run{width:100%;padding:16px;background:linear-gradient(135deg,var(--accent),var(--purple));border:none;border-radius:10px;color:#04141c;font-weight:700;font-size:.9rem;letter-spacing:.05em;margin-top:16px;}
   .btn-detect{padding:8px 14px;background:#232b3d;border:1px solid var(--accent);color:var(--accent);border-radius:6px;font-size:.72rem;}
@@ -178,7 +180,7 @@
       this tool), which is often meaningfully higher than the generic default.
     </div>
     <div class="ti on" id="tog-444-intermediate" onclick="toggle(this)" style="margin-top:10px"><div class="sw"></div><div class="ti-txt">Process HDR expansion in 4:4:4, output stays whatever the encoder normally uses — ON by default. Researched directly: applying a nonlinear transfer function (exactly what the PQ/HDR conversion above does) to already-subsampled 4:2:0 chroma reconstructs measurably differently than applying it at full chroma resolution first — most noticeable in saturated colors, which this source's own saturation boost specifically pushes toward. Upsamples to 4:4:4 before the gamma/saturation/PQ conversion, downsamples back afterward — final file's chroma subsampling is unchanged either way, so this has no compatibility or hardware dependency, unlike the output toggle below.</div></div>
-    <div class="ti on" id="tog-444-output" onclick="toggle(this); updateEncoderUI();" style="margin-top:8px"><div class="sw"></div><div class="ti-txt">Output the final file itself in 4:4:4 (experimental) — ON by default, since the default encoder (NVEncC) is NVIDIA, which supports this on GTX 16-series or newer. Separate from the option above. Only actually helps if your <em>source</em> has real 4:2:2/4:4:4 chroma detail to begin with — every source discussed in building this tool has been 4:2:0, where this just means a larger file for identical color information. Switching to AMD (no 4:4:4 support in any current GPU, confirmed as of the RX 7900 series) or an older NVIDIA/Intel card will show a warning below and likely fail — turn this off first if switching encoders. libx265 (CPU) supports 4:4:4 fully regardless of hardware generation.</div></div>
+    <div class="ti" id="tog-444-output" onclick="toggle(this); updateEncoderUI();" style="margin-top:8px"><div class="sw"></div><div class="ti-txt">Output the final file itself in 4:4:4 (experimental) — OFF by default. The toggle above already captures the real benefit (better precision during the actual PQ/HDR color transform) without this one's risk — this toggle only helps if your <em>source</em> has real 4:2:2/4:4:4 chroma detail to begin with, which no source discussed in building this tool has had, so it's a larger file for identical color information plus real playback risk for no upside in that case. NVIDIA's decode hardware genuinely supports 4:4:4 HEVC decode (confirmed directly from NVIDIA's own Turing announcement), but decode throughput for it isn't unlimited — a resolution-dependent ceiling that sits closer at 4K than 1080p, confirmed this is a real, unresolved risk at 4K specifically even after fixing NVEncC's own --level auto bug (this toggle already applies the fix: explicit level/tier 6.2/High instead of auto-detection). Same generation requirement applies to Intel — see the alert above when Intel is selected. AMD has no 4:4:4 support in any current GPU at all and this toggle is disabled outright when AMD is selected. libx265 (CPU) supports 4:4:4 fully regardless of hardware generation, with no decode-throughput ceiling to worry about since there's no dedicated decode silicon involved.</div></div>
     <div class="warn-box" id="tog444Warning" style="margin-top:8px;display:none"></div>
   </div>
 
@@ -192,24 +194,73 @@
     </div>
   </div>
 
-  <div class="slbl">Framerate Conversion</div>
+  <div class="slbl">Framerate Upscale</div>
   <div class="card">
-    <div class="ti on" id="tog-video-fps" onclick="toggle(this)"><div class="sw"></div><div class="ti-txt">Convert framerate (e.g. 23.976→24fps) — ON by default, since this matches the workflow described for this tool. Turn off if this specific source doesn't need it.</div></div>
+    <div class="ti" id="tog-motion-interp-gpu" onclick="selectInterpMode('gpu')"><div class="sw"></div><div class="ti-txt">GPU-accelerated via RIFE, PyTorch (confirmed working) — OFF by default, NVIDIA only. Uses RIFE, a neural-network frame interpolation model, run through VapourSynth's <code>vspipe</code> and piped directly into this tool's existing ffmpeg→encoder chain, no intermediate frame files written to disk. CUDA-based (PyTorch), not Vulkan — confirmed NVIDIA-only. Real throughput confirmed directly on an RTX 4070: ~24.8 fps — for a ~140 minute movie, expect roughly 130-140 minutes of processing.</div></div>
+    <div class="path-hint">
+      <strong>Setup — every command confirmed working, in the exact order used:</strong><br>
+      1. Install VapourSynth's full installer (<a href="https://github.com/vapoursynth/vapoursynth/releases" target="_blank">github.com/vapoursynth/vapoursynth/releases</a> — download <code>VapourSynth-x64-RXX.exe</code>). It detects and installs against your existing Python automatically.<br>
+      2. Open PowerShell <strong>as Administrator</strong> (writing into VapourSynth's shared plugin folder needs elevated permissions — confirmed via a real permission error otherwise) and run, one at a time — paths below are the exact ones this specific setup used, adjust only if your Python install location genuinely differs:<br>
+      <code>C:\Python314\Scripts\pip.exe install https://github.com/HomeOfVapourSynthEvolution/mvsfunc/archive/refs/heads/master.zip</code><br>
+      <code>C:\Python314\Scripts\pip.exe install vsrepo</code><br>
+      <code>C:\Python314\Scripts\pip.exe install requests</code><br>
+      3. <code>vsrepo.exe</code> installs to a <em>different</em> folder than the main Python install — confirmed at <code>C:\Users\Angel\AppData\Roaming\Python\Python314\Scripts\vsrepo.exe</code>. If yours isn't there, run <code>Get-ChildItem -Path "C:\Users\Angel\AppData" -Recurse -Filter vsrepo.exe -ErrorAction SilentlyContinue</code> to find it directly rather than guess.<br>
+      <code>C:\Users\Angel\AppData\Roaming\Python\Python314\Scripts\vsrepo.exe update</code><br>
+      <code>C:\Users\Angel\AppData\Roaming\Python\Python314\Scripts\vsrepo.exe install ffms2</code><br>
+      <code>C:\Users\Angel\AppData\Roaming\Python\Python314\Scripts\vsrepo.exe install fmtc</code><br>
+      <code>C:\Users\Angel\AppData\Roaming\Python\Python314\Scripts\vsrepo.exe install vsrife</code><br>
+      <code>C:\Python314\Scripts\pip.exe install -U packaging setuptools wheel</code><br>
+      <code>C:\Python314\Scripts\pip.exe install -U torch torchvision --index-url https://download.pytorch.org/whl/cu126 --extra-index-url https://pypi.nvidia.com</code><br>
+      4. Set the vspipe path field below to: <code>C:\Python314\Scripts\vspipe.exe</code> (confirmed this is where it lands, alongside pip itself — different from where vsrepo landed).<br>
+      <strong>If <code>vsrepo</code> fails with a permission or "path specified" error even as Administrator:</strong> this happened once — the fix was creating the folder it expects to check first: <code>mkdir "C:\Users\Angel\AppData\Roaming\Python\Python314\site-packages"</code>, then retry.
+    </div>
+    <div class="ti on" id="tog-motion-interp-gpu-trt" onclick="selectInterpMode('gpu-trt')"><div class="sw"></div><div class="ti-txt">GPU-accelerated via RIFE, TensorRT (confirmed working) — ON by default, NVIDIA only. Same RIFE model, using TensorRT for faster inference — confirmed directly faster in real testing here: ~30.2 fps vs plain PyTorch's ~24.8 fps on the same RTX 4070. Needs a genuinely separate Python install: TensorRT's PyTorch integration only supports Python 3.10-3.13 (confirmed from the project's own release notes, not 3.14) — this is a full second setup alongside the PyTorch one above, not an add-on to it.</div></div>
+    <div class="path-hint">
+      <strong>Setup — every command confirmed working, in the exact order used:</strong><br>
+      1. Install Python 3.13 <strong>alongside</strong> your existing Python (don't replace it) — download from <a href="https://www.python.org/downloads/release/python-31315/" target="_blank">python.org/downloads/release/python-31315</a> (or whatever the current 3.13.x maintenance release is — avoid the big front-page button, that's 3.14). Scroll to "Files" and get the 64-bit Windows installer; grabbing the 32-bit one too doesn't hurt as a fallback but isn't required. If you already have Python's newer install-manager system (check with <code>py --list</code> in PowerShell first), <code>py install 3.13</code> works too and may be simpler.<br>
+      2. Open PowerShell <strong>as Administrator</strong> and run, one at a time — using <code>py -3.13</code> instead of a direct path sidesteps needing to know the exact install folder:<br>
+      <code>py -3.13 -m pip install https://github.com/HomeOfVapourSynthEvolution/mvsfunc/archive/refs/heads/master.zip</code><br>
+      <code>py -3.13 -m pip install vsrepo</code><br>
+      <code>py -3.13 -m pip install requests</code><br>
+      <code>py -3.13 -m pip install -U packaging setuptools wheel</code><br>
+      <code>py -3.13 -m pip install -U torch torchvision torch_tensorrt --index-url https://download.pytorch.org/whl/cu126 --extra-index-url https://pypi.nvidia.com</code><br>
+      (This step backtracks through several version combinations before settling on one — that's normal, not an error; confirmed it lands on torch 2.7.1 + torch_tensorrt 2.7.0 successfully.)<br>
+      3. <code>vsrepo -m</code> doesn't work as a module for this package — get the real path first: <code>py -3.13 -c "import sysconfig; print(sysconfig.get_path('scripts'))"</code> (confirmed this returns <code>C:\Users\Angel\AppData\Local\Programs\Python\Python313\Scripts</code> — likely the same pattern for you, but verify).<br>
+      4. <strong>If <code>vsrepo.exe install</code> fails with "FileNotFoundError... site-packages" even as Administrator</strong> — confirmed real issue, happens because running elevated skips the per-user folder vsrepo expects to check. Fix: <code>mkdir "C:\Users\Angel\AppData\Roaming\Python\Python313\site-packages"</code>, then retry:<br>
+      <code>C:\Users\Angel\AppData\Local\Programs\Python\Python313\Scripts\vsrepo.exe update</code><br>
+      <code>C:\Users\Angel\AppData\Local\Programs\Python\Python313\Scripts\vsrepo.exe install ffms2</code><br>
+      <code>C:\Users\Angel\AppData\Local\Programs\Python\Python313\Scripts\vsrepo.exe install fmtc</code><br>
+      <code>C:\Users\Angel\AppData\Local\Programs\Python\Python313\Scripts\vsrepo.exe install vsrife</code><br>
+      5. Set the vspipe path field below to: <code>C:\Users\Angel\AppData\Local\Programs\Python\Python313\Scripts\vspipe.exe</code> — same folder as everything else for this Python specifically.<br>
+      6. First real run will be slower than subsequent ones — TensorRT compiles a one-time optimized engine for your exact GPU on first use, confirmed as a genuinely slow step separate from the actual encode. Don't mistake this for a hang.
+    </div>
+    <div class="ti" id="tog-motion-interp-gpu-vk" onclick="selectInterpMode('gpu-vk')"><div class="sw"></div><div class="ti-txt">GPU-accelerated via RIFE, AMD/Intel — untested, built from research only — OFF by default. Uses a genuinely different project (<a href="https://github.com/AmusementClub/vs-mlrt" target="_blank">vs-mlrt</a>) via its Vulkan backend (<code>vsncnn</code>), confirmed cross-vendor by the project's own docs: "supports all GPUs that provide Vulkan interface (NVidia, AMD, Intel integrated & discrete)". Different install method entirely (manual download-and-extract, not pip/vsrepo) and a different Python API than the two options above. Neither of us has AMD/Intel hardware to verify this actually works end to end — treat this as a documented starting point, not a confirmed path.</div></div>
+    <div class="path-hint">
+      <strong>Setup — research-based, not yet verified working:</strong><br>
+      1. Download the latest release from <a href="https://github.com/AmusementClub/vs-mlrt/releases" target="_blank">github.com/AmusementClub/vs-mlrt/releases</a> — get the Windows GPU package (includes <code>vsncnn.dll</code> and the <code>vsmlrt.py</code> wrapper script).<br>
+      2. Extract it directly into your VapourSynth plugins folder — for a Python install laid out like the ones in this setup, that's a path like <code>C:\Python314\Lib\site-packages\vapoursynth\plugins\</code> (confirmed as VapourSynth's real autoload location from earlier research in this same setup) — substitute whichever Python you're installing this against, and verify the folder actually exists before extracting into it.<br>
+      3. RIFE's actual model file is downloaded separately from the plugin itself (the project's release notes state "external models are no longer packaged") — check the release page's assets and the project's RIFE wiki page for the current download link and where it expects the model file placed.<br>
+      4. This does <strong>not</strong> use <code>vspipe</code> the same piped way as the two options above — it loads directly inside a VapourSynth script via <code>core.std.LoadPlugin()</code> and calls <code>RIFE(clip, multi=2, model=RIFEModel.v4_6, backend=Backend.NCNN_VK)</code> (a frame-count multiplier, not a target fps — this app's fps target would need converting to a multiplier). This app's script generation does not yet build this specific pattern — flag it back here once the manual setup itself is confirmed working, and it can be wired in properly.<br>
+      For Intel GPUs specifically, <code>Backend.OV_GPU</code> (via the same project's OpenVINO plugin, <code>vsov.dll</code>) is worth trying too — the project's own docs describe it as Intel's purpose-built runtime, likely faster than the Vulkan path on Intel hardware specifically.
+    </div>
+    <div class="ti" id="tog-motion-interp-cpu" onclick="selectInterpMode('cpu')"><div class="sw"></div><div class="ti-txt">CPU via ffmpeg minterpolate — OFF by default. Uses ffmpeg's built-in <code>minterpolate</code> filter in its strongest mode (<code>mi_mode=mci</code>) — real motion-compensated interpolation, no extra tools to install, but this filter is computationally expensive and effectively single-threaded. Expect this to meaningfully slow down the encode — for a full movie, potentially by hours, not minutes. Use one of the GPU options above instead if you have RIFE set up; this exists for when that isn't available.</div></div>
     <div class="row" style="margin-top:10px">
       <div class="field"><label>Target FPS</label>
-        <select id="targetFpsSelect">
-          <option value="23.976">23.976</option>
-          <option value="24" selected>24</option>
-          <option value="25">25</option>
-          <option value="29.97">29.97</option>
-          <option value="30">30</option>
-          <option value="59.94">59.94</option>
+        <select id="motionInterpFpsSelect" onchange="updateMotionInterpAutoHint()">
+          <option value="auto" selected>Automatic (round up to whole number)</option>
+          <option value="48">48 (2x cinema rate)</option>
           <option value="60">60</option>
         </select>
       </div>
     </div>
+    <div class="path-hint" id="motionInterpAutoHint" style="display:none"></div>
+    <div class="row" id="vspipePathRow" style="display:block;margin-top:10px">
+      <div class="field"><label>vspipe Path</label>
+        <input class="path-inp" type="text" id="vspipePath" value="C:\Users\Angel\AppData\Local\Programs\Python\Python313\Scripts\vspipe.exe" placeholder="C:\Python314\Scripts\vspipe.exe">
+      </div>
+    </div>
     <div class="warn-box">
-      If you're also converting audio for this file, use the same target framerate in the audio tool's
+      If you're also converting audio for this file, use a matching target framerate in the audio tool's
       Framerate Sync Correction — otherwise video and audio will drift out of sync with each other.
     </div>
   </div>
@@ -233,6 +284,8 @@
           <option value="qsvencc" class="ext-encoder-opt">QSVEncC (external, Intel GPU/iGPU, complete HDR10 metadata)</option>
           <option value="vceencc" class="ext-encoder-opt">VCEEncC (external, AMD GPU, complete HDR10 metadata)</option>
         </select>
+        <div class="alert-box" id="amdNo444Alert" style="display:none">⚠ AMD GPUs do not support 4:4:4 HEVC — confirmed as a genuine hardware limitation (a direct statement from AMD's own community forum: "no AMD GPU supports 4:4:4 encoding... lack of physical support"), not just a missing driver feature. AMD's video engine (VCN) handles encode and decode through the same unified hardware block, unlike NVIDIA's separate encode/decode chips — no evidence found of a decode-only exception. Both 4:4:4 toggles further up have been disabled while this encoder is selected.</div>
+        <div class="alert-box" id="intelGen444Alert" style="display:none">⚠ Intel needs 10th Gen Ice Lake or newer for 4:4:4 HEVC — both encode and decode arrived together at that generation, confirmed directly from Intel's own Quick Sync history, so there's no separate encode-vs-decode gap the way NVIDIA has. Unlike the AMD alert, the 4:4:4 toggles further up are <em>not</em> disabled here, since Intel genuinely supports this — just confirm your specific hardware is 10th Gen or newer before relying on it, older iGPUs will fail outright.</div>
       </div>
       <div class="field"><label>Quality (CRF/CQ, lower = better)</label>
         <input type="number" id="crfInput" value="15" min="0" max="51">
@@ -451,6 +504,40 @@ function toggle(el){ el.classList.toggle('on'); }
 // Only one GPU decode method can be active per ffmpeg run — clicking one
 // vendor toggle turns the other two off, rather than allowing an invalid
 // combination of simultaneous -hwaccel flags.
+// GPU (PyTorch), GPU (TensorRT), and CPU interpolation are mutually
+// exclusive - same pattern as the GPU vendor toggles elsewhere. Also
+// toggles the vspipe path field's visibility, since it's only relevant
+// when either GPU/RIFE path is active - both ultimately run through vspipe.
+function selectInterpMode(mode){
+  const ids = { gpu: 'tog-motion-interp-gpu', 'gpu-trt': 'tog-motion-interp-gpu-trt', 'gpu-vk': 'tog-motion-interp-gpu-vk', cpu: 'tog-motion-interp-cpu' };
+  const clicked = document.getElementById(ids[mode]);
+  const wasOn = clicked.classList.contains('on');
+  Object.values(ids).forEach(id => document.getElementById(id).classList.remove('on'));
+  if (!wasOn) clicked.classList.add('on');
+  document.getElementById('vspipePathRow').style.display = (isOn('tog-motion-interp-gpu') || isOn('tog-motion-interp-gpu-trt')) ? 'block' : 'none';
+}
+
+// Round the source's own detected rate up to the next whole number -
+// matches the old auto-detection behavior from the now-removed simple
+// conversion feature (which rounded, not doubled). RIFE's fps_num/fps_den
+// and minterpolate's fps both expect a plain integer. Falls back to 24 if
+// source fps hasn't been detected yet for some reason.
+function getMotionInterpTargetFps(){
+  const selected = document.getElementById('motionInterpFpsSelect').value;
+  if (selected !== 'auto') return selected;
+  return String(Math.ceil(detectedSourceFps || 24));
+}
+
+function updateMotionInterpAutoHint(){
+  const hint = document.getElementById('motionInterpAutoHint');
+  const selected = document.getElementById('motionInterpFpsSelect').value;
+  if (selected !== 'auto'){ hint.style.display = 'none'; return; }
+  hint.style.display = 'block';
+  hint.textContent = detectedSourceFps
+    ? `Source detected at ${detectedSourceFps}fps → targeting ${getMotionInterpTargetFps()}fps.`
+    : `Will round up to the next whole number of whatever framerate the loaded source turns out to be.`;
+}
+
 function selectDetectionGpu(vendor){
   const ids = { nvidia: 'tog-gpu-detect-nvidia', intel: 'tog-gpu-detect-intel', amd: 'tog-gpu-detect-amd' };
   const clicked = document.getElementById(ids[vendor]);
@@ -561,26 +648,6 @@ async function detectQuality(){
   audioModeSelect.value = hasMultichannel ? 'integrated' : 'embedded';
   updateAudioModeUI();
 
-  // Round to the nearest whole-number fps, generically, for ANY detected
-  // rate — not just the handful of known NTSC-style fractions. Confirmed
-  // via a real report: the previous version only handled three hardcoded
-  // cases (23.976, 59.94, 29.97) and silently left the dropdown at its
-  // HTML default of 24 for anything else — so a clean 50.000fps source
-  // got converted down to 24fps instead of being left at (or rounded to)
-  // its own rate, with no warning that this had happened.
-  if (detectedSourceFps != null){
-    const fpsTargetSelect = document.getElementById('targetFpsSelect');
-    const rounded = Math.round(detectedSourceFps);
-    const roundedStr = String(rounded);
-    if (!Array.from(fpsTargetSelect.options).some(o => o.value === roundedStr)){
-      const opt = document.createElement('option');
-      opt.value = roundedStr;
-      opt.textContent = roundedStr;
-      fpsTargetSelect.appendChild(opt);
-    }
-    fpsTargetSelect.value = roundedStr;
-  }
-
   // Auto-run crop and brightness detection on load rather than waiting for
   // the manual buttons — not awaited HERE, so the rest of this function's
   // UI updates land immediately instead of waiting on these (each samples
@@ -604,6 +671,7 @@ function updateQualityDisplay(track){
   if (!track){ return; }
   const fps = track.frameRate ? (eval(track.frameRate)).toFixed(3) : '?';
   detectedSourceFps = track.frameRate ? eval(track.frameRate) : null;
+  updateMotionInterpAutoHint();
   const isHDR = track.colorTransfer === 'smpte2084' || track.colorTransfer === 'arib-std-b67';
   display.innerHTML = `<strong>${track.width}×${track.height}</strong> @ <strong>${fps}fps</strong> · `
     + `Audio: <strong>${lastAudioLabel}</strong> · `
@@ -1146,6 +1214,16 @@ function updateEncoderUI(){
   document.getElementById('libplaceboWarning').style.display =
     (isOn('tog-libplacebo') && ['nvencc','qsvencc','vceencc'].includes(finalEncoder)) ? 'block' : 'none';
   document.getElementById('amfWarning').style.display = finalEncoder === 'hevc_amf' ? 'block' : 'none';
+  const isAmdEncoder = (finalEncoder === 'vceencc' || finalEncoder === 'hevc_amf');
+  document.getElementById('amdNo444Alert').style.display = isAmdEncoder ? 'block' : 'none';
+  const isIntelEncoder = (finalEncoder === 'qsvencc' || finalEncoder === 'hevc_qsv');
+  document.getElementById('intelGen444Alert').style.display = isIntelEncoder ? 'block' : 'none';
+  const tog444Intermediate = document.getElementById('tog-444-intermediate');
+  const tog444Output = document.getElementById('tog-444-output');
+  [tog444Intermediate, tog444Output].forEach(el => {
+    el.classList.toggle('disabled', isAmdEncoder);
+    if (isAmdEncoder) el.classList.remove('on'); // force off regardless of prior state - AMD can't use either
+  });
   update444Warning(finalEncoder);
 }
 
@@ -1160,9 +1238,9 @@ function update444Warning(finalEncoder){
   if (finalEncoder === 'vceencc' || finalEncoder === 'hevc_amf'){
     msg = 'AMD has no 4:4:4 support in any current GPU hardware, confirmed as of the RX 7900 series — this will fail outright, not just on older cards. Switch to libx265 (CPU) if 4:4:4 output is genuinely needed with AMD hardware otherwise in use.';
   } else if (finalEncoder === 'nvencc' || finalEncoder === 'hevc_nvenc'){
-    msg = 'NVIDIA needs GTX 16-series or newer for HEVC 4:4:4 encoding — confirm your specific card meets this before relying on it, older cards will fail.';
+    msg = 'NVIDIA needs GTX 16-series or newer to encode HEVC 4:4:4, and Turing (RTX 20-series) or newer to hardware-decode it for playback — these are separate capabilities confirmed separately. An older card between those two generations could encode this fine but struggle to play it back with hardware decode.';
   } else if (finalEncoder === 'qsvencc' || finalEncoder === 'hevc_qsv'){
-    msg = 'Intel needs 10th Gen Ice Lake or newer for HEVC 4:4:4 encoding — confirm your specific hardware meets this before relying on it, older iGPUs will fail.';
+    msg = 'Intel needs 10th Gen Ice Lake or newer for HEVC 4:4:4 — both encode and decode arrived together at that generation, confirmed directly from Intel\'s own Quick Sync history, so unlike NVIDIA there\'s no separate encode-vs-decode generation gap to worry about. Confirm your specific hardware meets this before relying on it, older iGPUs will fail outright.';
   } else if (finalEncoder === 'libx265'){
     msg = null; // no hardware dependency, software encoder supports this fully
   }
@@ -1316,9 +1394,9 @@ function buildFilterChain(){
     if (w && h) filters.push(`crop=${w}:${h}:${x}:${y}`);
   }
 
-  if (isOn('tog-video-fps')){
-    const target = document.getElementById('targetFpsSelect').value;
-    filters.push(`fps=${target}`);
+  if (isOn('tog-motion-interp-cpu')){
+    const target = getMotionInterpTargetFps();
+    filters.push(`minterpolate=fps=${target}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1`);
   }
 
   // Applied here, BEFORE any HDR color-space conversion — this is the
@@ -1466,7 +1544,18 @@ function buildJobFromCurrentSettings(chaptersPath){
             x = document.getElementById('cropX').value, y = document.getElementById('cropY').value;
       if (w && h) preColorFilters.push(`crop=${w}:${h}:${x}:${y}`);
     }
-    if (isOn('tog-video-fps')) preColorFilters.push(`fps=${document.getElementById('targetFpsSelect').value}`);
+    // mi_mode=mci (motion compensated interpolation) confirmed via research
+    // as the strongest, genuine interpolation mode this filter offers -
+    // analyzes real motion between frames and synthesizes new in-between
+    // content, unlike mi_mode=dup/blend which just duplicate or average
+    // existing frames (the same class of near-empty-frame problem the
+    // removed simple fps-duplication approach had). mc_mode and me_mode
+    // settings below are the specific combination multiple real, working
+    // examples confirmed together for best quality.
+    if (isOn('tog-motion-interp-cpu')){
+      const interpFps = getMotionInterpTargetFps();
+      preColorFilters.push(`minterpolate=fps=${interpFps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1`);
+    }
     if (isOn('tog-denoise')) preColorFilters.push(`hqdn3d=1.5:1.5:3:3`);
     if (isOn('tog-sharpen')) preColorFilters.push(`unsharp=5:5:0.15:5:5:0.0`);
 
@@ -1499,8 +1588,16 @@ function buildJobFromCurrentSettings(chaptersPath){
       // error ("incorrect codec parameters"), not just a cosmetic warning.
       y4mArgs.push('-pix_fmt', 'yuv420p10le');
     } else {
-      y4mArgs.push(...encodeHwaccelPre);
-      y4mArgs.push('-i', filePath, '-map', videoMapArg);
+      const useGpuInterp = isOn('tog-motion-interp-gpu') || isOn('tog-motion-interp-gpu-trt');
+      if (useGpuInterp){
+        // Reading from vspipe's Y4M output via stdin instead of the
+        // original file - RIFE already decoded and interpolated the
+        // source, so no hwaccel decode applies here at all.
+        y4mArgs.push('-i', 'pipe:0', '-map', '0:v:0');
+      } else {
+        y4mArgs.push(...encodeHwaccelPre);
+        y4mArgs.push('-i', filePath, '-map', videoMapArg);
+      }
       // hwdownload brings GPU-decoded frames back to CPU memory — required
       // because the eq/zscale color filters are CPU-only and can't operate
       // on frames still resident in GPU memory. This is the actual, entire
@@ -1548,13 +1645,44 @@ function buildJobFromCurrentSettings(chaptersPath){
     // quality level in some versions). Using the explicit, unambiguous
     // long-form syntax for VCEEncC avoids relying on that shorthand;
     // NVEncC and QSVEncC share consistent, confirmed --qvbr behavior.
-    const qvbrArgs = encoder === 'vceencc'
-      ? ['--vbr', '0', '--qvbr-quality', crf]
-      : ['--qvbr', crf];
+    //
+    // UPDATE — QVBR itself turned out to be the real problem, not just a
+    // parameter-naming issue. Confirmed directly, twice: a real B-frame
+    // starvation bug (I/P frames healthy, specific B-frames collapsing to
+    // 180-930 bytes during motion) persisted byte-for-byte identically
+    // even after adding --qp-max, and even after confirming via the app's
+    // own logged command that the flag was genuinely present. Found the
+    // reason directly from NVIDIA's own developer forum: an NVIDIA
+    // engineer responding to an identical symptom (QP range constraints
+    // having zero effect) states plainly "setQpRange works in VBR mode
+    // only" — QVBR silently ignores it, matching the same pattern already
+    // confirmed for --multipass (also VBR/CBR only, not QVBR). Switched
+    // to plain --vbr with an explicit bitrate target, which is the mode
+    // actually confirmed to respect these constraints — qp-min/qp-max
+    // below are now the real quality-control mechanism, with the vbr
+    // target acting as a generous ceiling underneath max-bitrate rather
+    // than the primary quality driver.
+    const crfNum = parseInt(crf, 10) || 15;
+    const vbrTargetKbps = '50000'; // generous average target, real ceiling is max-bitrate below
+    const qvbrArgs = ['--vbr', vbrTargetKbps, '--qp-min', `${crfNum-3}:${crfNum-3}:${crfNum-3}`, '--qp-max', `${crfNum+10}:${crfNum+10}:${crfNum+3}`];
     const use444OutputEncode = isOn('tog-444-output');
     const toolArgs = ['--y4m', '-i', '-', '--codec', 'hevc', '--profile', use444OutputEncode ? 'main444' : 'main10',
       '--output-depth', '10', ...qvbrArgs, '--max-bitrate', '100000', '--vbv-bufsize', '100000', '--preset', 'quality'];
-    if (use444OutputEncode) toolArgs.push('--output-csp', 'yuv444');
+    if (use444OutputEncode){
+      toolArgs.push('--output-csp', 'yuv444');
+      // Explicit level/tier instead of relying on --level auto — confirmed
+      // via a real GitHub issue on rigaya/NVEnc itself that auto-detection
+      // doesn't always work correctly. HEVC's own spec defines a real 2x
+      // bitrate/buffer multiplier for 4:4:4 profiles at a given level; if
+      // auto-detect isn't applying that correctly, the stream can end up
+      // declaring less decoder resource requirement than 4:4:4 content
+      // actually needs, causing exactly the kind of struggle a decoder
+      // would show during the most demanding moments — high motion —
+      // even while nominally within its fps rating. Level 6.2/High tier
+      // is HEVC's own highest-defined level, comfortably covering the
+      // 100Mbps cap above even with the 4:4:4 multiplier applied.
+      toolArgs.push('--level', '6.2', '--tier', 'high');
+    }
     if (isOn('tog-hdr')){
       toolArgs.push('--colormatrix', 'bt2020nc', '--colorprim', 'bt2020', '--transfer', 'smpte2084',
         '--max-cll', `${peak},400`,
@@ -1562,12 +1690,78 @@ function buildJobFromCurrentSettings(chaptersPath){
     }
     toolArgs.push('-o', tmpEncOutPath);
 
-    pipedStage = {
-      name: `${toolConfig.label} HDR10 encode (piped, no temp file)`,
-      piped: true,
-      ffmpegArgs: y4mArgs, toolPath, toolArgs,
-      totalDuration: videoDuration, cleanup: null
-    };
+    if (isOn('tog-motion-interp-gpu') || isOn('tog-motion-interp-gpu-trt')){
+      const useTrt = isOn('tog-motion-interp-gpu-trt');
+      const interpFps = getMotionInterpTargetFps();
+      const vspipePath = document.getElementById('vspipePath').value.trim();
+      // Raw Python string (r'...') avoids needing to escape Windows'
+      // backslash path separators - only a literal single-quote in the
+      // path itself would need handling, escaped here defensively.
+      const safeSourcePath = filePath.replace(/'/g, "\\'");
+      // mvsfunc's ToRGB/ToYUV bracket the RIFE call since this specific
+      // RIFE package requires RGB input (RGBS/32-bit float format,
+      // confirmed via its own source) - converts back to 10-bit YUV
+      // afterward so the downstream ffmpeg HDR/color stage receives what
+      // it expects, matching this tool's pipeline throughout.
+      //
+      // Correction from an earlier version of this script: the actual
+      // vsrepo-installed "vsrife" package (HolyWu/vs-rife, the current,
+      // maintained one) is a plain Python function import, not a VapourSynth
+      // core namespace plugin - confirmed directly from its own PyPI page:
+      // `from vsrife import rife`, called as `rife(clip)` - lowercase,
+      // not `RIFE`/`core.rife.RIFE(...)` like an earlier version of this
+      // script had. Confirmed the exact reason: v4.0.0's own changelog
+      // explicitly states "change function name to lowercase" - the
+      // installed v5.7.0 is well past that change. auto_download=True
+      // fetches the specific model file needed on first use automatically,
+      // rather than requiring a separate manual `python -m vsrife` step
+      // beforehand. trt=True (TensorRT mode only) requires a genuinely
+      // separate Python 3.10-3.13 install and its own full VapourSynth/
+      // plugin reinstall - confirmed via the project's own release notes
+      // that Python 3.14 isn't supported for the TensorRT integration
+      // specifically, unlike plain PyTorch which works fine on 3.14.
+      const rifeArgs = useTrt
+        ? `fps_num=${interpFps}, fps_den=1, auto_download=True, trt=True`
+        : `fps_num=${interpFps}, fps_den=1, auto_download=True`;
+      const vpyScriptContent = `import vapoursynth as vs
+from vapoursynth import core
+import mvsfunc as mvf
+from vsrife import rife
+clip = core.ffms2.Source(r'${safeSourcePath}')
+clip = mvf.ToRGB(clip, depth=32)
+clip = rife(clip, ${rifeArgs})
+clip = mvf.ToYUV(clip, depth=10)
+clip.set_output()
+`;
+      const vpyScriptPath = tmpDir + '_tmp_rife_' + jobId + '.vpy';
+      // ffms2's Source() creates its own index cache file automatically,
+      // named <source path>.ffindex, sitting right next to the original
+      // video - confirmed via a real leftover file after a failed run.
+      // Not something this tool writes directly, but still this job's
+      // responsibility to clean up regardless of success/failure.
+      const ffindexPath = filePath + '.ffindex';
+      // --progress makes vspipe report its own throughput (fps) directly -
+      // confirmed via VapourSynth's own docs. Total expected OUTPUT frame
+      // count uses the interpolation target rate, not the source rate,
+      // since that's what vspipe is actually producing here - RIFE
+      // increases frame count to hit the target fps.
+      const totalOutputFrames = Math.round(videoDuration * parseFloat(interpFps));
+      pipedStage = {
+        name: `RIFE interpolation (GPU${useTrt ? ', TensorRT' : ''}) → ${toolConfig.label} HDR10 encode`,
+        triplePiped: true,
+        vspipePath, vspipeArgs: ['-c', 'y4m', '--progress', vpyScriptPath, '-'],
+        vpyScriptPath, vpyScriptContent, totalOutputFrames,
+        ffmpegArgs: y4mArgs, toolPath, toolArgs,
+        totalDuration: videoDuration, cleanup: [vpyScriptPath, ffindexPath]
+      };
+    } else {
+      pipedStage = {
+        name: `${toolConfig.label} HDR10 encode (piped, no temp file)`,
+        piped: true,
+        ffmpegArgs: y4mArgs, toolPath, toolArgs,
+        totalDuration: videoDuration, cleanup: null
+      };
+    }
     preStages.push(pipedStage);
 
     // A bare .hevc elementary stream (what NVEncC/QSVEncC/VCEEncC produce)
@@ -1580,12 +1774,37 @@ function buildJobFromCurrentSettings(chaptersPath){
     // works, verified end-to-end: remux the raw stream into a proper
     // intermediate container first, with an explicit constant frame rate,
     // THEN do the final mux against that instead of the raw stream.
-    const effectiveFps = isOn('tog-video-fps')
-      ? document.getElementById('targetFpsSelect').value
+    const effectiveFps = (isOn('tog-motion-interp-gpu') || isOn('tog-motion-interp-gpu-trt') || isOn('tog-motion-interp-cpu'))
+      ? getMotionInterpTargetFps()
       : (detectedSourceFps || 24);
     const tmpRemuxedPath = tmpDir + '_tmp_remuxed_' + jobId + '.mp4';
+    // -c:v copy (stream copy) alone here was a real, confirmed bug —
+    // reproduced directly: with B-frames present (NVEncC's default preset
+    // uses them), this stage silently dropped 2 frames out of every 240
+    // during the reorder-buffer flush, since the raw input has no valid
+    // timestamps to guide it. VLC correctly reporting "0 lost" during
+    // playback made sense once this was found — frames were missing from
+    // the file itself, not dropped during decode.
+    //
+    // First attempt at a fix (lossless re-encode) was itself a serious,
+    // confirmed mistake — verified frame-correctness and byte-identical
+    // quality on a short synthetic test clip, but never checked real
+    // file-size impact on genuinely complex content. Reproduced the
+    // actual failure directly: on realistic high-complexity footage, true
+    // lossless mode bloated a 15Mbps source to 119Mbps — an ~8x increase
+    // that caused a real "No space left on device" failure 77 minutes
+    // into an actual movie encode, having already written 100+GB.
+    //
+    // Real fix: the setts bitstream filter explicitly rewrites each
+    // packet's timestamp during a pure stream copy — no decode, no
+    // re-encode, no bloat. Verified directly across multiple framerates
+    // (23.976 and 24) that this produces the exact correct frame count
+    // and duration, at output file size identical to the source (true
+    // stream copy) and far faster than realtime, unlike any re-encode
+    // based approach.
     const remuxArgs = ['-r', String(effectiveFps), '-i', tmpEncOutPath,
-      '-vsync', 'cfr', '-r', String(effectiveFps), '-c:v', 'copy',
+      '-vsync', 'cfr', '-bsf:v', `setts=ts=N/${effectiveFps}/TB`,
+      '-c:v', 'copy',
       '-video_track_timescale', String(Math.round(effectiveFps * 1000)),
       '-y', tmpRemuxedPath];
     preStages.push({
@@ -1880,6 +2099,15 @@ function buildJobFromCurrentSettings(chaptersPath){
 
 async function addToQueue(){
   if (!filePath){ setStatus('Load a file first.', 'red'); return; }
+  // This toggle is documented as research-based and untested - the script
+  // generation below doesn't build its (different) API pattern yet, so
+  // letting a job through would either crash or silently run the wrong
+  // (NVIDIA-specific) script instead. Block it explicitly rather than
+  // fail confusingly partway through.
+  if (isOn('tog-motion-interp-gpu-vk')){
+    setStatus('AMD/Intel RIFE support is documented but not yet wired into this app\'s script generation - see the setup notes under that toggle. Switch to PyTorch, TensorRT, or CPU to actually run a job.', 'red');
+    return;
+  }
 
   // Wait for any crop/brightness detection still reading this file in the
   // background before adding an encode that will also read it — running
@@ -2052,7 +2280,23 @@ async function processNextInQueue(){
       setStatus(`${next.label} — Step ${i+1}/${next.stages.length}: ${stage.name}...`, '');
       renderQueue();
       let result;
-      if (stage.piped){
+      if (stage.triplePiped){
+        // Write the dynamically-generated VapourSynth script to disk first
+        // — vspipe needs a real script file path, and the renderer can't
+        // write files directly, so this has to happen here, right before
+        // the pipe actually starts, same async-execution-time pattern as
+        // everything else in this loop.
+        const writeResult = await window.electronAPI.writeTextFile({ path: stage.vpyScriptPath, content: stage.vpyScriptContent });
+        if (!writeResult.written){
+          result = { code: -1, stderr: `Failed to write VapourSynth script: ${writeResult.error}` };
+        } else {
+          result = await window.electronAPI.runTriplePipedEncode({
+            vspipe: stage.vspipePath, vspipeArgs: stage.vspipeArgs,
+            ffmpeg, ffmpegArgs: stage.ffmpegArgs, tool: stage.toolPath, toolArgs: stage.toolArgs,
+            totalDuration: stage.totalDuration, totalOutputFrames: stage.totalOutputFrames, jobId: next.id
+          });
+        }
+      } else if (stage.piped){
         result = await window.electronAPI.runPipedEncode({
           ffmpeg, ffmpegArgs: stage.ffmpegArgs, tool: stage.toolPath, toolArgs: stage.toolArgs,
           totalDuration: stage.totalDuration, jobId: next.id
