@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getChannelCount: (payload) => ipcRenderer.invoke('get-channel-count', payload),
   getDuration: (payload) => ipcRenderer.invoke('get-duration', payload),
   getVideoInfo: (payload) => ipcRenderer.invoke('get-video-info', payload),
+  getHdrMetadata: (payload) => ipcRenderer.invoke('get-hdr-metadata', payload),
   detectCrop: (payload) => ipcRenderer.invoke('detect-crop', payload),
   analyzeBrightness: (payload) => ipcRenderer.invoke('analyze-brightness', payload),
   calibrateNpl: (payload) => ipcRenderer.invoke('calibrate-npl', payload),
