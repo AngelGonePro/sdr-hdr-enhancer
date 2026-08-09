@@ -164,7 +164,109 @@ ipcMain.handle('get-video-info', async (event, payload) => {
   });
 });
 
-// Builds the correct GPU decode flags for detection sampling, per vendor —
+// Extracts REAL HDR10 static metadata (mastering-display primaries/white
+// point/luminance range, MaxCLL/MaxFALL) directly from a source video
+// track, for the already-HDR passthrough path — added after a real
+// report that a genuine 4K UHD source (MaxCLL 4111, MaxFALL 201,
+// confirmed via this exact probe) was having its metadata REPLACED on
+// output by this app's own SDR-oriented Brightness Reference slider
+// (100-255 nits) regardless of source type, drastically understating the
+// source's real, already-correct mastering info instead of preserving
+// it. Reads frame-level side_data (stream-level ffprobe entries don't
+// expose this) from the first few frames of the given stream, since
+// HDR10 static metadata is constant for the whole stream and typically
+// only actually attached to certain frames (keyframes) - #10 gives a
+// few frames of margin without scanning the whole file.
+ipcMain.handle('get-hdr-metadata', async (event, payload) => {
+  return new Promise((resolve) => {
+    const ffmpegPath = payload.ffmpeg;
+    const filePath = payload.filePath;
+    const streamIndex = payload.streamIndex;
+    const ffprobePath = ffmpegPath.replace(/ffmpeg(\.exe)?$/i, (m, ext) => 'ffprobe' + (ext || ''));
+
+    const args = [
+      '-v', 'error',
+      '-select_streams', String(streamIndex),
+      '-show_frames',
+      '-read_intervals', '%+#10',
+      '-show_entries', 'frame=side_data_list',
+      '-of', 'json',
+      filePath
+    ];
+    let proc;
+    try {
+      proc = spawn(ffprobePath, args, { windowsHide: true });
+    } catch (err) {
+      resolve({ error: String(err && err.message || err) });
+      return;
+    }
+    let stdout = "";
+    let stderr = "";
+    proc.stdout.on("data", d => stdout += d.toString());
+    proc.stderr.on("data", d => stderr += d.toString());
+    proc.on("close", code => {
+      if (code !== 0) {
+        resolve({ error: stderr || `ffprobe exited with code ${code}` });
+        return;
+      }
+      try {
+        const parsed = JSON.parse(stdout);
+        const frames = parsed.frames || [];
+        let mastering = null;
+        let contentLight = null;
+        let hasDolbyVision = false;
+        for (const frame of frames) {
+          for (const sd of (frame.side_data_list || [])) {
+            if (sd.side_data_type === 'Mastering display metadata' && !mastering) mastering = sd;
+            if (sd.side_data_type === 'Content light level metadata' && !contentLight) contentLight = sd;
+            if (sd.side_data_type === 'Dolby Vision RPU Data' || sd.side_data_type === 'Dolby Vision Metadata') hasDolbyVision = true;
+          }
+          if (mastering && contentLight && hasDolbyVision) break;
+        }
+        if (!mastering && !contentLight && !hasDolbyVision) {
+          resolve({ found: false, hasDolbyVision: false });
+          return;
+        }
+        // Fractions like "34000/50000" -> plain integers scaled to the
+        // x265/NVEncC master-display convention (x50000 for primaries,
+        // x10000 for luminance) - confirmed these are the SAME scale
+        // ffprobe already reports them in, so this is a straight parse,
+        // not a unit conversion.
+        const asScaledInt = (fracStr, targetDenom) => {
+          if (!fracStr) return null;
+          const [num, den] = fracStr.split('/').map(Number);
+          if (!den) return null;
+          return Math.round((num / den) * targetDenom);
+        };
+        resolve({
+          found: !!(mastering || contentLight),
+          hasDolbyVision,
+          mastering: mastering ? {
+            redX: asScaledInt(mastering.red_x, 50000),
+            redY: asScaledInt(mastering.red_y, 50000),
+            greenX: asScaledInt(mastering.green_x, 50000),
+            greenY: asScaledInt(mastering.green_y, 50000),
+            blueX: asScaledInt(mastering.blue_x, 50000),
+            blueY: asScaledInt(mastering.blue_y, 50000),
+            whitePointX: asScaledInt(mastering.white_point_x, 50000),
+            whitePointY: asScaledInt(mastering.white_point_y, 50000),
+            maxLuminance: asScaledInt(mastering.max_luminance, 10000),
+            minLuminance: asScaledInt(mastering.min_luminance, 10000)
+          } : null,
+          contentLight: contentLight ? {
+            maxContent: contentLight.max_content,
+            maxAverage: contentLight.max_average
+          } : null
+        });
+      } catch (e) {
+        resolve({ error: 'Failed to parse ffprobe output: ' + e.message });
+      }
+    });
+    proc.on("error", err => resolve({ error: err.message }));
+  });
+});
+
+
 // researched directly rather than assumed, since the three vendors use
 // genuinely different ffmpeg hwaccel methods: NVIDIA via cuda, Intel via
 // qsv, AMD via d3d11va (a Windows vendor-neutral API — the right choice
