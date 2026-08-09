@@ -22,6 +22,13 @@
   .ti.on .sw{background:var(--accent);}
   .ti.on .sw::after{background:#04141c;left:17px;}
   .ti-txt{font-size:.78rem;color:var(--text);line-height:1.5;}
+  .ti-txt-details{display:block;}
+  .ti-txt-details summary{cursor:pointer;list-style:none;display:flex;align-items:baseline;gap:6px;}
+  .ti-txt-details summary::-webkit-details-marker{display:none;}
+  .ti-txt-details summary::before{content:'▸';color:var(--accent);font-size:.7rem;flex-shrink:0;transition:transform .15s;}
+  .ti-txt-details[open] summary::before{transform:rotate(90deg);}
+  .ti-txt-details summary .sum-text{flex:1;}
+  .ti-txt-body{margin-top:6px;padding-left:14px;border-left:2px solid rgba(92,225,230,.15);}
   .info-box{background:rgba(92,225,230,.06);border:1px solid rgba(92,225,230,.2);border-radius:8px;padding:12px 14px;font-size:.75rem;line-height:1.7;color:var(--text);margin-top:8px;}
   .warn-box{background:rgba(255,92,122,.08);border:1px solid rgba(255,92,122,.3);border-radius:8px;padding:12px 14px;font-size:.75rem;line-height:1.7;margin-top:8px;}
   .alert-box{background:rgba(255,92,122,.22);border:2px solid rgba(255,92,122,.75);border-radius:8px;padding:12px 14px;font-size:.8rem;line-height:1.7;margin-top:8px;font-weight:600;color:#ffdde1;}
@@ -196,6 +203,10 @@
 
   <div class="slbl">Framerate Upscale</div>
   <div class="card">
+    <div class="alert-box">
+      <strong>⚠ All options below are OFF by default — original source frames are used untouched unless you explicitly enable one.</strong><br><br>
+      The three RIFE-based options (PyTorch, TensorRT, and the untested AMD/Intel path) are AI-based and, after extensive real testing in this app, confirmed capable of producing a "rubberbanding" motion artifact — a real, sometimes subtle, sometimes not, inconsistency in motion smoothness, particularly on chaotic/cluttered scenes and fast subject motion. This was narrowed down but not fully eliminated across multiple rounds of real, evidence-based fixes (scene-change detection tuning, three different model versions tested). If you want zero risk of this artifact, leave every AI option off and either skip framerate upscaling entirely, or use the CPU/<code>minterpolate</code> option below, which uses a completely different, non-AI technique.
+    </div>
     <div class="ti" id="tog-motion-interp-gpu" onclick="selectInterpMode('gpu')"><div class="sw"></div><div class="ti-txt">GPU-accelerated via RIFE, PyTorch (confirmed working) — OFF by default, NVIDIA only. Uses RIFE, a neural-network frame interpolation model, run through VapourSynth's <code>vspipe</code> and piped directly into this tool's existing ffmpeg→encoder chain, no intermediate frame files written to disk. CUDA-based (PyTorch), not Vulkan — confirmed NVIDIA-only. Real throughput confirmed directly on an RTX 4070: ~24.8 fps — for a ~140 minute movie, expect roughly 130-140 minutes of processing.</div></div>
     <div class="path-hint">
       <strong>Setup — every command confirmed working, in the exact order used:</strong><br>
@@ -209,12 +220,13 @@
       <code>C:\Users\Angel\AppData\Roaming\Python\Python314\Scripts\vsrepo.exe install ffms2</code><br>
       <code>C:\Users\Angel\AppData\Roaming\Python\Python314\Scripts\vsrepo.exe install fmtc</code><br>
       <code>C:\Users\Angel\AppData\Roaming\Python\Python314\Scripts\vsrepo.exe install vsrife</code><br>
+      <code>C:\Users\Angel\AppData\Roaming\Python\Python314\Scripts\vsrepo.exe install misc</code> — confirmed required via a real failure: <code>sc=True</code> (scene-change detection, on by default below) needs this separate plugin internally and errors without it.<br>
       <code>C:\Python314\Scripts\pip.exe install -U packaging setuptools wheel</code><br>
       <code>C:\Python314\Scripts\pip.exe install -U torch torchvision --index-url https://download.pytorch.org/whl/cu126 --extra-index-url https://pypi.nvidia.com</code><br>
       4. Set the vspipe path field below to: <code>C:\Python314\Scripts\vspipe.exe</code> (confirmed this is where it lands, alongside pip itself — different from where vsrepo landed).<br>
       <strong>If <code>vsrepo</code> fails with a permission or "path specified" error even as Administrator:</strong> this happened once — the fix was creating the folder it expects to check first: <code>mkdir "C:\Users\Angel\AppData\Roaming\Python\Python314\site-packages"</code>, then retry.
     </div>
-    <div class="ti on" id="tog-motion-interp-gpu-trt" onclick="selectInterpMode('gpu-trt')"><div class="sw"></div><div class="ti-txt">GPU-accelerated via RIFE, TensorRT (confirmed working) — ON by default, NVIDIA only. Same RIFE model, using TensorRT for faster inference — confirmed directly faster in real testing here: ~30.2 fps vs plain PyTorch's ~24.8 fps on the same RTX 4070. Needs a genuinely separate Python install: TensorRT's PyTorch integration only supports Python 3.10-3.13 (confirmed from the project's own release notes, not 3.14) — this is a full second setup alongside the PyTorch one above, not an add-on to it.</div></div>
+    <div class="ti" id="tog-motion-interp-gpu-trt" onclick="selectInterpMode('gpu-trt')"><div class="sw"></div><div class="ti-txt">GPU-accelerated via RIFE, TensorRT (confirmed working) — OFF by default, NVIDIA only. Same RIFE model, using TensorRT for faster inference — confirmed directly faster in real testing here: ~30.2 fps vs plain PyTorch's ~24.8 fps on the same RTX 4070. Needs a genuinely separate Python install: TensorRT's PyTorch integration only supports Python 3.10-3.13 (confirmed from the project's own release notes, not 3.14) — this is a full second setup alongside the PyTorch one above, not an add-on to it.</div></div>
     <div class="path-hint">
       <strong>Setup — every command confirmed working, in the exact order used:</strong><br>
       1. Install Python 3.13 <strong>alongside</strong> your existing Python (don't replace it) — download from <a href="https://www.python.org/downloads/release/python-31315/" target="_blank">python.org/downloads/release/python-31315</a> (or whatever the current 3.13.x maintenance release is — avoid the big front-page button, that's 3.14). Scroll to "Files" and get the 64-bit Windows installer; grabbing the 32-bit one too doesn't hurt as a fallback but isn't required. If you already have Python's newer install-manager system (check with <code>py --list</code> in PowerShell first), <code>py install 3.13</code> works too and may be simpler.<br>
@@ -231,10 +243,11 @@
       <code>C:\Users\Angel\AppData\Local\Programs\Python\Python313\Scripts\vsrepo.exe install ffms2</code><br>
       <code>C:\Users\Angel\AppData\Local\Programs\Python\Python313\Scripts\vsrepo.exe install fmtc</code><br>
       <code>C:\Users\Angel\AppData\Local\Programs\Python\Python313\Scripts\vsrepo.exe install vsrife</code><br>
+      <code>C:\Users\Angel\AppData\Local\Programs\Python\Python313\Scripts\vsrepo.exe install misc</code> — confirmed required via a real failure: <code>sc=True</code> (scene-change detection, on by default below) needs this separate plugin internally and errors without it.<br>
       5. Set the vspipe path field below to: <code>C:\Users\Angel\AppData\Local\Programs\Python\Python313\Scripts\vspipe.exe</code> — same folder as everything else for this Python specifically.<br>
       6. First real run will be slower than subsequent ones — TensorRT compiles a one-time optimized engine for your exact GPU on first use, confirmed as a genuinely slow step separate from the actual encode. Don't mistake this for a hang.
     </div>
-    <div class="ti" id="tog-motion-interp-gpu-vk" onclick="selectInterpMode('gpu-vk')"><div class="sw"></div><div class="ti-txt">GPU-accelerated via RIFE, AMD/Intel — untested, built from research only — OFF by default. Uses a genuinely different project (<a href="https://github.com/AmusementClub/vs-mlrt" target="_blank">vs-mlrt</a>) via its Vulkan backend (<code>vsncnn</code>), confirmed cross-vendor by the project's own docs: "supports all GPUs that provide Vulkan interface (NVidia, AMD, Intel integrated & discrete)". Different install method entirely (manual download-and-extract, not pip/vsrepo) and a different Python API than the two options above. Neither of us has AMD/Intel hardware to verify this actually works end to end — treat this as a documented starting point, not a confirmed path.</div></div>
+    <div class="ti" id="tog-motion-interp-gpu-vk" onclick="selectInterpMode('gpu-vk')"><div class="sw"></div><div class="ti-txt">GPU-accelerated via RIFE, AMD/Intel — untested, built from research only — OFF by default. Uses a genuinely different project (<a href="https://github.com/AmusementClub/vs-mlrt" target="_blank">vs-mlrt</a>) via its Vulkan backend (<code>vsncnn</code>), confirmed cross-vendor by the project's own docs: "supports all GPUs that provide Vulkan interface (NVidia, AMD, Intel integrated & discrete)". Different install method entirely (manual download-and-extract, not pip/vsrepo) and a different Python API than the two options above. Two real caveats found researching this, neither present in the working PyTorch/TensorRT options above: (1) no built-in scene-change detection — unlike <code>sc=True</code> on the options above (added specifically to fix a real reported warping artifact during hard cuts, like text card changes), this project's own docs say you'd need to apply a separate scene-detection filter (<code>misc.SCDetect</code> or <code>mv.SCDetection</code>) yourself first, and even then note result quality depends heavily on tuning it correctly — a more manual, less reliable setup. (2) A related project's own documentation specifically warns that RIFE combined with TensorRT is "broken without workarounds in every implementation (mlrt, torch_tensorrt, onnxruntime-trt...)" and produces wobbly-line artifacts during panning shots — the same source notes <code>HolyWu/vs-rife</code> (the PyTorch/TensorRT options above) specifically fixed this, while this project apparently hasn't as cleanly. Neither of us has AMD/Intel hardware to verify any of this end to end — treat this as a documented starting point, not a confirmed path.</div></div>
     <div class="path-hint">
       <strong>Setup — research-based, not yet verified working:</strong><br>
       1. Download the latest release from <a href="https://github.com/AmusementClub/vs-mlrt/releases" target="_blank">github.com/AmusementClub/vs-mlrt/releases</a> — get the Windows GPU package (includes <code>vsncnn.dll</code> and the <code>vsmlrt.py</code> wrapper script).<br>
@@ -243,8 +256,38 @@
       4. This does <strong>not</strong> use <code>vspipe</code> the same piped way as the two options above — it loads directly inside a VapourSynth script via <code>core.std.LoadPlugin()</code> and calls <code>RIFE(clip, multi=2, model=RIFEModel.v4_6, backend=Backend.NCNN_VK)</code> (a frame-count multiplier, not a target fps — this app's fps target would need converting to a multiplier). This app's script generation does not yet build this specific pattern — flag it back here once the manual setup itself is confirmed working, and it can be wired in properly.<br>
       For Intel GPUs specifically, <code>Backend.OV_GPU</code> (via the same project's OpenVINO plugin, <code>vsov.dll</code>) is worth trying too — the project's own docs describe it as Intel's purpose-built runtime, likely faster than the Vulkan path on Intel hardware specifically.
     </div>
-    <div class="ti" id="tog-motion-interp-cpu" onclick="selectInterpMode('cpu')"><div class="sw"></div><div class="ti-txt">CPU via ffmpeg minterpolate — OFF by default. Uses ffmpeg's built-in <code>minterpolate</code> filter in its strongest mode (<code>mi_mode=mci</code>) — real motion-compensated interpolation, no extra tools to install, but this filter is computationally expensive and effectively single-threaded. Expect this to meaningfully slow down the encode — for a full movie, potentially by hours, not minutes. Use one of the GPU options above instead if you have RIFE set up; this exists for when that isn't available.</div></div>
-    <div class="row" style="margin-top:10px">
+    <div class="path-hint">
+      <strong>Quality/speed tuning applied to both PyTorch and TensorRT above (confirmed working):</strong><br>
+      <code>model='4.25.lite'</code> — RIFE's model version, not the default. Started on whatever the package's own unspecified default was, then explicitly set to <code>'4.18'</code> after a real reported artifact (text warping on studio credit cards) — that exact version is named in <code>vsrife</code>'s own changelog as the fix for a matching "jaggy/wobbling line issue." Then changed to <code>'4.25.lite'</code> after a real reported slowdown traced to <code>4.18</code> specifically — confirmed via its own docs to have "bidirectional and dynamic optical flow enabled," a genuinely heavier computation than simpler versions. Briefly tried <code>'4.13'</code> (community-rated best for tracking fast-moving objects) to address a separate "rubberbanding" artifact - confirmed via direct, objective packet-level comparison (small-B-frame anomaly count at the exact reported problem timestamp) that this was a real regression, not just a subjective impression: 2 anomalies became 5 in the same location. Reverted back to <code>4.25.lite</code>. The rubberbanding issue itself remains unresolved as of this revert - this is now the second documented dead end on it, kept here so neither gets re-tried blind.<br>
+      <code>sc=True, sc_threshold=0.3</code> — scene-change detection, prevents interpolating across a hard cut (duplicates the frame there instead of morphing). Raised from the package's own default of 0.15 after a real reported "rubberbanding" artifact during fast motion, on the (well-documented, community-confirmed) theory that 0.15 was too sensitive and falsely flagging fast motion as a cut. Confirmed via direct frame-level analysis this isn't computationally expensive — it's a lightweight grayscale frame-difference check, not a neural network pass — so this isn't a meaningful factor in encode speed either way.<br>
+      <strong>Target FPS default, history (documented honestly, including a dead end):</strong> originally doubled the source rate, changed to "round up to next whole number" after a request to match that behavior. Then reverted back to a clean 2x multiple based on real evidence that non-integer-multiple targets ("use multipliers instead of a fixed refresh rate - 30→48 has double the performance penalty than 30→60," per direct user testimony tuning this exact class of tool) cost more and might explain a reported "rubberbanding" artifact too. <strong>That theory was then tested directly against the real reported case and confirmed NOT to fix it</strong> - reverted back to "round up to next whole number" since the 2x multiple's real, confirmed speed cost (roughly double) bought nothing. The rubberbanding's actual root cause remains unresolved as of this revert - this history is kept here so the same dead end isn't re-tried without remembering it already failed once.
+    </div>
+    <div class="ti" id="tog-motion-interp-mvtools" onclick="selectInterpMode('mvtools')"><div class="sw"></div><div class="ti-txt">CPU (multithreaded) via MVTools, non-AI — OFF by default. Uses <code>mvsf</code>, a modern float-precision port of the classical MVTools motion-estimation library — real block-matching motion compensation, the same category of technique used since before deep learning existed in this field, confirmed via a real academic survey as a fundamentally different approach from RIFE, not a lesser version of it. Confirmed genuinely multithreaded via VapourSynth's own frame-level parallelism, unlike the single-threaded <code>minterpolate</code> option below - a real structural speed advantage. One honest caveat straight from the plugin's own author: its higher-quality function (<code>FlowFPS</code>, used here) is described by the author themselves as "too slow for realtime frame rate conversion" at 24→60fps-class jobs - the faster alternative (<code>BlockFPS</code>) exists but is described by the same author as "even uglier." This uses the slower, better-quality one. Motion estimation is tuned beyond MVTools' own defaults for accuracy: quarter-pel subpixel precision (<code>pel=4</code>, up from the default half-pel) plus SATD-based matching (<code>dct=4</code>) for better tracking of thin, high-contrast edges, exhaustive search (<code>search=3</code>, not the faster/less accurate default hex search), a second <code>Recalculate</code> refinement pass at finer 4×4 blocks (MVTools' own documented "two-stage method" for more robust estimation), and <code>FlowFPS</code>'s mask limit lowered to <code>ml=40</code> so regions with unreliable motion blend instead of hard-warping - confirmed via direct testing this meaningfully reduces (but does not eliminate) visible warping on thin, fast-moving subjects (e.g. an arm swinging against a cluttered background) and on thin high-contrast objects generally (e.g. eyeglasses frames) - block matching is structurally worse than RIFE's neural optical flow on this class of content, so some residual artifact there is expected even after tuning. Note: a strong blue "glow" look on skin near practical lighting (e.g. LED-lit props) may be genuine source cinematography, not an interpolation artifact - confirmed via direct side-by-side comparison against the un-interpolated source in one real case, worth ruling out before assuming a bug.</div></div>
+    <div class="path-hint">
+      <strong>Setup — every command confirmed working, in the exact order used (same VapourSynth/Python 3.14 environment as the GPU/PyTorch option above - if you already set that up, skip to step 4):</strong><br>
+      1. Install VapourSynth's full installer (<a href="https://github.com/vapoursynth/vapoursynth/releases" target="_blank">github.com/vapoursynth/vapoursynth/releases</a> — download <code>VapourSynth-x64-RXX.exe</code>). It detects and installs against your existing Python automatically.<br>
+      2. Open PowerShell <strong>as Administrator</strong> (writing into VapourSynth's shared plugin folder needs elevated permissions - confirmed via a real permission error otherwise) and run:<br>
+      <code>C:\Python314\Scripts\pip.exe install vsrepo</code><br>
+      <code>C:\Python314\Scripts\pip.exe install requests</code><br>
+      3. <code>vsrepo.exe</code> installs to a <em>different</em> folder than the main Python install - confirmed at <code>C:\Users\Angel\AppData\Roaming\Python\Python314\Scripts\vsrepo.exe</code>. If yours isn't there, run <code>Get-ChildItem -Path "C:\Users\Angel\AppData" -Recurse -Filter vsrepo.exe -ErrorAction SilentlyContinue</code> to find it directly rather than guess.<br>
+      <code>C:\Users\Angel\AppData\Roaming\Python\Python314\Scripts\vsrepo.exe update</code><br>
+      <code>C:\Users\Angel\AppData\Roaming\Python\Python314\Scripts\vsrepo.exe install ffms2</code> — needed regardless of which interpolation method you use; this is what actually reads the source video into the VapourSynth script.<br>
+      4. Install mvsf itself:<br>
+      <code>C:\Users\Angel\AppData\Roaming\Python\Python314\Scripts\vsrepo.exe install mvsf</code><br>
+      <strong>Correction (confirmed via real troubleshooting - the vsrepo package listing's "no dependencies" claim is incomplete):</strong> despite the "sf" (single-float) name, the compiled plugin actually links against <code>libfftw3-3.dll</code> - the <em>double</em>-precision FFTW build, not <code>libfftw3f-3.dll</code> (the float one, easy to grab by mistake). Download <code>fftw-3.3.5-dll64.zip</code> from <a href="https://www.fftw.org/install/windows.html">fftw.org</a> and place <code>libfftw3-3.dll</code> from it directly alongside <code>libmvtools_sf_em64t.dll</code> (typically <code>C:\Python314\Lib\site-packages\vapoursynth\plugins\vsrepo\</code>) - confirmed via <a href="https://github.com/lucasg/Dependencies">lucasg/Dependencies</a> diagnostic and a direct <code>core.std.LoadPlugin()</code> test that this is the only missing piece. If you ever suspect a plugin isn't actually loading (a generic "no attribute" error from VapourSynth, which silently swallows the real cause), that Dependencies tool plus a direct <code>core.std.LoadPlugin(path=r'...')</code> test in a plain Python session is the fastest way to get the real underlying error instead of guessing.<br>
+      5. Set the vspipe path field below to: <code>C:\Python314\Scripts\vspipe.exe</code> - mvsf was only ever installed into the Python 3.14 environment, not the separate Python 3.13/TensorRT one used by the GPU/TensorRT option above. This toggle auto-fills that field to the 3.14 path when selected (confirmed root cause of a real "No attribute with the name mvsf exists" failure was the field being left on the 3.13 path from a previous TensorRT selection) - only overwrites it if it's still at a known default, so a manually customized path is never clobbered.<br>
+      <strong>If <code>vsrepo</code> fails with a permission or "path specified" error even as Administrator:</strong> this happened once - the fix was creating the folder it expects to check first: <code>mkdir "C:\Users\Angel\AppData\Roaming\Python\Python314\site-packages"</code>, then retry.
+    </div>
+    <div class="path-hint">
+      <strong>Quality tuning applied beyond MVTools' own defaults (confirmed working):</strong><br>
+      <code>pel=4</code> — quarter-pel subpixel precision on <code>Super</code>, up from the default half-pel. Better tracking for thin, slowly-moving high-contrast edges (e.g. eyeglasses frames) - confirmed via direct frame-by-frame comparison that the default (pel=2) let this class of detail visibly warp.<br>
+      <code>search=3, dct=4</code> on both <code>Analyse</code> calls — exhaustive search instead of the default hex search, plus SATD-based block matching instead of plain SAD (more robust to small contrast/blur shifts). Real CPU cost for real accuracy gain.<br>
+      A second <code>Recalculate</code> pass at <code>blksize=4, overlap=2, search=3, dct=4</code> — MVTools' own documented "two-stage method" for more robust motion estimation, refining the initial vectors at a finer block size.<br>
+      <code>ml=40</code> on <code>FlowFPS</code> — mask limit lowered from the default 100, so regions with unreliable motion blend/soften instead of hard-warping.<br>
+      <strong>History (confirmed via direct testing, not guessed):</strong> defaults produced severe warping on thin/fast-moving subjects against cluttered backgrounds (an arm/backpack strap crossing a junkyard scene, confirmed worse than the RIFE/AI option above on the same content). The search/Recalculate/ml changes above fixed that case. A second, subtler case then showed up on a thin object at rest (an eyeglasses frame in a closeup) - traced via direct pixel comparison against the un-interpolated source, which also ruled out a false positive (a blue "glow" on skin nearby turned out to be genuine practical lighting in the source, not an artifact). The pel/dct changes above target that second case specifically. Some residual warping on this class of content (thin, high-contrast, fast-moving detail) is still expected even after tuning - block matching is structurally weaker than RIFE's neural optical flow here; MVTools' real advantage stays speed and not needing a GPU on calmer footage.
+    </div>
+    <div class="ti" id="tog-motion-interp-cpu" onclick="selectInterpMode('cpu')"><div class="sw"></div><div class="ti-txt">CPU via ffmpeg minterpolate — OFF by default, single-threaded. Uses ffmpeg's built-in <code>minterpolate</code> filter in its strongest mode (<code>mi_mode=mci</code>) — real motion-compensated interpolation, non-AI, no extra tools to install. Confirmed effectively single-threaded, unlike the MVTools option above - prefer that one if you're willing to install the one extra plugin; this exists for when even that isn't available.</div></div>
+    <div class="row" id="targetFpsRow" style="margin-top:10px">
       <div class="field"><label>Target FPS</label>
         <select id="motionInterpFpsSelect" onchange="updateMotionInterpAutoHint()">
           <option value="auto" selected>Automatic (round up to whole number)</option>
@@ -256,18 +299,25 @@
     <div class="path-hint" id="motionInterpAutoHint" style="display:none"></div>
     <div class="row" id="vspipePathRow" style="display:block;margin-top:10px">
       <div class="field"><label>vspipe Path</label>
-        <input class="path-inp" type="text" id="vspipePath" value="C:\Users\Angel\AppData\Local\Programs\Python\Python313\Scripts\vspipe.exe" placeholder="C:\Python314\Scripts\vspipe.exe">
+        <input class="path-inp" type="text" id="vspipePath" value="C:\Python314\Scripts\vspipe.exe" placeholder="C:\Python314\Scripts\vspipe.exe">
       </div>
     </div>
     <div class="warn-box">
-      If you're also converting audio for this file, use a matching target framerate in the audio tool's
-      Framerate Sync Correction — otherwise video and audio will drift out of sync with each other.
+      If you're using one of the 5 interpolation options above and also converting audio for this file
+      separately, use a matching target framerate in the audio tool's Framerate Sync Correction —
+      otherwise video and audio will drift out of sync with each other. (Framerate Conform below is a
+      different, independent option that doesn't need this — it handles audio sync automatically.)
     </div>
+  </div>
+
+  <div class="slbl">Framerate Conform (movies only — no AI, no interpolation)</div>
+  <div class="card">
+    <div class="ti" id="tog-fps-conform" onclick="toggleFpsConform()"><div class="sw"></div><div class="ti-txt">Conform to a whole-number frame rate instead of interpolating — OFF by default. A genuinely different technique from all 5 options above: zero synthesized frames, so the rubberbanding/warping problems documented above and throughout this app's development are structurally impossible here — there's no motion estimation happening at all to get wrong. This is the same technique DaVinci Resolve's Clip Attributes frame rate change and Premiere's Interpret Footage use — confirmed via a direct quote from Blackmagic's own forum: "a frame for frame conversion to a different rate with no interpolation or weird cadence... changes the playback speed". This is a genuine, if small, change to the movie's real playback duration — the source runs very slightly longer in real time than a whole-number-fps target, so conforming to the higher whole number makes it play very slightly <em>shorter</em>. Audio is automatically time-corrected to match (asetrate/aresample, the same validated technique from the audio converter tool's Framerate Sync Correction) — no separate audio pass needed, unlike the manual cross-tool step required for the 5 interpolation options above. <strong>Mutually exclusive with all 5 interpolation options above</strong> — selecting this turns those off and greys them out, and vice versa, since they solve the same "mismatched frame rate" problem in fundamentally incompatible ways: one adds real new content (frames), this one only ever relabels timing on frames that already exist. Only sensible for near-whole-number conforms like 23.976→24 - there's no "48fps"/"60fps" option here, since conforming (not interpolating) to a much higher target would speed the movie up dramatically rather than smooth its motion, which is a completely different effect (fast-forward, not smoother playback).<br><br><strong>Two different mechanisms depending on encoder choice, per direct request:</strong> with an external-tool encoder selected (NVEncC/QSVEncC/VCEEncC), this uses an input-side <code>-r</code> override right at the actual decode point - those paths already decode the source exactly once, so this reaches the identical result in that same single pass. With a built-in ffmpeg encoder instead (external tools off), this uses a genuine lossless stream-copy pre-stage (<code>-c:v copy</code>, no decode/re-encode at all for this step) via the <code>setts</code> bitstream filter.<br><br><strong>Corrected mistake (confirmed via a real user report of quality loss):</strong> the first version of the stream-copy path used <code>setts=ts=N/fps/TB</code>, which independently reassigns both PTS and DTS to the same formula - ffmpeg's own documentation explicitly warns this is unsafe when B-frames are involved (this source has them), and it's what broke decode ordering and caused the reported corruption. Fixed by scaling the source's own ORIGINAL PTS and DTS by the same constant ratio instead (<code>setts=pts=PTS*sourceFps/targetFps:dts=DTS*sourceFps/targetFps</code>) - since B-frame reordering is just a fixed offset between a frame's DTS and PTS, uniformly scaling both preserves that offset (and therefore correct decode order) instead of erasing it, while still landing on the exact same evenly-spaced target-fps timing.<br><br><strong>Works alongside everything else in this app</strong> (confirmed, not assumed): HDR expansion, cropping, denoise/sharpen, and encoder choice all apply exactly as normal. Chapter timestamps are automatically rescaled to match the new duration when Passthrough Chapters is on. The AC3 audio-delay auto-detection, Audio Delay/Offset, and Duration Correction features all still work too and compose correctly with this toggle's own audio stretch - Duration Correction's own target duration accounts for the conform automatically so the two corrections agree instead of fighting each other.</div></div>
   </div>
 
   <div class="slbl">Chapters</div>
   <div class="card">
-    <div class="ti on" id="tog-chapters" onclick="toggle(this)"><div class="sw"></div><div class="ti-txt">Passthrough chapters — ON by default. Copies chapter markers from the source into the output. Framerate conversion doesn't require any chapter timestamp adjustment — confirmed directly that it preserves real-time duration rather than changing playback speed, so original chapter times remain accurate as-is.</div></div>
+    <div class="ti on" id="tog-chapters" onclick="toggle(this)"><div class="sw"></div><div class="ti-txt">Passthrough chapters — ON by default. Copies chapter markers from the source into the output. The 5 interpolation toggles above don't require any chapter timestamp adjustment — confirmed directly that they preserve real-time duration rather than changing playback speed, so original chapter times remain accurate as-is. Framerate Conform is the one exception: since it genuinely changes the runtime on purpose, chapter timestamps are automatically rescaled by the same ratio to match — no separate action needed here either way.</div></div>
   </div>
 
   <div class="slbl">Encoder</div>
@@ -493,6 +543,56 @@
   </div>
 
 <script>
+// Converts every toggle's long description text (and the long .path-hint
+// setup-instruction boxes under many of them) into a collapsed <details>
+// block, showing only a short lead-in sentence until expanded - per
+// direct request, since many of these grew long enough that scrolling
+// through all of them became the actual bottleneck. Works on the
+// existing text/HTML directly (no rewriting each block by hand):
+// extracts a plain-text summary via textContent (safe against cutting
+// mid-tag) up to the first sentence break within a reasonable length,
+// then re-wraps the ORIGINAL, untouched HTML inside the collapsible body
+// - so nothing about the actual wording, links, or <code> formatting
+// changes, just whether it's shown by default. stopPropagation on the
+// whole <details> keeps expand/collapse clicks from also flipping the
+// toggle's own on/off switch, since .ti-txt sits inside the same
+// clickable row as the switch.
+//
+// .path-hint boxes that are empty at page load (several have an id and
+// get filled in later by other JS with a short, dynamic status line, not
+// long-form documentation - e.g. videoTrackHint, durationFixInfo) are
+// automatically skipped: the same "nothing extra worth collapsing" check
+// below naturally excludes anything with little or no text yet.
+function collapseLongDescriptions(selector){
+  document.querySelectorAll(selector).forEach(el => {
+    if (el.querySelector('.ti-txt-details')) return; // already processed
+    const text = el.textContent || '';
+    let cut = text.indexOf('. ');
+    if (cut === -1 || cut > 170) cut = Math.min(150, text.length);
+    else cut += 1; // include the period itself
+    const summaryText = text.slice(0, cut).trim();
+    if (summaryText.length >= text.length - 1) return; // nothing extra worth collapsing
+    const fullHTML = el.innerHTML;
+    const details = document.createElement('details');
+    details.className = 'ti-txt-details';
+    details.addEventListener('click', e => e.stopPropagation());
+    const summary = document.createElement('summary');
+    const summarySpan = document.createElement('span');
+    summarySpan.className = 'sum-text';
+    summarySpan.textContent = summaryText + ' …';
+    summary.appendChild(summarySpan);
+    const body = document.createElement('div');
+    body.className = 'ti-txt-body';
+    body.innerHTML = fullHTML;
+    details.appendChild(summary);
+    details.appendChild(body);
+    el.innerHTML = '';
+    el.appendChild(details);
+  });
+}
+collapseLongDescriptions('.ti-txt');
+collapseLongDescriptions('.path-hint');
+
 let filePath = '';
 let videoDuration = 0;
 let detectedSourceFps = null;
@@ -508,13 +608,73 @@ function toggle(el){ el.classList.toggle('on'); }
 // exclusive - same pattern as the GPU vendor toggles elsewhere. Also
 // toggles the vspipe path field's visibility, since it's only relevant
 // when either GPU/RIFE path is active - both ultimately run through vspipe.
+// The two known vspipe locations for this setup: mvsf (MVTools) and the
+// PyTorch/RIFE path were only ever confirmed installed into the Python 3.14
+// environment; TensorRT/RIFE needed its own separate Python 3.13 environment.
+// mvtools sharing the single vspipePath field with the GPU toggles caused a
+// real bug - selecting MVTools while the field still held the 3.13 (TensorRT)
+// default meant vspipe ran with no mvsf installed ("No attribute with the
+// name mvsf exists"), confirmed via direct testing. Auto-correcting per-mode
+// closes that gap.
+const VSPIPE_DEFAULT_PATHS = {
+  py314: 'C:\\Python314\\Scripts\\vspipe.exe',
+  py313: 'C:\\Users\\Angel\\AppData\\Local\\Programs\\Python\\Python313\\Scripts\\vspipe.exe'
+};
 function selectInterpMode(mode){
-  const ids = { gpu: 'tog-motion-interp-gpu', 'gpu-trt': 'tog-motion-interp-gpu-trt', 'gpu-vk': 'tog-motion-interp-gpu-vk', cpu: 'tog-motion-interp-cpu' };
+  const ids = { gpu: 'tog-motion-interp-gpu', 'gpu-trt': 'tog-motion-interp-gpu-trt', 'gpu-vk': 'tog-motion-interp-gpu-vk', mvtools: 'tog-motion-interp-mvtools', cpu: 'tog-motion-interp-cpu' };
   const clicked = document.getElementById(ids[mode]);
   const wasOn = clicked.classList.contains('on');
   Object.values(ids).forEach(id => document.getElementById(id).classList.remove('on'));
   if (!wasOn) clicked.classList.add('on');
-  document.getElementById('vspipePathRow').style.display = (isOn('tog-motion-interp-gpu') || isOn('tog-motion-interp-gpu-trt')) ? 'block' : 'none';
+  document.getElementById('vspipePathRow').style.display = (isOn('tog-motion-interp-gpu') || isOn('tog-motion-interp-gpu-trt') || isOn('tog-motion-interp-mvtools')) ? 'block' : 'none';
+
+  // Only auto-correct if the field is still at one of the known defaults
+  // (or empty) - never overwrite a path the user has deliberately customized.
+  if (!wasOn) {
+    const field = document.getElementById('vspipePath');
+    const current = field.value.trim();
+    const isKnownDefault = current === '' || current === VSPIPE_DEFAULT_PATHS.py314 || current === VSPIPE_DEFAULT_PATHS.py313;
+    if (isKnownDefault) {
+      if (mode === 'gpu-trt') field.value = VSPIPE_DEFAULT_PATHS.py313;
+      else if (mode === 'gpu' || mode === 'mvtools') field.value = VSPIPE_DEFAULT_PATHS.py314;
+    }
+  }
+
+  // Mutually exclusive with Framerate Conform - selecting a real
+  // interpolation method (adds synthesized frames) makes conforming
+  // (no synthesized frames, just a timing relabel) nonsensical to also
+  // have on at the same time. Re-checks current state either way, so
+  // turning the last active mode back off re-enables Conform again.
+  const anyInterpOn = isOn('tog-motion-interp-gpu') || isOn('tog-motion-interp-gpu-trt') || isOn('tog-motion-interp-gpu-vk') || isOn('tog-motion-interp-mvtools') || isOn('tog-motion-interp-cpu');
+  setFpsConformDisabled(anyInterpOn);
+}
+
+// Framerate Conform - independent of, and mutually exclusive with, the 5
+// interpolation toggles above. See its own description for the mechanism.
+function toggleFpsConform(){
+  const el = document.getElementById('tog-fps-conform');
+  if (el.classList.contains('disabled')) return; // greyed out while an interpolation mode is active
+  el.classList.toggle('on');
+  if (isOn('tog-fps-conform')){
+    // Turn off and grey out all 5 interpolation toggles while conform is active.
+    ['tog-motion-interp-gpu','tog-motion-interp-gpu-trt','tog-motion-interp-gpu-vk','tog-motion-interp-mvtools','tog-motion-interp-cpu']
+      .forEach(id => { document.getElementById(id).classList.remove('on'); document.getElementById(id).classList.add('disabled'); });
+    document.getElementById('vspipePathRow').style.display = 'none';
+    document.getElementById('targetFpsRow').style.display = 'none';
+  } else {
+    ['tog-motion-interp-gpu','tog-motion-interp-gpu-trt','tog-motion-interp-gpu-vk','tog-motion-interp-mvtools','tog-motion-interp-cpu']
+      .forEach(id => document.getElementById(id).classList.remove('disabled'));
+    document.getElementById('targetFpsRow').style.display = '';
+  }
+}
+
+// Called whenever an interpolation toggle turns on - greys out and force-
+// disables Framerate Conform, since the two are mutually exclusive.
+function setFpsConformDisabled(disabled){
+  const el = document.getElementById('tog-fps-conform');
+  if (!el) return;
+  el.classList.toggle('disabled', disabled);
+  if (disabled) el.classList.remove('on');
 }
 
 // Round the source's own detected rate up to the next whole number -
@@ -525,6 +685,12 @@ function selectInterpMode(mode){
 function getMotionInterpTargetFps(){
   const selected = document.getElementById('motionInterpFpsSelect').value;
   if (selected !== 'auto') return selected;
+  // Reverted back to round-up-to-whole-number. The clean-2x-multiple theory
+  // (tried in an earlier version of this function) was tested directly on
+  // a real reported "rubberbanding" case and confirmed NOT to fix it - so
+  // paying its real, confirmed speed cost (roughly double, since far more
+  // frames need genuine inference) bought nothing. Root cause of the
+  // rubberbanding remains unresolved as of this revert.
   return String(Math.ceil(detectedSourceFps || 24));
 }
 
@@ -1332,9 +1498,23 @@ function buildAudioDelayFilter(){
 // land on the target duration within float precision. Same validated
 // resample technique as Framerate Sync, just driven by a directly
 // measured source/target pair instead of a broadcast-standard fps ratio.
+//
+// targetDur accounts for Framerate Conform being active: this solves a
+// different problem than that toggle (some audio streams decode to a
+// measurably different length than the container's own declared runtime,
+// independent of any fps math) but both corrections are chained together
+// in the same filter graph when both toggles are on - if this one kept
+// targeting the raw, un-conformed videoDuration, it would fight the fps
+// correction already applied earlier in the chain instead of agreeing
+// with it. Same ratio math as buildAudioFramerateFilter, applied to the
+// reference duration instead of the sample rate directly.
 function buildDurationCorrectionFilter(){
   if (!isOn('tog-duration-fix')) return null;
-  const targetDur = videoDuration;
+  let targetDur = videoDuration;
+  if (isOn('tog-fps-conform') && detectedSourceFps){
+    const conformTarget = Math.ceil(detectedSourceFps);
+    if (Math.abs(conformTarget - detectedSourceFps) > 0.0001) targetDur = videoDuration * (detectedSourceFps / conformTarget);
+  }
   const srcDur = detectedAudioTrackDuration;
   if (!targetDur || srcDur == null || srcDur <= 0) return null;
   if (Math.abs(targetDur - srcDur) < 0.001) return null; // already matches, no-op
@@ -1363,25 +1543,34 @@ function getAudioEncoderForCodec(codecName){
   return AUDIO_CODEC_ENCODER_MAP[codecName] || { encoder: 'flac', bitrate: null };
 }
 
-// Confirmed directly via a real pipeline test: the fps= filter used for
-// video framerate conversion is a genuine RESAMPLE (duplicates/drops
-// frames to hit the target rate) that PRESERVES the stream's real-time
-// duration — it does not speed up or slow down playback the way a raw
-// framerate relabel (no resampling) would. Measured this directly: a
-// 300.033s source through fps=30 produced exactly 9001 frames, which at
-// a true 30fps is 300.033s — unchanged. Speed-correcting audio for this
-// conversion (the old asetrate/aresample approach here) was therefore
-// wrong for this pipeline specifically — it corrected for a speed change
-// that never actually happens, actively introducing drift where none
-// existed before. Real, per-file speed relabeling (the case this
-// technique is actually built for) is a separate, deliberate operation —
-// not something this fps= conversion path performs. Correcting for a
-// genuinely mismatched source belongs to Duration Correction above,
-// which measures the real, existing mismatch directly rather than
-// assuming one from the framerate numbers alone.
+// Confirmed directly via a real pipeline test: the fps= filter (and the
+// RIFE/MVTools piped paths above) used for motion interpolation are a
+// genuine RESAMPLE (duplicate/drop or synthesize frames to hit the target
+// rate) that PRESERVES the stream's real-time duration — it does not
+// speed up or slow down playback the way a raw framerate relabel (no
+// resampling) would. Measured this directly: a 300.033s source through
+// fps=30 produced exactly 9001 frames, which at a true 30fps is 300.033s
+// — unchanged. No audio correction is needed for that path, which is why
+// this still returns null whenever Framerate Conform (below) is off.
+//
+// Framerate Conform is the opposite case on purpose: it changes duration
+// FOR REAL (see tog-fps-conform above) - same ratio technique validated in
+// the audio upmixer project's Framerate Sync Correction (asetrate to
+// change speed, aresample back to the standard rate afterward so the
+// container's declared sample rate stays normal). ratio = targetFps/
+// sourceFps, always >1 here since the conform target is always a
+// round-up, so this always speeds audio up slightly to match the video's
+// now-shorter runtime.
 function buildAudioFramerateFilter(){
-  return null;
+  if (!isOn('tog-fps-conform')) return null;
+  const sourceFps = detectedSourceFps || 24;
+  const targetFps = Math.ceil(sourceFps);
+  if (Math.abs(targetFps - sourceFps) < 0.0001) return null; // already a whole number, nothing to conform
+  const ratio = targetFps / sourceFps;
+  const newRate = Math.round(48000 * ratio);
+  return `asetrate=${newRate},aresample=48000`;
 }
+
 
 function buildFilterChain(){
   const filters = [];
@@ -1509,6 +1698,67 @@ function buildJobFromCurrentSettings(chaptersPath){
   let videoSourcePath = filePath;
   let videoSourceMapArg = videoMapArg;
   let pipedStage = null;
+  let conformTargetFps = null;
+
+  // Framerate Conform — DaVinci Resolve/Premiere "Interpret Footage"-style
+  // frame rate relabel, mutually exclusive with the 5 interpolation
+  // toggles above (selectInterpMode() and toggleFpsConform() enforce this).
+  // No synthesized frames either way - only how the retime itself gets
+  // applied differs by encoder path below.
+  //
+  // Two different mechanisms, chosen per path:
+  //
+  // 1) External-tool encoders (NVEncC/QSVEncC/VCEEncC): an input-side `-r`
+  //    override at the actual decode point (see the y4mArgs branches
+  //    further down). These already read the source exactly once through
+  //    a single decode->filter->pipe chain, so a separate stream-copy
+  //    pass first would just be a redundant full-file read/write with no
+  //    benefit - `-r` there achieves the identical retime in the same
+  //    single pass.
+  //
+  // 2) Built-in ffmpeg encoders (no external tool): a real stream-copy
+  //    pre-stage, per direct request to keep this path lossless-copy
+  //    based specifically when not using hardware-accelerated external
+  //    tools. Uses the setts bitstream filter, but NOT the same way the
+  //    first version of this feature did - that version used
+  //    `setts=ts=N/fps/TB`, which independently reassigns PTS and DTS to
+  //    the same formula rather than preserving their original
+  //    relationship; ffmpeg's own bitstream-filter docs explicitly warn
+  //    this is unsafe with B-frames (this source has them,
+  //    has_b_frames=4, confirmed earlier in this project), and it's what
+  //    broke decode ordering and caused the reported quality loss.
+  //
+  //    The fix: scale the ORIGINAL PTS and DTS by the same constant
+  //    ratio (sourceFps/targetFps) instead of reassigning them
+  //    independently - `setts=pts=PTS*sourceFps/targetFps:
+  //    dts=DTS*sourceFps/targetFps`. Since B-frame reordering is encoded
+  //    as a fixed OFFSET between a frame's DTS and PTS, and scaling
+  //    preserves ratios between all values uniformly, this keeps that
+  //    offset relationship intact (just uniformly time-compressed) -
+  //    confirmed algebraically: for CFR content, original PTS_i = i /
+  //    sourceFps, so PTS_i * (sourceFps/targetFps) = i / targetFps -
+  //    exactly the evenly-spaced target-fps timing this feature wants,
+  //    reached via scaling the source's own real values instead of
+  //    overwriting them with an unrelated formula.
+  if (isOn('tog-fps-conform')){
+    conformTargetFps = Math.ceil(detectedSourceFps || 24);
+    if (!externalToolEncoders.includes(encoder) && detectedSourceFps && Math.abs(conformTargetFps - detectedSourceFps) > 0.0001){
+      const tmpDirConform = filePath.substring(0, Math.max(filePath.lastIndexOf('\\'), filePath.lastIndexOf('/')) + 1);
+      const tmpConformedPath = tmpDirConform + '_tmp_conformed_' + jobId + '.mkv';
+      const conformArgs = ['-i', filePath, '-map', videoMapArg,
+        '-c:v', 'copy',
+        '-bsf:v', `setts=pts=PTS*${detectedSourceFps}/${conformTargetFps}:dts=DTS*${detectedSourceFps}/${conformTargetFps}`,
+        '-video_track_timescale', String(Math.round(conformTargetFps * 1000)),
+        '-y', tmpConformedPath];
+      preStages.push({
+        name: 'Conform frame rate (lossless stream copy)',
+        args: conformArgs, totalDuration: videoDuration, cleanup: null, tool: 'ffmpeg'
+      });
+      videoSourcePath = tmpConformedPath;
+      videoSourceMapArg = '0:v';
+    }
+  }
+
   if (externalToolEncoders.includes(encoder)){
     const toolConfig = {
       nvencc: { pathFieldId: 'nvencPath', label: 'NVEncC' },
@@ -1567,7 +1817,8 @@ function buildJobFromCurrentSettings(chaptersPath){
       // on top. Vulkan device setup happens at the top-level args, not
       // inside -vf.
       y4mArgs.push('-init_hw_device', 'vulkan=vk', '-filter_hw_device', 'vk');
-      y4mArgs.push('-i', filePath, '-map', videoMapArg);
+      if (conformTargetFps) y4mArgs.push('-r', String(conformTargetFps));
+      y4mArgs.push('-i', videoSourcePath, '-map', videoSourceMapArg);
       const chain = [...preColorFilters, 'format=yuv420p', 'hwupload=derive_device=vulkan'];
       if (isOn('tog-hdr')){
         // tonemapping=spline chosen deliberately, not left as the
@@ -1588,7 +1839,7 @@ function buildJobFromCurrentSettings(chaptersPath){
       // error ("incorrect codec parameters"), not just a cosmetic warning.
       y4mArgs.push('-pix_fmt', 'yuv420p10le');
     } else {
-      const useGpuInterp = isOn('tog-motion-interp-gpu') || isOn('tog-motion-interp-gpu-trt');
+      const useGpuInterp = isOn('tog-motion-interp-gpu') || isOn('tog-motion-interp-gpu-trt') || isOn('tog-motion-interp-mvtools');
       if (useGpuInterp){
         // Reading from vspipe's Y4M output via stdin instead of the
         // original file - RIFE already decoded and interpolated the
@@ -1596,7 +1847,8 @@ function buildJobFromCurrentSettings(chaptersPath){
         y4mArgs.push('-i', 'pipe:0', '-map', '0:v:0');
       } else {
         y4mArgs.push(...encodeHwaccelPre);
-        y4mArgs.push('-i', filePath, '-map', videoMapArg);
+        if (conformTargetFps) y4mArgs.push('-r', String(conformTargetFps));
+        y4mArgs.push('-i', videoSourcePath, '-map', videoSourceMapArg);
       }
       // hwdownload brings GPU-decoded frames back to CPU memory — required
       // because the eq/zscale color filters are CPU-only and can't operate
@@ -1720,9 +1972,40 @@ function buildJobFromCurrentSettings(chaptersPath){
       // plugin reinstall - confirmed via the project's own release notes
       // that Python 3.14 isn't supported for the TensorRT integration
       // specifically, unlike plain PyTorch which works fine on 3.14.
+      // sc_threshold raised from 0.15 (the package's own default) to 0.3
+      // in direct response to a second, different real reported artifact:
+      // "rubberbanding" during scene changes on real fast-motion footage.
+      // Confirmed via research as a well-documented, known tradeoff in
+      // this exact class of tool - a real, authoritative RIFE-tuning
+      // source states plainly: "lower values give more stuttering (i.e.
+      // repeated frames instead of interpolated) when there was a false
+      // detection" - and direct community testimony describes precisely
+      // this symptom: fast motion incorrectly read as a scene cut,
+      // producing a duplicated frame that reads as a hitch/snap rather
+      // than smooth motion. 0.3 is a real value multiple users in that
+      // same community converged on to reduce false positives while still
+      // catching genuine hard cuts (like the credits text case this was
+      // originally added for).
+      //
+      // model changed from '4.18' to '4.25.lite' in direct response to a
+      // real, reported slowdown correlated with adding 4.18 in the first
+      // place. Confirmed via research this wasn't imagined: 4.18's own
+      // documentation states it specifically has "bidirectional and
+      // dynamic optical flow enabled" - a genuinely heavier computation
+      // than simpler model versions, and real benchmark data confirms this
+      // as a general pattern (newer/more sophisticated RIFE models costing
+      // measurably more compute). 4.25.lite chosen as the replacement
+      // because multiple independent community sources rate plain 4.25 as
+      // equal-or-better than 4.18 on quality, and the .lite variant is
+      // specifically built for lower computational cost while keeping most
+      // of that quality. Honest caveat: unlike 4.18 (explicitly named in
+      // vs-rife's own changelog as the fix for a real "jaggy/wobbling line
+      // issue"), this hasn't been directly confirmed to preserve that same
+      // text-stability fix - a reasonable bet based on 4.25's general
+      // reputation, not a guaranteed like-for-like swap.
       const rifeArgs = useTrt
-        ? `fps_num=${interpFps}, fps_den=1, auto_download=True, trt=True`
-        : `fps_num=${interpFps}, fps_den=1, auto_download=True`;
+        ? `fps_num=${interpFps}, fps_den=1, auto_download=True, trt=True, sc=True, sc_threshold=0.3, model='4.25.lite'`
+        : `fps_num=${interpFps}, fps_den=1, auto_download=True, sc=True, sc_threshold=0.3, model='4.25.lite'`;
       const vpyScriptContent = `import vapoursynth as vs
 from vapoursynth import core
 import mvsfunc as mvf
@@ -1754,6 +2037,49 @@ clip.set_output()
         ffmpegArgs: y4mArgs, toolPath, toolArgs,
         totalDuration: videoDuration, cleanup: [vpyScriptPath, ffindexPath]
       };
+    } else if (isOn('tog-motion-interp-mvtools')){
+      const interpFps = getMotionInterpTargetFps();
+      const vspipePath = document.getElementById('vspipePath').value.trim();
+      const safeSourcePath = filePath.replace(/'/g, "\\'");
+      // mvsf (float-precision MVTools) expects YUV input directly, NOT RGB
+      // - confirmed directly from the plugin author's own words: converting
+      // to RGB first "will happily take the RGB input and feed you back
+      // with some shitty motion estimation" - the opposite requirement
+      // from the RIFE path above, which needed RGB specifically. Convert
+      // to float YUV for the mvsf functions, then back to 10-bit int
+      // afterward so the downstream ffmpeg HDR/color stage receives what
+      // it expects, matching this tool's pipeline throughout.
+      //
+      // FlowFPS (not the faster BlockFPS) used deliberately, despite the
+      // plugin author's own words describing FlowFPS as "too slow for
+      // realtime frame rate conversion" at this class of job - the
+      // alternative, BlockFPS, is described by the same author as "even
+      // uglier". Chose quality over speed here since minterpolate already
+      // covers the fastest-possible CPU option below.
+      const vpyScriptContent = `import vapoursynth as vs
+from vapoursynth import core
+clip = core.ffms2.Source(r'${safeSourcePath}')
+clip = core.resize.Point(clip, format=vs.YUV420PS)
+msuper = core.mvsf.Super(clip, pel=4)
+bv = core.mvsf.Analyse(msuper, isb=True, overlap=4, search=3, dct=4)
+fv = core.mvsf.Analyse(msuper, isb=False, overlap=4, search=3, dct=4)
+bv = core.mvsf.Recalculate(msuper, bv, blksize=4, overlap=2, search=3, dct=4)
+fv = core.mvsf.Recalculate(msuper, fv, blksize=4, overlap=2, search=3, dct=4)
+clip = core.mvsf.FlowFPS(clip, msuper, bv, fv, num=${interpFps}, den=1, ml=40)
+clip = core.resize.Point(clip, format=vs.YUV420P10)
+clip.set_output()
+`;
+      const vpyScriptPath = tmpDir + '_tmp_mvtools_' + jobId + '.vpy';
+      const ffindexPath = filePath + '.ffindex';
+      const totalOutputFrames = Math.round(videoDuration * parseFloat(interpFps));
+      pipedStage = {
+        name: `MVTools interpolation (CPU, multithreaded) → ${toolConfig.label} HDR10 encode`,
+        triplePiped: true,
+        vspipePath, vspipeArgs: ['-c', 'y4m', '--progress', vpyScriptPath, '-'],
+        vpyScriptPath, vpyScriptContent, totalOutputFrames,
+        ffmpegArgs: y4mArgs, toolPath, toolArgs,
+        totalDuration: videoDuration, cleanup: [vpyScriptPath, ffindexPath]
+      };
     } else {
       pipedStage = {
         name: `${toolConfig.label} HDR10 encode (piped, no temp file)`,
@@ -1774,9 +2100,9 @@ clip.set_output()
     // works, verified end-to-end: remux the raw stream into a proper
     // intermediate container first, with an explicit constant frame rate,
     // THEN do the final mux against that instead of the raw stream.
-    const effectiveFps = (isOn('tog-motion-interp-gpu') || isOn('tog-motion-interp-gpu-trt') || isOn('tog-motion-interp-cpu'))
+    const effectiveFps = (isOn('tog-motion-interp-gpu') || isOn('tog-motion-interp-gpu-trt') || isOn('tog-motion-interp-mvtools') || isOn('tog-motion-interp-cpu'))
       ? getMotionInterpTargetFps()
-      : (detectedSourceFps || 24);
+      : (conformTargetFps || detectedSourceFps || 24);
     const tmpRemuxedPath = tmpDir + '_tmp_remuxed_' + jobId + '.mp4';
     // -c:v copy (stream copy) alone here was a real, confirmed bug —
     // reproduced directly: with B-frames present (NVEncC's default preset
@@ -1967,7 +2293,7 @@ clip.set_output()
         { name: 'Downmix to Stereo FLAC', args: stage1ArgsFixed, totalDuration: videoDuration, cleanup: null },
         { name: 'Upmix to 7.1 Vorbis', args: stage2Args, totalDuration: videoDuration, cleanup: tmpStereoPath },
         { name: 'Encode video + mux final MKV', args: stage3Args, totalDuration: videoDuration,
-          cleanup: [tmpUpmixPath, ...(encoder === 'nvencc' ? [videoSourcePath] : []), ...(chaptersPath ? [chaptersPath] : [])] }
+          cleanup: [tmpUpmixPath, ...(videoSourcePath !== filePath ? [videoSourcePath] : []), ...(chaptersPath ? [chaptersPath] : [])] }
       ],
       currentStage: 0,
       totalDuration: videoDuration,
@@ -2147,12 +2473,24 @@ async function addToQueue(){
 
   let chaptersPath = null;
   if (isOn('tog-chapters')){
-    // Confirmed directly (see buildAudioFramerateFilter): fps= conversion
-    // preserves real-time duration rather than changing playback speed,
-    // so chapters need no rescaling for it — this previously rescaled
-    // based on the same wrong assumption audio correction did, which
-    // would have shifted chapter points that were never actually wrong.
-    const ratio = 1;
+    // Confirmed directly (see buildAudioFramerateFilter): the fps=
+    // interpolation filter (and RIFE/MVTools) preserves real-time
+    // duration rather than changing playback speed, so chapters need no
+    // rescaling for those - this previously rescaled based on the same
+    // wrong assumption audio correction did, which would have shifted
+    // chapter points that were never actually wrong.
+    //
+    // Framerate Conform (below) is the genuine exception: it DOES change
+    // real duration on purpose (see tog-fps-conform), so chapters
+    // genuinely do need rescaling here, same ratio as the audio
+    // correction in buildAudioFramerateFilter - just inverted, since a
+    // chapter's absolute timestamp needs to shrink to land at the same
+    // fractional position in the new, shorter runtime.
+    let ratio = 1;
+    if (isOn('tog-fps-conform') && detectedSourceFps){
+      const conformTarget = Math.ceil(detectedSourceFps);
+      if (Math.abs(conformTarget - detectedSourceFps) > 0.0001) ratio = detectedSourceFps / conformTarget;
+    }
     const ffmpeg = document.getElementById('ffmpegPath').value.trim();
     const tmpDir = filePath.substring(0, Math.max(filePath.lastIndexOf('\\'), filePath.lastIndexOf('/')) + 1);
     const jobId = 'job_' + Date.now() + '_' + Math.random().toString(36).slice(2);
