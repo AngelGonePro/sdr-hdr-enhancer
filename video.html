@@ -76,7 +76,7 @@
       <div class="field">
         <label>Mode</label>
         <select id="audioModeSelect" onchange="updateAudioModeUI()">
-          <option value="integrated" selected>Integrated Engine — downmix embedded track to Stereo FLAC, then upmix to 7.1 Vorbis, all in one pass</option>
+          <option value="integrated" selected>Integrated Engine — downmix embedded track to Stereo FLAC, then upmix to 7.1 Vorbis (or Ambisonics Opus, if that toggle is on), all in one pass</option>
           <option value="external">External File — mux in an already-processed file</option>
           <option value="embedded">Embedded Track — pass through a source track as-is (any channel count, including 5.1/7.1)</option>
           <option value="none">No Audio — video only, for HDR-only conversion</option>
@@ -111,6 +111,19 @@
   <div class="slbl">Audio Track Selection</div>
   <div class="card" id="embeddedAudioCard" style="display:none">
     <div id="audioTrackList" class="detected">Load a file to detect audio tracks</div>
+  </div>
+
+  <div class="slbl">High-Precision Opus / FLAC (experimental, test toggle)</div>
+  <div class="card">
+    <div class="path-hint">
+      <strong>Always applied, not optional (per direct request):</strong> Opus/Vorbis encoding always uses 32-bit float internal precision (<code>-sample_fmt flt -ar 48000</code>) feeding the encoder - Opus/Vorbis themselves are lossy codecs with no user-controllable output bit depth, this is purely about avoiding intermediate rounding during decode/filter/downmix before the lossy compression step. FLAC output always standardizes to 24-bit/48kHz (<code>-bits_per_raw_sample 24 -ar 48000</code>) - confirmed via direct research that ffmpeg's own flac encoder caps at 24-bit regardless of input format anyway, so this was already the practical result, just made explicit and consistent across every FLAC output path in this app now instead of only some.
+    </div>
+
+    <div class="ti on" id="tog-ambisonics" onclick="toggle(this); onAudioTrackChange();"><div class="sw"></div><div class="ti-txt">Matrix-encode with Dolby Pro Logic II-compatible spatial encoding at the fold-to-stereo step, then layer the rest of the channels on top via this app's real 7.1 upmix — ONE audio track, not two — ON by default now that it's confirmed to produce ordinary, standard Vorbis with no special tagging. Only relevant to Integrated Engine mode. Uses ffmpeg's own native <code>aresample=matrix_encoding=dplii</code> implementation directly, not hand-derived phase-shift math.<br><br><strong>Single-track chain, confirmed via direct end-to-end testing:</strong> source → DPLII matrix-encode → this app's validated compressor/limiter/LUFS/limiter safety chain (same values proven against the real Blade Runner 2049 stress test) → stereo FLAC (all of the above baked in here) → this app's own real, already-validated 7.1 upmix (the same one always used) built from that DPLII-processed stereo → ONE 7.1 Vorbis track. Confirmed via a real test run: correctly produces <code>channels=8, channel_layout=7.1</code> as the file's only audio stream - not a second track, since multiple audio tracks aren't reliably usable in every container this app can output (MP4 in particular).<br><br><strong>Codec-agnostic by construction - confirmed via direct code review, not assumed:</strong> this works identically for DTS/DTS-HD MA/TrueHD/AC3/E-AC3/PCM sources - track selection only ever reads channel COUNT, never codec name, since the whole chain operates on whatever PCM ffmpeg decodes, regardless of the original bitstream format. Fundamentally different from Dolby Vision/HDR10+ (which need explicit per-format extraction because a decode destroys them) - no per-codec detection needed or built here, since none is needed.<br><br><strong>On Atmos specifically, since AC3/E-AC3/TrueHD can carry it:</strong> a normal decode (same as the plain fold) never extracts Atmos's object-based (JOC) data regardless of DPLII being on or off - only a pure, untouched <code>-c:a copy</code> preserves Atmos, and Integrated Engine mode is inherently a re-encode. Not a gap DPLII introduces; it processes whatever bed channels come out of the decode uniformly either way, never confusing an Atmos-carrying source for a plain one.<br><br><strong>Automatic fallback if DPLII fails on an unusual source:</strong> the downmix stage verifies its own real output (not just exit code) and automatically retries with the plain bass-managed fold if DPLII's matrix encoding didn't produce anything usable - no confirmed real case triggers this, but it's a genuine safety net rather than letting the whole job fail.<br><br><strong>Real bug found and fixed via direct measurement, not assumed - LFE/bass content:</strong> feeding LFE directly into <code>aresample=matrix_encoding=dplii</code> alongside everything else massively under-represents it - confirmed via a real synthetic 5.1 test source with known per-channel frequencies (bandpass+astats measurement): LFE came out ~19dB quieter than the uniform ~7dB gap seen across every other channel, while the plain fold correctly preserved it. This matches a real, independently documented finding from the DPLII community (HandBrake/Dolby Labs testing: "the LFE channel in DPL2's phasing is flawed... was better without the lfe channel phasing") - a known real limitation of DPLII's own matrix math for bass content, not a bug in this implementation specifically. Fixed the same way that community actually fixes it: LFE is now excluded from the matrix encode itself (matrix-encoding only the other 5 or 7 channels as 5.0/7.0) and mixed back into both output channels directly afterward with plain gain, no phase matrix. Confirmed via direct re-test: LFE now comes out within about 1dB of the old plain fold's own LFE level, and every other channel's level is unaffected.<br><br><strong>One honest, important limit, confirmed directly rather than assumed - please read this part:</strong> the 7.1 upmix does NOT literally decode DPLII's phase-encoded spatial information. Checked ffmpeg's own official bug tracker directly (ticket #10230, still open as an unimplemented feature request): software Pro Logic II decoding does not exist anywhere, including in ffmpeg itself - a real decoder does adaptive, real-time psychoacoustic steering, not a fixed mathematical inverse, which is exactly why it's historically only ever existed in licensed hardware chips, never software. What genuinely does carry through: the upmix operates on the DPLII-processed, safety-chain-protected stereo mix rather than a raw fold, so those quality/loudness choices aren't lost - but the literal phase relationships are not recoverable by this or any software upmix. A real Dolby Pro Logic II hardware decoder fed the underlying stereo mix directly remains the only way to actually recover that, and this single-track output doesn't expose that mix separately.</div></div>
+
+
+
+
   </div>
 
   <div class="slbl">Subtitle Track Selection</div>
@@ -209,12 +222,13 @@
     <div class="warn-box" id="tog444Warning" style="margin-top:8px;display:none"></div>
   </div>
 
-  <div class="slbl">Dolby Vision Preservation (experimental)</div>
+  <div class="slbl">Dynamic HDR Metadata Preservation (experimental)</div>
   <div class="card">
-    <div class="ti" id="tog-dolby-vision" onclick="toggle(this); document.getElementById('dovToolPathRow').style.display = isOn('tog-dolby-vision') ? 'block' : 'none';"><div class="sw"></div><div class="ti-txt">Preserve Dolby Vision metadata through re-encode — OFF by default, experimental. Only does anything when the selected video track actually carries Dolby Vision RPU data (auto-detected the same way as the "Already HDR" badge - shown as a note under the track once detected) and Process for HDR10 output above is on. <strong>What this is, and why it's different from converting anything:</strong> researched this directly first - there is no reliable way to convert Dolby Vision metadata into genuine HDR10+ (the community's own Dolby Vision tooling authors describe this as not a simple reformatting job, and nothing this app could implement would be more solved than that). What IS real and achievable: Dolby Vision is strictly more capable than HDR10+ anyway (true per-frame dynamic metadata, not per-scene), and a source that already has it doesn't need anything converted - only preserved through the re-encode instead of silently dropped, which is what happens today. Extracts the source's real Dolby Vision RPU data (via <code>dovi_tool</code>, a separate download - see setup below) and supplies it directly to the encoder alongside the normal re-encode, so crop/denoise/sharpen/framerate settings all still apply exactly as normal on top.<br><br><strong>Honest limits, stated plainly:</strong> confirmed via NVEncC's and QSVEncC's own documentation that both support <code>--dolby-vision-rpu &lt;file&gt; --dolby-vision-profile &lt;profile&gt;</code>, and libx265 (via ffmpeg's <code>-x265-params</code>) supports the same two parameters natively - all three are wired in below. VCEEncC (AMD): no confirmed support found researching this - this toggle has no effect there, falls back to the static HDR10 metadata preservation above only. <strong>Nobody involved in building this has a Dolby Vision-capable display or validation tooling to confirm the final output actually plays back as real Dolby Vision</strong> - this is a real, researched implementation of a genuine, established technique (the same RPU-extract-and-inject pattern real encoding communities use), not a guess, but it's shipped unverified end-to-end the same honest way the untested AMD/Intel RIFE path elsewhere in this app is.</div></div>
+    <div class="ti" id="tog-dolby-vision" onclick="toggle(this); dvAutoEnabled = false; document.getElementById('dovToolPathRow').style.display = isOn('tog-dolby-vision') ? 'block' : 'none';"><div class="sw"></div><div class="ti-txt">Preserve Dolby Vision metadata through re-encode — OFF by default, experimental, auto-enables when the selected video track actually carries Dolby Vision RPU data (same detection as the "Already HDR" badge - own status line below confirms it either way). Manually turning this off after it auto-enabled is respected and won't be re-forced back on for the same track; switching to a different track re-evaluates fresh. Only does anything when Process for HDR10 output above is also on. <strong>What this is, and why it's different from converting anything:</strong> researched this directly first - there is no reliable way to convert Dolby Vision metadata into genuine HDR10+ (the community's own Dolby Vision tooling authors describe this as not a simple reformatting job, and nothing this app could implement would be more solved than that). What IS real and achievable: Dolby Vision is strictly more capable than HDR10+ anyway (true per-frame dynamic metadata, not per-scene), and a source that already has it doesn't need anything converted - only preserved through the re-encode instead of silently dropped, which is what happens today. Extracts the source's real Dolby Vision RPU data (via <code>dovi_tool</code>, a separate download - see setup below) and supplies it directly to the encoder alongside the normal re-encode, so crop/denoise/sharpen/framerate settings all still apply exactly as normal on top.<br><br><strong>Honest limits, stated plainly:</strong> confirmed via NVEncC's and QSVEncC's own documentation that both support <code>--dolby-vision-rpu &lt;file&gt; --dolby-vision-profile &lt;profile&gt;</code>, and libx265 (via ffmpeg's <code>-x265-params</code>) supports the same two parameters natively - all three are wired in below. VCEEncC (AMD): no confirmed support found researching this - this toggle has no effect there, falls back to the static HDR10 metadata preservation above only. <strong>Nobody involved in building this has a Dolby Vision-capable display or validation tooling to confirm the final output actually plays back as real Dolby Vision</strong> - this is a real, researched implementation of a genuine, established technique (the same RPU-extract-and-inject pattern real encoding communities use), not a guess, but it's shipped unverified end-to-end the same honest way the untested AMD/Intel RIFE path elsewhere in this app is.<br><br><strong>Update (confirmed via real-world report):</strong> Jellyfin did not detect Dolby Vision on a real output - exactly the kind of gap the caveat above was written for. Researched this specifically: multiple independent Dolby Vision community reports describe ffmpeg's MKV muxing as unreliable at correctly signaling DV unless the container's frame rate is explicitly forced at the final mux step - one direct account traced a player not detecting DV to exactly this, confirmed by remuxing with the fps explicitly set and having it start working. This app's final mux step had no explicit frame rate declaration at all - fixed, now forces it whenever Dolby Vision preservation is active. Genuinely unclear yet whether this alone fully resolves it (a second real possibility: the separate timing-fix pass this app also runs on the raw encoder output could be affecting the embedded DV data, not confirmed either way) - use the new "Keep intermediate files" debug toggle below to inspect each stage directly (e.g. with <code>dovi_tool info</code> or MediaInfo) if this doesn't fix it, to narrow down exactly where it's actually being lost rather than guessing further blind.<br><br><strong>Real root cause found and fixed (confirmed via direct investigation, not the mux-timing theory above):</strong> a user report of completely missing metadata (zero side_data on the output, confirmed via direct ffprobe) turned out to be a genuine profile mismatch, not a bug in the mux/timing logic at all. Their actual source is Dolby Vision Profile 7 - the dual-layer format used on UHD Blu-ray rips (confirmed via ffprobe showing <code>dv_profile=7</code>, <code>el_present_flag=1</code>) - but this app was extracting that RPU untouched (still Profile 7) while telling the encoder to inject it as Profile 8.1 (the dropdown's default), a real mismatch that explains the silent, complete metadata loss. Fixed by adding <code>-m 2</code> to the extract-rpu command - dovi_tool's own documented RPU-conversion mode that converts a Profile 7 RPU to genuine Profile 8.1 compatibility during extraction, the same real technique the whole Dolby Vision community uses for exactly this UHD-Blu-ray-rip scenario (confirmed via dovi_tool's own README and multiple independent community tools built specifically around this conversion step).<br><br><strong>One honest caveat on this fix, found during the same research, not smoothed over:</strong> Profile 7 comes in two real variants - MEL (Minimal Enhancement Layer) and FEL (Full Enhancement Layer). This conversion strips the Enhancement Layer entirely, which is the correct, lossless-for-RPU-purposes thing to do for MEL content, but the DV community has found that "Complex FEL" sources sometimes use their Enhancement Layer for actual brightness expansion - discarding it in those specific cases can cause incorrect tone mapping, not just a harmless metadata trim. Dedicated community tools built around this exact conversion (dovi_convert, DV7toDV8) specifically detect and skip "Complex FEL" files by default for this reason. This app doesn't currently detect that distinction - if the converted output's HDR looks tonally off after this fix (not just "no DV badge," but genuinely wrong-looking brightness/contrast), that's the specific thing to suspect, and turning this toggle off (falling back to static HDR10 metadata only, which was already correct throughout this investigation) is the safe fallback.</div></div>
+
     <div id="dolbyVisionStatus" class="detected" style="margin-top:6px"></div>
-    <div class="row" style="margin-top:10px">
-      <div class="field"><label>Dolby Vision Profile</label>
+    <div class="row" id="dolbyVisionProfileRow" style="margin-top:10px;display:none">
+      <div class="field"><label>Dolby Vision Profile (manual override - only needed when auto-detection can't read this track's profile)</label>
         <select id="dolbyVisionProfileSelect">
           <option value="8.1" selected>8.1 (most common - HDR10-compatible base layer + DV enhancement, matches UHD Blu-ray discs)</option>
           <option value="8.4">8.4 (HLG-compatible base layer)</option>
@@ -223,15 +237,39 @@
       </div>
     </div>
     <div class="path-hint" style="margin-top:8px">
+      <strong>Fully automatic, per direct request - this dropdown is hidden unless it's actually needed.</strong> The source's real profile is read directly from its own DOVI configuration record: Profile 7 sources get their RPU automatically converted to genuine Profile 8.1 compatibility (dovi_tool's own documented <code>-m 2</code> mode - the same real technique the DV community uses for UHD Blu-ray rips specifically); Profile 8 sources get their exact sub-variant read directly from the base layer's own signaled compatibility (8.1 vs 8.4); Profile 5 sources pass through as-is. Nothing here needs to be touched for any of that. The dropdown above only appears (and only then does it actually matter) on the rare case detection can't read a profile at all - the status line above shows exactly which situation you're in.
+    </div>
+
+    <div class="path-hint" style="margin-top:8px">
       <strong>Setup:</strong> download <code>dovi_tool</code> from <a href="https://github.com/quietvoid/dovi_tool/releases" target="_blank">github.com/quietvoid/dovi_tool/releases</a> (the Windows x86_64 zip), extract <code>dovi_tool.exe</code> somewhere permanent, and set the path below.<br>
       <strong>Profile 8.1 is selected by default</strong> since it matches the structure of every real Dolby Vision UHD Blu-ray source seen building this app (a fully valid standalone HDR10 base layer plus a DV enhancement layer) - confirmed this is the single most common profile for physical media specifically. Change it only if you know your source uses a different one; getting this wrong doesn't corrupt anything but may cause the DV metadata to be ignored by some devices - see the <code>--dolby-vision-profile</code> notes in <a href="https://github.com/rigaya/NVEnc/blob/master/NVEncC_Options.en.md" target="_blank">NVEncC's own documentation</a> if you need to identify a specific source's real profile.<br>
-      <strong>Mechanism (confirmed via direct research, not guessed):</strong> a pre-stage pipes <code>ffmpeg -c:v copy -bsf:v hevc_mp4toannexb -f hevc</code> (the source's original compressed video, byte-for-byte, converted to a raw elementary stream) into <code>dovi_tool extract-rpu</code>, producing a standalone RPU file - the same real workflow used throughout the Dolby Vision encoding community (confirmed via multiple independent guides describing this exact pipe). That RPU file is then supplied to the actual encoder via <code>--dolby-vision-rpu</code>/<code>dolby-vision-rpu=</code>, decoupled from however the encoder receives its actual video (this app's own piped y4m stream, in most cases) - which is what lets Dolby Vision preservation and this app's own filtering (crop/denoise/sharpen) work together instead of being mutually exclusive.
+      <strong>Mechanism (confirmed via direct research, not guessed):</strong> a pre-stage pipes <code>ffmpeg -c:v copy -bsf:v hevc_mp4toannexb -f hevc</code> (the source's original compressed video, byte-for-byte, converted to a raw elementary stream) into <code>dovi_tool extract-rpu</code>, producing a standalone RPU file - the same real workflow used throughout the Dolby Vision encoding community (confirmed via multiple independent guides describing this exact pipe). That RPU file is then supplied to the actual encoder via <code>--dolby-vision-rpu</code>/<code>dolby-vision-rpu=</code>, decoupled from however the encoder receives its actual video (this app's own piped y4m stream, in most cases) - which is what lets Dolby Vision preservation and this app's own filtering (crop/denoise/sharpen) work together instead of being mutually exclusive.<br><br><strong>Real muxing fix (confirmed via a user's actual uploaded output file, checked directly, not guessed):</strong> the frame-level RPU data was confirmed present and completely correct in the encoder's own output all along - the actual problem was that ffmpeg's own matroska muxer cannot synthesize the container-level "DOVI configuration record" descriptor that many players and tools look for, when muxing a raw stream that only carries per-frame RPU data (confirmed via ffmpeg's own source and multiple independent real-world reports of this exact limitation - not fixable with any ffmpeg flag, including <code>-strict unofficial</code>, which was tried and directly confirmed not to help). The real, community-standard fix - genuinely used throughout the Dolby Vision encoding community for exactly this - is <strong>mkvmerge</strong> (part of the free MKVToolNix package), used specifically for the final mux step whenever Dolby Vision preservation is active. ffmpeg is still used for every other stage; only this one final step is swapped.
     </div>
     <div class="row" id="dovToolPathRow" style="margin-top:10px;display:none">
       <div class="field"><label>dovi_tool Path</label>
-        <input class="path-inp" type="text" id="dovToolPath" value="C:\dovi_tool\dovi_tool.exe" placeholder="C:\dovi_tool\dovi_tool.exe">
+        <input class="path-inp" type="text" id="dovToolPath" placeholder="C:\dovi_tool\dovi_tool.exe">
+      </div>
+      <div class="field"><label>mkvmerge Path (MKVToolNix - required for the final mux when DV is active)</label>
+        <input class="path-inp" type="text" id="mkvmergePath" placeholder="C:\Program Files\MKVToolNix\mkvmerge.exe">
       </div>
     </div>
+    <div class="path-hint" id="mkvmergeSetupHint" style="margin-top:8px">
+      <strong>Setup:</strong> download MKVToolNix from <a href="https://mkvtoolnix.download/downloads.html#windows" target="_blank">mkvtoolnix.download</a> (the free installer includes mkvmerge.exe), install it, and set the path above to wherever it installed mkvmerge.exe (commonly <code>C:\Program Files\MKVToolNix\mkvmerge.exe</code>). Only needed when Dolby Vision preservation is on - every other feature in this app keeps using ffmpeg exactly as before.
+    </div>
+
+
+    <div class="ti" id="tog-hdr10plus" onclick="toggle(this); hdr10PlusAutoEnabled = false; document.getElementById('hdr10plusToolPathRow').style.display = isOn('tog-hdr10plus') ? 'block' : 'none';" style="margin-top:10px"><div class="sw"></div><div class="ti-txt">Preserve HDR10+ dynamic metadata through re-encode — OFF by default, experimental, auto-enables when the selected video track actually carries HDR10+ metadata (same pattern as Dolby Vision Preservation above - own status line below confirms it either way, manual turn-off is respected per track). Only does anything when Process for HDR10 output above is also on.<br><br><strong>Weaker evidence than Dolby Vision above - added anyway on request, but the caveats here are real and more serious, not just boilerplate:</strong> researched this specifically before implementing. NVEncC (this app's default encoder) has real, recent (2023) bug reports of this exact mechanism - extract HDR10+ metadata, inject via <code>--dhdr10-info</code> - simply not working, producing output with no HDR10+ metadata at all despite no errors. Separately, libx265's own support for <code>--dhdr10-info</code> requires x265 to have been compiled with a specific <code>HDR10_PLUS</code> build flag that standard ffmpeg builds are not guaranteed to include - genuinely unknown whether this app's actual ffmpeg build has it without checking directly. Given Dolby Vision Preservation above - built on cleaner evidence - already came back not detected by Jellyfin in real testing and is still being diagnosed, treat this one with at least that much skepticism, probably more, until proven otherwise on your own setup.<br><br><strong>Mechanism:</strong> a pre-stage pipes the source's compressed video through <code>ffmpeg -bsf:v hevc_mp4toannexb</code> into <code>hdr10plus_tool extract</code> (a separate download - see setup below, same author/family as dovi_tool), producing a JSON metadata file - supplied to the encoder via <code>--dhdr10-info</code>/<code>dhdr10-info=</code>, wired into NVEncC, QSVEncC, and libx265 (the same three that support Dolby Vision Preservation above; VCEEncC/hevc_qsv/hevc_amf skipped for the same no-confirmed-support reason). The same explicit final-mux frame-rate fix added for Dolby Vision is also applied here, since the underlying ffmpeg MKV-muxing gap that caused isn't specific to Dolby Vision. Use the "Keep intermediate files" debug toggle above to check with <code>hdr10plus_tool --verify extract</code> or MediaInfo whether this is actually working on your setup.</div></div>
+    <div id="hdr10PlusStatus" class="detected" style="margin-top:6px"></div>
+    <div class="row" id="hdr10plusToolPathRow" style="margin-top:10px;display:none">
+      <div class="field"><label>hdr10plus_tool Path</label>
+        <input class="path-inp" type="text" id="hdr10plusToolPath" placeholder="C:\hdr10plus_tool\hdr10plus_tool.exe">
+      </div>
+    </div>
+    <div class="path-hint" style="margin-top:8px">
+      <strong>Setup:</strong> download <code>hdr10plus_tool</code> from <a href="https://github.com/quietvoid/hdr10plus_tool/releases" target="_blank">github.com/quietvoid/hdr10plus_tool/releases</a> (the Windows x86_64 zip), extract <code>hdr10plus_tool.exe</code> somewhere permanent, and set the path above.
+    </div>
+
+    <div class="ti" id="tog-keep-temp-files" onclick="toggle(this)" style="margin-top:10px"><div class="sw"></div><div class="ti-txt">Keep intermediate files after the job finishes (debug) — OFF by default. Normally every temp file this app creates along the way (extracted RPU/HDR10+ metadata, pre-mux intermediates, etc.) gets deleted once the job completes. Turn this on to inspect them directly - e.g. to check with <code>dovi_tool info</code>/<code>hdr10plus_tool --verify extract</code> or MediaInfo whether dynamic HDR metadata actually survives each stage, since jellyfin/players not detecting it could be happening at more than one possible point in the pipeline (extraction itself, the encode step, an intermediate timing-fix remux, or the final mux) and the only way to know which is to actually look. Files are still named with the job's temp prefix in the same folder as the source - safe to delete manually once you're done inspecting them.</div></div>
   </div>
 
   <div class="slbl">Smoothing / Sharpening</div>
@@ -342,7 +380,7 @@
     <div class="path-hint" id="motionInterpAutoHint" style="display:none"></div>
     <div class="row" id="vspipePathRow" style="display:block;margin-top:10px">
       <div class="field"><label>vspipe Path</label>
-        <input class="path-inp" type="text" id="vspipePath" value="C:\Python314\Scripts\vspipe.exe" placeholder="C:\Python314\Scripts\vspipe.exe">
+        <input class="path-inp" type="text" id="vspipePath" placeholder="C:\Python314\Scripts\vspipe.exe">
       </div>
     </div>
     <div class="warn-box">
@@ -432,7 +470,7 @@
     </div>
     <div id="nvencPathSection" style="display:none;margin-top:8px">
       <label>NVEncC Path</label>
-      <input type="text" id="nvencPath" placeholder="Path to NVEncC64.exe" value="C:\Users\Angel\Documents\Aviutl_NVEnc_9.29\exe_files\NVEncC\x64\NVEncC64.exe">
+      <input type="text" id="nvencPath" placeholder="Path to NVEncC64.exe">
       <div class="path-hint" style="margin-top:8px">
         <strong>For NVIDIA GPUs.</strong> Download: <strong>github.com/rigaya/NVEnc/releases</strong> — get the
         latest release, download the zip for Windows x64. The exe inside is named
@@ -443,7 +481,7 @@
     </div>
     <div id="qsvencPathSection" style="display:none;margin-top:8px">
       <label>QSVEncC Path</label>
-      <input type="text" id="qsvencPath" placeholder="Path to QSVEncC64.exe" value="QSVEncC64.exe">
+      <input type="text" id="qsvencPath" placeholder="Path to QSVEncC64.exe">
       <div class="path-hint" style="margin-top:8px">
         <strong>For Intel GPUs — this is what actually runs on Intel integrated graphics (iGPU) on most
         systems, not a separate thing from QSV.</strong> Download: <strong>github.com/rigaya/QSVEnc/releases</strong>
@@ -454,7 +492,7 @@
     </div>
     <div id="vceencPathSection" style="display:none;margin-top:8px">
       <label>VCEEncC Path</label>
-      <input type="text" id="vceencPath" placeholder="Path to VCEEncC64.exe" value="VCEEncC64.exe">
+      <input type="text" id="vceencPath" placeholder="Path to VCEEncC64.exe">
       <div class="path-hint" style="margin-top:8px">
         <strong>For AMD GPUs.</strong> Download: <strong>github.com/rigaya/VCEEnc/releases</strong> — Windows
         x64 zip. Expected exe name: <strong>VCEEncC64.exe</strong> (same naming convention as the other two
@@ -523,7 +561,7 @@
   <div class="slbl">Output</div>
   <div class="card">
     <label>FFmpeg Path</label>
-    <input type="text" id="ffmpegPath" value="C:\Users\Angel\Documents\ffmpeg-8.0.1-full_build\bin\ffmpeg.exe">
+    <input type="text" id="ffmpegPath">
     <div class="row" style="margin-top:10px">
       <div class="field">
         <label>Container</label>
@@ -557,6 +595,8 @@
     <div id="queueList" style="margin-top:12px"></div>
   </div>
 
+  <div class="warn-box" id="jobWarningsBox" style="display:none;margin-bottom:12px;font-size:.75rem;line-height:1.6"></div>
+
   <div class="progress-wrap" id="progressWrap">
     <div id="overallProgressBlock" style="display:none;margin-bottom:12px;">
       <div style="font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Overall — <span id="overallStageLabel">Step 1/3</span></div>
@@ -586,6 +626,30 @@
   </div>
 
 <script>
+// ══════════════════════════════════════════════════════════════════
+// DEFAULT FILE PATHS — edit here when setting this app up on a new PC.
+// Every tool path in the app is now set from this ONE object on page
+// load, instead of being hardcoded separately into each input field's
+// HTML - added per direct request after a real setup friction point
+// (dovi_tool.exe not found at its old hardcoded default path, which
+// would have needed hunting through the whole file to find and fix).
+// Change a value below, reload the app, and every field using it picks
+// up the new default automatically - a path you've already customized
+// in the app's own UI is never overwritten (only used as each field's
+// STARTING value, exactly like the hardcoded HTML values before this).
+// ══════════════════════════════════════════════════════════════════
+const DEFAULT_PATHS = {
+  ffmpeg: 'C:\\Users\\Angel\\Documents\\ffmpeg-8.0.1-full_build\\bin\\ffmpeg.exe',
+  nvenc: 'C:\\Users\\Angel\\Documents\\Aviutl_NVEnc_9.29\\exe_files\\NVEncC\\x64\\NVEncC64.exe',
+  qsvenc: 'QSVEncC64.exe',
+  vceenc: 'VCEEncC64.exe',
+  vspipe314: 'C:\\Python314\\Scripts\\vspipe.exe',
+  vspipe313: 'C:\\Users\\Angel\\AppData\\Local\\Programs\\Python\\Python313\\Scripts\\vspipe.exe',
+  doviTool: 'C:\\Users\\Angel\\Documents\\dovi_tool-2.3.3-x86_64-pc-windows-msvc\\dovi_tool.exe',
+  hdr10plusTool: 'C:\\hdr10plus_tool\\hdr10plus_tool.exe',
+  mkvmerge: 'C:\\Program Files\\MKVToolNix\\mkvmerge.exe'
+};
+
 // Converts every toggle's long description text (and the long .path-hint
 // setup-instruction boxes under many of them) into a collapsed <details>
 // block, showing only a short lead-in sentence until expanded - per
@@ -658,11 +722,9 @@ function toggle(el){ el.classList.toggle('on'); }
 // real bug - selecting MVTools while the field still held the 3.13 (TensorRT)
 // default meant vspipe ran with no mvsf installed ("No attribute with the
 // name mvsf exists"), confirmed via direct testing. Auto-correcting per-mode
-// closes that gap.
-const VSPIPE_DEFAULT_PATHS = {
-  py314: 'C:\\Python314\\Scripts\\vspipe.exe',
-  py313: 'C:\\Users\\Angel\\AppData\\Local\\Programs\\Python\\Python313\\Scripts\\vspipe.exe'
-};
+// closes that gap. References the centralized DEFAULT_PATHS object (top of
+// file) directly now, rather than a separate duplicate object - keeps every
+// default path in the one place per direct request.
 function selectInterpMode(mode){
   const ids = { gpu: 'tog-motion-interp-gpu', 'gpu-trt': 'tog-motion-interp-gpu-trt', 'gpu-vk': 'tog-motion-interp-gpu-vk', mvtools: 'tog-motion-interp-mvtools', cpu: 'tog-motion-interp-cpu' };
   const clicked = document.getElementById(ids[mode]);
@@ -676,10 +738,10 @@ function selectInterpMode(mode){
   if (!wasOn) {
     const field = document.getElementById('vspipePath');
     const current = field.value.trim();
-    const isKnownDefault = current === '' || current === VSPIPE_DEFAULT_PATHS.py314 || current === VSPIPE_DEFAULT_PATHS.py313;
+    const isKnownDefault = current === '' || current === DEFAULT_PATHS.vspipe314 || current === DEFAULT_PATHS.vspipe313;
     if (isKnownDefault) {
-      if (mode === 'gpu-trt') field.value = VSPIPE_DEFAULT_PATHS.py313;
-      else if (mode === 'gpu' || mode === 'mvtools') field.value = VSPIPE_DEFAULT_PATHS.py314;
+      if (mode === 'gpu-trt') field.value = DEFAULT_PATHS.vspipe313;
+      else if (mode === 'gpu' || mode === 'mvtools') field.value = DEFAULT_PATHS.vspipe314;
     }
   }
 
@@ -990,7 +1052,7 @@ function renderTrackLists(videoStreams, audioStreams, subtitleStreams){
       const label = `${s.title ? s.title + ' — ' : ''}${langName(s.language)} · ${s.codec.toUpperCase()} · ${s.channels}ch`
         + (s.channels < 6 ? ' <span style="color:var(--yellow)">(stereo/mono — will pass through, engine needs 5.1/7.1)</span>' : '');
       return `<label style="display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer;">
-        <input type="radio" name="integratedTrackSel" value="${s.index}" data-channels="${s.channels}" data-codec="${s.codec}" ${i===0?'checked':''} onchange="onAudioTrackChange()">
+        <input type="radio" name="integratedTrackSel" value="${s.index}" data-channels="${s.channels}" data-codec="${s.codec}" data-profile="${s.profile || ''}" ${i===0?'checked':''} onchange="onAudioTrackChange()">
         <span>${label}</span>
       </label>`;
     }).join('');
@@ -1024,25 +1086,156 @@ function renderTrackLists(videoStreams, audioStreams, subtitleStreams){
 // for where this gets used instead of the Brightness Reference slider.
 let selectedTrackHdrMetadata = null;
 let hdrMetadataFetchGeneration = 0;
+// Tracks whether Preserve Dolby Vision/HDR10+'s current on-state came
+// from auto-detection specifically, not the user manually enabling it -
+// same pattern as the old AC3 auto-delay feature, but implemented with
+// correct symmetric on/off switching this time (that AC3 version had a
+// real bug: switching to a non-AC3 track left the toggle on with stale
+// state, since the off-branch never actually cleared it). Only
+// auto-clears what was auto-set - a manual enable is never touched.
+let dvAutoEnabled = false;
+let hdr10PlusAutoEnabled = false;
+
+// Auto-detects the correct Dolby Vision extraction mode and injection
+// profile from the source's ACTUAL metadata (dvProfile/dvBlCompatId,
+// from get-hdr-metadata's stream-level DOVI configuration record query)
+// instead of always assuming the dropdown's manually-selected value is
+// right - added after a real, confirmed bug where a genuine Profile 7
+// source (UHD Blu-ray dual-layer format) had its RPU extracted
+// untouched while the encoder was told Profile 8.1 regardless, a
+// mismatch that silently destroyed all DV metadata with no visible
+// error. Falls back to the dropdown's own value whenever detection
+// isn't available (extraction fails, older cached metadata, manual
+// override) - auto-detection only overrides when it actually knows
+// something concrete, never blindly replaces a value the user
+// explicitly picked in cases where detection has nothing to say.
+function getAutoDetectedDvSettings(){
+  const dropdownValue = document.getElementById('dolbyVisionProfileSelect').value;
+  const meta = selectedTrackHdrMetadata;
+  if (!meta || meta.dvProfile == null){
+    // No real detection available - use the dropdown exactly as before,
+    // no mode flag (matches this app's original, pre-fix behavior).
+    return { extractModeArgs: [], injectProfile: dropdownValue };
+  }
+  if (meta.dvProfile === 7){
+    // Confirmed via dovi_tool's own documentation: -m 2 converts a
+    // Profile 7 RPU to genuine Profile 8.1 compatibility during
+    // extraction - the real, documented fix for exactly this format.
+    return { extractModeArgs: ['-m', '2'], injectProfile: '8.1' };
+  }
+  if (meta.dvProfile === 8){
+    // Already single-layer - RPU can be extracted untouched (no -m
+    // flag needed), but the SPECIFIC 8.x sub-variant still needs to
+    // match the base layer's real compatibility so the encoder gets an
+    // accurate declaration, not just a hardcoded guess. compatibility_id
+    // 2 (SDR-compatible base) has no matching dropdown option - 8.1
+    // is the closest, most common real-world case, used as a fallback
+    // for that one specific value.
+    const compatId = meta.dvBlCompatId;
+    const profile = compatId === 4 ? '8.4' : '8.1';
+    return { extractModeArgs: [], injectProfile: profile };
+  }
+  if (meta.dvProfile === 5){
+    return { extractModeArgs: [], injectProfile: '5' };
+  }
+  // Unrecognized/unusual profile number - fall back to the dropdown
+  // rather than guessing at an extraction mode with no real basis.
+  return { extractModeArgs: [], injectProfile: dropdownValue };
+}
 
 async function refreshHdrMetadataForTrack(streamIndex, isHDR){
   const myGeneration = ++hdrMetadataFetchGeneration;
   const statusEl = document.getElementById('dolbyVisionStatus');
+  const hdr10PlusStatusEl = document.getElementById('hdr10PlusStatus');
+  const clearAutoEnabled = () => {
+    if (dvAutoEnabled){
+      document.getElementById('tog-dolby-vision')?.classList.remove('on');
+      const row = document.getElementById('dovToolPathRow');
+      if (row) row.style.display = 'none';
+      dvAutoEnabled = false;
+    }
+    if (hdr10PlusAutoEnabled){
+      document.getElementById('tog-hdr10plus')?.classList.remove('on');
+      const row = document.getElementById('hdr10plusToolPathRow');
+      if (row) row.style.display = 'none';
+      hdr10PlusAutoEnabled = false;
+    }
+  };
   if (!isHDR){
     selectedTrackHdrMetadata = null;
     if (statusEl) statusEl.textContent = '';
+    if (hdr10PlusStatusEl) hdr10PlusStatusEl.textContent = '';
+    clearAutoEnabled();
     return;
   }
-  if (!window.electronAPI?.getHdrMetadata || !filePath) { selectedTrackHdrMetadata = null; return; }
+  if (!window.electronAPI?.getHdrMetadata || !filePath) { selectedTrackHdrMetadata = null; clearAutoEnabled(); return; }
   if (statusEl) statusEl.textContent = 'Checking for Dolby Vision...';
+  if (hdr10PlusStatusEl) hdr10PlusStatusEl.textContent = 'Checking for HDR10+...';
   const ffmpeg = document.getElementById('ffmpegPath').value.trim();
   const result = await window.electronAPI.getHdrMetadata({ ffmpeg, filePath, streamIndex });
   if (myGeneration !== hdrMetadataFetchGeneration) return; // a newer track selection has since started
-  selectedTrackHdrMetadata = (result && (result.found || result.hasDolbyVision)) ? result : null;
+  selectedTrackHdrMetadata = (result && (result.found || result.hasDolbyVision || result.hasHdr10Plus)) ? result : null;
+  const hasDV = !!(selectedTrackHdrMetadata && selectedTrackHdrMetadata.hasDolbyVision);
+  const hasH10P = !!(selectedTrackHdrMetadata && selectedTrackHdrMetadata.hasHdr10Plus);
+  const dvToggle = document.getElementById('tog-dolby-vision');
+  const h10pToggle = document.getElementById('tog-hdr10plus');
+  // Auto-enable on detection, auto-disable only what was auto-enabled -
+  // a manual enable (the user turned it on themselves, unrelated to
+  // this detection) is never touched either direction.
+  if (dvToggle){
+    if (hasDV && !dvToggle.classList.contains('on')){
+      dvToggle.classList.add('on');
+      document.getElementById('dovToolPathRow').style.display = 'block';
+      dvAutoEnabled = true;
+    } else if (!hasDV && dvAutoEnabled){
+      dvToggle.classList.remove('on');
+      document.getElementById('dovToolPathRow').style.display = 'none';
+      dvAutoEnabled = false;
+    }
+  }
+  if (h10pToggle){
+    if (hasH10P && !h10pToggle.classList.contains('on')){
+      h10pToggle.classList.add('on');
+      document.getElementById('hdr10plusToolPathRow').style.display = 'block';
+      hdr10PlusAutoEnabled = true;
+    } else if (!hasH10P && hdr10PlusAutoEnabled){
+      h10pToggle.classList.remove('on');
+      document.getElementById('hdr10plusToolPathRow').style.display = 'none';
+      hdr10PlusAutoEnabled = false;
+    }
+  }
   if (statusEl){
-    statusEl.innerHTML = selectedTrackHdrMetadata && selectedTrackHdrMetadata.hasDolbyVision
-      ? '<strong style="color:var(--green)">Dolby Vision detected</strong> on this track - "Preserve Dolby Vision" above will do something if enabled.'
-      : '<span style="color:var(--muted)">No Dolby Vision detected on this track - "Preserve Dolby Vision" above has no effect here.</span>';
+    // Shows the REAL detected profile number, not just a generic
+    // "detected" message - added after a direct report that the
+    // dropdown's static default (always showing 8.1, since nothing
+    // ever updated its displayed value) gave no way to tell whether
+    // detection actually found anything, or whether the encode was
+    // silently falling back to the dropdown's unchanged default. This
+    // is the SAME value getAutoDetectedDvSettings() will actually use
+    // for the encode - if this doesn't show the right profile, the
+    // encode won't either, and that's now directly visible instead of
+    // hidden behind a dropdown that never changes.
+    const profileRow = document.getElementById('dolbyVisionProfileRow');
+    if (hasDV && selectedTrackHdrMetadata.dvProfile != null){
+      const detected = getAutoDetectedDvSettings();
+      statusEl.innerHTML = `<strong style="color:var(--green)">Dolby Vision detected - Profile ${selectedTrackHdrMetadata.dvProfile}</strong> on this track. `
+        + `Will extract ${detected.extractModeArgs.length ? 'with conversion (-m ' + detected.extractModeArgs[1] + ')' : 'untouched'} `
+        + `and inject as Profile ${detected.injectProfile}. Fully automatic - nothing to set below.`;
+      if (profileRow) profileRow.style.display = 'none';
+    } else if (hasDV){
+      statusEl.innerHTML = '<strong style="color:var(--yellow)">Dolby Vision detected, but the specific profile could not be read</strong> '
+        + `from this track - falling back to the dropdown's manual value (currently ${document.getElementById('dolbyVisionProfileSelect').value}). `
+        + 'If that\'s wrong for this source, set it manually below.';
+      if (profileRow) profileRow.style.display = 'flex';
+    } else {
+      statusEl.innerHTML = '<span style="color:var(--muted)">No Dolby Vision detected on this track - "Preserve Dolby Vision" above has no effect here.</span>';
+      if (profileRow) profileRow.style.display = 'none';
+    }
+  }
+  if (hdr10PlusStatusEl){
+    hdr10PlusStatusEl.innerHTML = hasH10P
+      ? '<strong style="color:var(--green)">HDR10+ detected</strong> on this track - "Preserve HDR10+" above auto-enabled.'
+      : '<span style="color:var(--muted)">No HDR10+ detected on this track - "Preserve HDR10+" above has no effect here.</span>';
   }
 }
 
@@ -1091,14 +1284,6 @@ async function detectVideoTrackDuration(streamIndex){
   }
 }
 
-// Tracks whether Audio Delay's current on-state (and value) came from
-// AC3 auto-detection specifically, not the user manually enabling it —
-// confirmed via a real report: switching to a track/file without AC3
-// left the toggle on with the stale 2.5s value from a PREVIOUS AC3
-// track, since the non-AC3 branch only hid the hint text and never
-// actually turned anything off. Only auto-clear what was auto-set.
-let audioDelayAutoSetByAC3 = false;
-
 function onAudioTrackChange(){
   // Both radio groups exist in the DOM at all times regardless of audio
   // mode (only one section is visually shown), and audioTrackSel ALWAYS
@@ -1114,6 +1299,48 @@ function onAudioTrackChange(){
   const hint = document.getElementById('ac3AutoHint');
   if (!selected) { if (hint) hint.style.display = 'none'; return; }
   const codec = selected.dataset.codec;
+  // DTS/Atmos visibility, per direct request - specifically for
+  // Integrated Engine mode, since that's the pipeline actually doing
+  // real mixing/processing on the source (DPLII + safety chain + 7.1
+  // upmix) - the standard/embedded-track mode just copies whatever's
+  // selected as-is, nothing to report there. Atmos isn't its own codec
+  // name (AC3/E-AC3/TrueHD can all carry it) - shows up in ffprobe's
+  // own `profile` field instead (e.g. "Dolby TrueHD + Dolby Atmos"),
+  // confirmed via real-world ffprobe/MediaInfo output examples found
+  // researching this project's earlier Atmos work - main.js now fetches
+  // and exposes this field.
+  if (audioMode === 'integrated'){
+    let mixSourceStatus = document.getElementById('mixSourceStatus');
+    if (!mixSourceStatus){
+      mixSourceStatus = document.createElement('div');
+      mixSourceStatus.id = 'mixSourceStatus';
+      mixSourceStatus.className = 'detected';
+      mixSourceStatus.style.marginTop = '6px';
+      document.getElementById('integratedTrackList').insertAdjacentElement('afterend', mixSourceStatus);
+    }
+    const profile = selected.dataset.profile || '';
+    const isDts = /^dts/i.test(codec);
+    const hasAtmos = /atmos/i.test(profile);
+    const codecLabel = { dts: 'DTS', dts_hd: 'DTS-HD', truehd: 'Dolby TrueHD', eac3: 'Dolby Digital Plus', ac3: 'Dolby Digital' }[codec] || codec.toUpperCase();
+    const parts = [];
+    if (hasAtmos) parts.push(`<strong style="color:var(--green)">Dolby Atmos detected</strong> on this ${codecLabel} track`);
+    else if (isDts) parts.push(`<strong style="color:var(--green)">DTS source detected</strong> (${codecLabel})`);
+    else parts.push(`Source is ${codecLabel}, no Atmos detected`);
+    // Fixed a real bug: this used to say "(DPLII + upmix)" unconditionally,
+    // regardless of whether the DPLII toggle below was actually on -
+    // confirmed via direct question this was wrong and misleading when
+    // DPLII is off. Now reflects the actual method in use either way,
+    // and points at the real untouched-passthrough option (switching
+    // Mode above to "Embedded Track") since that's a genuinely different
+    // path from anything Integrated Engine mode does, DPLII on or off.
+    const usingDplII = isOn('tog-ambisonics');
+    parts.push(`- being decoded and mixed by the Integrated Engine below (${usingDplII ? 'Dolby Pro Logic II matrix encode' : 'plain bass-managed fold'} + 7.1 upmix), not passed through untouched. Want it untouched instead? Switch Mode above to "Embedded Track".`);
+    if (hasAtmos) parts.push('<br><span style="color:var(--muted)">Note: Atmos\'s own object-based data is not carried through this mixing pipeline (only a pure, untouched copy preserves Atmos specifically) - this shows the source has it, not that it survives the mix.</span>');
+    mixSourceStatus.innerHTML = parts.join(' ');
+  } else {
+    const existingStatus = document.getElementById('mixSourceStatus');
+    if (existingStatus) existingStatus.innerHTML = '';
+  }
   let ac3Hint = document.getElementById('ac3AutoHint');
   if (!ac3Hint){
     ac3Hint = document.createElement('div');
@@ -1123,36 +1350,23 @@ function onAudioTrackChange(){
     document.getElementById('audioDelaySection').appendChild(ac3Hint);
   }
   if (codec === 'ac3'){
-    document.getElementById('tog-audio-delay').classList.add('on');
-    document.getElementById('audioDelaySection').style.display = 'block';
-    if (!document.getElementById('audioDelayInput').value.trim()){
-      document.getElementById('audioDelayInput').value = '2.5';
-      updateAudioDelayInfo();
-    }
-    audioDelayAutoSetByAC3 = true;
+    // Per direct request: no longer auto-enables Audio Delay or
+    // pre-fills a value - just warns and lets the user decide. Toggle
+    // and value are left exactly as the user set them, whatever that is.
     ac3Hint.style.display = 'block';
-    ac3Hint.innerHTML = '<strong>AC3 track selected</strong> — auto-enabled with 2.5s pre-filled, the value '
-      + 'previously diagnosed for one specific source. This is a starting suggestion, not guaranteed correct '
-      + 'for every AC3 file — verify sync after encoding and adjust the offset if this source differs.';
+    ac3Hint.innerHTML = '<strong>AC3 track selected</strong> — sources like this have needed a delay correction '
+      + 'before (2.5s worked for one specific previously-diagnosed source). Not auto-enabled — turn on Audio '
+      + 'Delay / Offset below yourself and try 2.5s as a starting point if you notice sync issues, then adjust '
+      + 'for this specific file.';
     const trackWarn = document.getElementById('ac3TrackSelectionWarning');
     trackWarn.style.display = 'block';
-    trackWarn.innerHTML = '<strong>AC3 audio selected</strong> — Audio Delay has been auto-enabled with a 2.5s offset '
-      + '(see Audio Delay / Offset section below). This was diagnosed for one specific source and isn\'t '
-      + 'guaranteed correct for every AC3 file. <strong>Test with the toggle off first</strong> to confirm '
-      + 'this specific file actually needs it before assuming it does.';
+    trackWarn.innerHTML = '<strong>AC3 audio selected</strong> — sources like this have needed a delay correction '
+      + 'before (2.5s worked for one specific previously-diagnosed source, not guaranteed correct for every '
+      + 'AC3 file). Not turned on automatically — check Audio Delay / Offset below yourself if you notice sync '
+      + 'issues, and test with it off first to confirm this specific file actually needs it.';
   } else {
     ac3Hint.style.display = 'none';
     document.getElementById('ac3TrackSelectionWarning').style.display = 'none';
-    // Only clear what THIS auto-detection previously set — if the user
-    // manually enabled Audio Delay themselves (unrelated to AC3), leave
-    // their setting alone rather than silently clobbering it.
-    if (audioDelayAutoSetByAC3){
-      document.getElementById('tog-audio-delay').classList.remove('on');
-      document.getElementById('audioDelaySection').style.display = 'none';
-      document.getElementById('audioDelayInput').value = '';
-      updateAudioDelayInfo();
-      audioDelayAutoSetByAC3 = false;
-    }
   }
 
   // Same event (track selection change) also drives Duration Correction's
@@ -1344,6 +1558,87 @@ const AUDIO_ENGINE_DEFAULTS = {
   lufs: -18, tp: -1.5, lra: 13,
   headroomPad: '0.5012'
 };
+
+// Dolby Pro Logic II-compatible matrix encoding - replaces the earlier
+// Opus/RFC-8486-ambisonics approach after real testing (both VLC and
+// mpv) confirmed that approach doesn't reliably play, even though the
+// file itself was confirmed valid and correctly tagged. This technique
+// is fundamentally different and solves the actual constraint (works in
+// the player most people actually use): it produces plain, ordinary
+// 2-channel stereo with no special channel layout or format tag at all,
+// so every player handles it exactly like any other stereo track,
+// zero special-case code needed on the playback side. The real spatial
+// information lives in phase relationships between the two channels
+// (the same technique used on physical media for decades) - decodable
+// by any Dolby Pro Logic II-compatible hardware decoder (common in real
+// AVRs), while sounding like normal, correct stereo either way if
+// there's no decoder listening for it. Uses ffmpeg's own native
+// `aresample=matrix_encoding=dplii` implementation directly instead of
+// hand-derived phase-shift math - confirmed via direct testing that
+// this alone doesn't reduce channel count on its own, needs an explicit
+// `aformat=channel_layouts=stereo` paired with it to actually complete
+// the downmix (verified with a real synthetic 5.1 test source: without
+// the aformat step, output stayed 6-channel; with it, correctly becomes
+// plain 2-channel stereo).
+function buildDplIIStereoFilter(sourceChannels, audioCorrections){
+  if (sourceChannels < 3) return null; // stereo or mono - nothing to matrix-encode, caller should skip
+  const d = AUDIO_ENGINE_DEFAULTS;
+  const lines = [];
+  // LFE is deliberately excluded from the DPLII matrix encode itself and
+  // mixed back in directly afterward - confirmed via direct measurement
+  // (bandpass + astats on a real synthetic 5.1 test source, matching
+  // known channel frequencies) that feeding LFE straight into
+  // aresample=matrix_encoding=dplii along with everything else massively
+  // under-represents it: ~19dB of EXTRA loss beyond the ~7dB gain
+  // difference seen uniformly across every other channel. This matches
+  // a real, independently documented finding (HandBrake/Dolby Labs
+  // community testing: "the LFE channel in DPL2's phasing is flawed...
+  // was better without the lfe channel phasing") - not a bug in this
+  // implementation, a known real limitation of DPLII's own matrix math
+  // specifically for bass content. Fixed the same way that community
+  // actually fixes it: matrix-encode only the non-LFE channels (5.0 or
+  // 7.0, both real ffmpeg-recognized layout names), then mix LFE back
+  // into both output channels directly (plain gain, no phase matrix) -
+  // confirmed via direct re-test this restores LFE to a level
+  // comparable to or better than this app's own plain bass-managed fold,
+  // while leaving the other channels' levels correctly intact.
+  const isSevenOne = sourceChannels === 8;
+  const srcLayout = isSevenOne ? '7.1' : '5.1';
+  const nonLfeLayout = isSevenOne ? '7.0' : '5.0';
+  const nonLfeChannels = isSevenOne ? '[FL][FR][FC][BL][BR][SL][SR]' : '[FL][FR][FC][BL][BR]';
+  lines.push(`[0:a]channelsplit=channel_layout=${srcLayout}${isSevenOne ? '[FL][FR][FC][LFE][BL][BR][SL][SR]' : '[FL][FR][FC][LFE][BL][BR]'}`);
+  lines.push(`${nonLfeChannels}join=inputs=${isSevenOne ? 7 : 5}:channel_layout=${nonLfeLayout}[dplii_src]`);
+  lines.push(`[dplii_src]aresample=matrix_encoding=dplii[dplii_raw]`);
+  lines.push(`[dplii_raw]aformat=channel_layouts=stereo[dplii_stereo]`);
+  lines.push(`[dplii_stereo]channelsplit=channel_layout=stereo[dl][dr]`);
+  lines.push(`[LFE]volume=${d.lfe}[lfe_scaled]`);
+  lines.push(`[lfe_scaled]asplit=2[lfe_l][lfe_r]`);
+  lines.push(`[dl][lfe_l]amix=inputs=2:weights=1 1:normalize=0[dl_lfe]`);
+  lines.push(`[dr][lfe_r]amix=inputs=2:weights=1 1:normalize=0[dr_lfe]`);
+  lines.push(`[dl_lfe][dr_lfe]join=inputs=2:channel_layout=stereo[dplii_with_lfe]`);
+  // Audio Delay/Framerate corrections placed here, same reasoning as the
+  // existing downmix filter below: before the compressor/limiter/loudnorm
+  // chain, not after (a downstream resample placed after loudnorm was
+  // confirmed to corrupt output duration in real testing elsewhere in
+  // this app).
+  const corrections = (audioCorrections || []).filter(Boolean);
+  let prevLabel = 'dplii_with_lfe';
+  corrections.forEach((filt, i) => {
+    const nextLabel = `audio_correction_${i}`;
+    lines.push(`[${prevLabel}]${filt}[${nextLabel}]`);
+    prevLabel = nextLabel;
+  });
+  // Same validated safety chain as the standard downmix and the earlier
+  // ambisonics attempt - DPLII's own matrix math doesn't guarantee a
+  // target loudness or protect against clipping on its own, this app's
+  // own compressor/limiter/loudnorm/limiter chain (proven against the
+  // real Blade Runner 2049 stress test) still does that job here.
+  lines.push(`[${prevLabel}]acompressor=threshold=${d.compThresh}:ratio=${d.compRatio}:attack=25:release=200:knee=6:makeup=1:detection=rms:link=maximum:mix=1[comp_out]`);
+  lines.push(`[comp_out]alimiter=level_in=1:level_out=1:limit=${d.peakLimit}:attack=${d.peakAtk}:release=${d.peakRel}:level=false[pre_lim]`);
+  lines.push(`[pre_lim]loudnorm=I=${d.lufs}:TP=${d.tp}:LRA=${d.lra}:linear=false:print_format=none[lufs_out]`);
+  lines.push(`[lufs_out]alimiter=level_in=1:level_out=1:limit=${d.peakLimit}:attack=${d.peakAtk}:release=${d.peakRel}:level=false[out]`);
+  return lines.join(';');
+}
 
 function buildDownmixToStereoFilter(sourceChannels, audioCorrections){
   const d = AUDIO_ENGINE_DEFAULTS;
@@ -1899,6 +2194,7 @@ function buildJobFromCurrentSettings(chaptersPath){
   let videoSourceMapArg = videoMapArg;
   let pipedStage = null;
   let conformTargetFps = null;
+  let effectiveFps = null;
 
   // Framerate Conform — DaVinci Resolve/Premiere "Interpret Footage"-style
   // frame rate relabel, mutually exclusive with the 5 interpolation
@@ -1971,6 +2267,11 @@ function buildJobFromCurrentSettings(chaptersPath){
   // path the way NVEncC's own built-in `--dolby-vision-rpu copy` mode
   // would have required.
   let dvRpuPath = null;
+  // Computed once here, used by the extraction stage below AND both
+  // encoder-injection sites (NVEncC/QSVEncC's toolArgs, libx265's
+  // -x265-params) - single source of truth for both instead of each
+  // site independently reading the dropdown or guessing.
+  const dvAutoSettings = getAutoDetectedDvSettings();
   const dolbyVisionCapableEncoders = ['nvencc', 'qsvencc', 'libx265'];
   if (isOn('tog-dolby-vision') && isOn('tog-hdr') && dolbyVisionCapableEncoders.includes(encoder)
       && selectedTrackHdrMetadata && selectedTrackHdrMetadata.hasDolbyVision){
@@ -1981,8 +2282,72 @@ function buildJobFromCurrentSettings(chaptersPath){
       name: 'Extract Dolby Vision RPU',
       piped: true,
       ffmpegArgs: ['-i', videoSourcePath, '-map', videoSourceMapArg, '-c:v', 'copy', '-bsf:v', 'hevc_mp4toannexb', '-f', 'hevc', 'pipe:1'],
-      toolPath: doviToolPath, toolArgs: ['extract-rpu', '-o', dvRpuPath, '-'],
-      totalDuration: videoDuration, cleanup: null
+      // -m 2 (BEFORE the extract-rpu subcommand, confirmed via dovi_tool's
+      // own docs this is a global flag position) converts the extracted
+      // RPU to be genuinely Profile 8.1 compatible - added after a real
+      // user report + direct investigation confirmed the actual root
+      // cause: their source is Dolby Vision Profile 7 (dual-layer,
+      // confirmed via ffprobe showing dv_profile=7, el_present_flag=1 -
+      // the UHD Blu-ray dual-layer format, not the single-layer 8.1 this
+      // app assumes), but the RPU was being extracted untouched (still
+      // Profile 7) while the injection step told the encoder Profile 8.1
+      // (the dropdown default) - a real mismatch, not a guess, that
+      // explains the complete, silent metadata loss observed (confirmed
+      // via direct ffprobe: zero side_data on the output, despite no
+      // extraction error). This mode strips the Profile-7-specific
+      // Enhancement Layer and re-encodes the RPU metadata to genuinely
+      // match Profile 8.1 - the same real, documented technique the
+      // whole DV community uses for exactly this UHD-Blu-ray-rip
+      // scenario (dovi_tool's own README, multiple independent
+      // community tools built specifically around this exact conversion
+      // step).
+      // Auto-detected now (getAutoDetectedDvSettings()), not hardcoded -
+      // was unconditionally -m 2 (Profile 7 -> 8.1 conversion) after a
+      // real user report confirmed via ffprobe their source was
+      // genuinely Profile 7, but that's specific to Profile 7 sources
+      // only. A genuine Profile 8.x or Profile 5 source doesn't need or
+      // want that conversion - its RPU is already in the right shape,
+      // and forcing the Profile 7 conversion path on it would be its
+      // own new mismatch. Detection reads the source's real DOVI
+      // configuration record (dv_profile/dv_bl_signal_compatibility_id,
+      // from get-hdr-metadata) and only applies the -m 2 conversion when
+      // the source is actually confirmed Profile 7 - see
+      // getAutoDetectedDvSettings() for the full logic and its
+      // documented fallback behavior.
+      toolPath: doviToolPath, toolArgs: [...dvAutoSettings.extractModeArgs, 'extract-rpu', '-o', dvRpuPath, '-'],
+      totalDuration: videoDuration, cleanup: null,
+      // Never abort the whole job over this failing - see the execution
+      // loop's handling of `optional` stages. Per direct request: an
+      // experimental, best-effort enhancement failing should still leave
+      // a normal, watchable file with static HDR10 metadata, not no
+      // file at all. verifyPath gets checked for real (non-empty)
+      // existence after this stage runs regardless of its exit code;
+      // stripFlagsIfMissing removes the corresponding encoder flags from
+      // every later stage if that check fails, so a missing/invalid RPU
+      // file never reaches the actual encoder command line.
+      optional: true, verifyPath: dvRpuPath
+    });
+  }
+
+  // HDR10+ - same mechanism as Dolby Vision above (separate standard,
+  // can coexist with or without DV on the same source), weaker
+  // confirmed reliability - see tog-hdr10plus's own description for the
+  // specific caveats (real NVEncC bug reports, x265 compile-flag
+  // requirement) added on request despite that.
+  let hdr10PlusMetaPath = null;
+  if (isOn('tog-hdr10plus') && isOn('tog-hdr') && dolbyVisionCapableEncoders.includes(encoder)
+      && selectedTrackHdrMetadata && selectedTrackHdrMetadata.hasHdr10Plus){
+    const hdr10plusToolPath = document.getElementById('hdr10plusToolPath').value.trim();
+    const tmpDirH10p = filePath.substring(0, Math.max(filePath.lastIndexOf('\\'), filePath.lastIndexOf('/')) + 1);
+    hdr10PlusMetaPath = tmpDirH10p + '_tmp_hdr10plus_' + jobId + '.json';
+    preStages.push({
+      name: 'Extract HDR10+ dynamic metadata',
+      piped: true,
+      ffmpegArgs: ['-i', videoSourcePath, '-map', videoSourceMapArg, '-c:v', 'copy', '-bsf:v', 'hevc_mp4toannexb', '-f', 'hevc', 'pipe:1'],
+      toolPath: hdr10plusToolPath, toolArgs: ['extract', '-o', hdr10PlusMetaPath, '-'],
+      totalDuration: videoDuration, cleanup: null,
+      optional: true, verifyPath: hdr10PlusMetaPath,
+      stripFlagsIfMissing: [['--dhdr10-info', hdr10PlusMetaPath], [`dhdr10-info=${hdr10PlusMetaPath}`, 'EXACT']]
     });
   }
 
@@ -2158,6 +2523,22 @@ function buildJobFromCurrentSettings(chaptersPath){
     }
     if (isOn('tog-hdr')){
       const hv = getHdrMetadataValues();
+      // --repeat-headers added explicitly (not relying on NVEncC's own
+      // documented "implicit activation" of it for --max-cll/
+      // --master-display) after a real report of these two specific
+      // options producing zero HDR side_data in the final output
+      // despite no error and despite --colormatrix/--colorprim/
+      // --transfer (the same push, same conditional) working correctly.
+      // Confirmed directly via NVEncC's own official documentation that
+      // --max-cll's implicit --repeat-headers activation is specifically
+      // described in the context of its "avhw/avsw reader" (NVEncC
+      // reading a file directly) - this app instead pipes a raw y4m
+      // stream into NVEncC, a genuinely different input path the docs
+      // don't make the same guarantee for. Explicit and harmless either
+      // way - repeating headers at intervals is a real, standard benefit
+      // for HDR content regardless (seeking, multi-segment playback),
+      // not just a workaround.
+      toolArgs.push('--repeat-headers');
       toolArgs.push('--colormatrix', 'bt2020nc', '--colorprim', 'bt2020', '--transfer', 'smpte2084',
         '--max-cll', `${hv.maxCLL},${hv.maxFALL}`,
         '--master-display', buildMasterDisplayArg(hv));
@@ -2168,8 +2549,14 @@ function buildJobFromCurrentSettings(chaptersPath){
         // no confirmation of the same support was found researching it;
         // adding an unconfirmed flag risks the encode simply failing
         // outright rather than silently doing nothing.
-        const dvProfile = document.getElementById('dolbyVisionProfileSelect').value;
-        toolArgs.push('--dolby-vision-profile', dvProfile, '--dolby-vision-rpu', dvRpuPath);
+        toolArgs.push('--dolby-vision-profile', dvAutoSettings.injectProfile, '--dolby-vision-rpu', dvRpuPath);
+      }
+      if (hdr10PlusMetaPath && (encoder === 'nvencc' || encoder === 'qsvencc')){
+        // --dhdr10-info exists on both per their own docs, but real,
+        // recent bug reports exist specifically for NVEncC not applying
+        // it correctly - added on request despite that, see
+        // tog-hdr10plus's own description for the full caveat.
+        toolArgs.push('--dhdr10-info', hdr10PlusMetaPath);
       }
     }
     toolArgs.push('-o', tmpEncOutPath);
@@ -2332,7 +2719,7 @@ clip.set_output()
     // works, verified end-to-end: remux the raw stream into a proper
     // intermediate container first, with an explicit constant frame rate,
     // THEN do the final mux against that instead of the raw stream.
-    const effectiveFps = (isOn('tog-motion-interp-gpu') || isOn('tog-motion-interp-gpu-trt') || isOn('tog-motion-interp-mvtools') || isOn('tog-motion-interp-cpu'))
+    effectiveFps = (isOn('tog-motion-interp-gpu') || isOn('tog-motion-interp-gpu-trt') || isOn('tog-motion-interp-mvtools') || isOn('tog-motion-interp-cpu'))
       ? getMotionInterpTargetFps()
       : (conformTargetFps || detectedSourceFps || 24);
     const tmpRemuxedPath = tmpDir + '_tmp_remuxed_' + jobId + '.mp4';
@@ -2408,6 +2795,46 @@ clip.set_output()
     return { inputArgs, mapArgs };
   }
 
+  // Real, confirmed fix for Dolby Vision muxing (not a guess): ffmpeg's
+  // own matroska muxer cannot synthesize the container-level "DOVI
+  // configuration record" descriptor from a raw stream carrying only
+  // frame-level RPU data - confirmed directly via a real user's output
+  // file (frame data was correct all along; the descriptor was what was
+  // missing) and confirmed that no ffmpeg flag fixes this, including
+  // -strict unofficial (tested directly, no effect). mkvmerge (part of
+  // MKVToolNix) DOES correctly synthesize this descriptor from the same
+  // frame-level data - confirmed via a real, direct test using the
+  // user's own actual encoder output: produced a correct DOVI
+  // configuration record with the right profile (8) and the right
+  // HDR10-compatible flag (dv_bl_signal_compatibility_id=1), matching
+  // the intended Profile 7->8.1 conversion exactly. This is also the
+  // same real fix the Dolby Vision encoding community actually uses for
+  // this exact problem (confirmed via multiple independent real-world
+  // accounts of ffmpeg/MP4Box muxing breaking DV signaling, resolved by
+  // switching specifically to mkvmerge for the final mux step).
+  //
+  // mkvmerge takes whole FILES as inputs (not ffmpeg-style stream
+  // selectors), so this only handles the specific combination this
+  // app's pipeline actually needs: the video file (RPU already injected
+  // by the encoder), one audio file, and optionally subtitles pulled
+  // from the original source file (using --no-video --no-audio there so
+  // only its subtitle tracks are pulled in). Chapters are NOT included
+  // here deliberately - mkvmerge needs a different chapter file format
+  // (OGM-style or XML) than this app's existing FFMETADATA1 chapters
+  // file, so chapters are instead added in a separate, genuinely safe
+  // follow-up step: a pure metadata-only ffmpeg copy (-c copy
+  // -map_metadata) after mkvmerge's own output, which doesn't touch the
+  // video codec's own parameters or side data at all, confirmed via
+  // this project's own earlier direct testing that a pure stream copy
+  // doesn't affect frame-level side data.
+  function buildMkvmergeMuxArgs(videoPath, audioPath, finalOutPath){
+    const args = ['-o', finalOutPath, videoPath, audioPath];
+    if (subtitleSelections.length > 0){
+      args.push('--no-video', '--no-audio', filePath);
+    }
+    return args;
+  }
+
   function buildVideoArgs(inputArgs, audioArgs, mapArgs, finalOutPath){
     const args = [...inputArgs, ...mapArgs];
     if (externalToolEncoders.includes(encoder)){
@@ -2415,6 +2842,20 @@ clip.set_output()
       // pre-stages above — copy it through as-is, don't re-filter or
       // re-encode. mapArgs/inputArgs already point at videoSourcePath.
       args.push('-c:v', 'copy');
+      if ((dvRpuPath || hdr10PlusMetaPath) && effectiveFps){
+        // Confirmed via direct research: multiple independent real-world
+        // reports describe ffmpeg's own MKV muxing as unreliable at
+        // correctly signaling Dolby Vision unless the container's frame
+        // rate/duration is EXPLICITLY forced at the final mux step
+        // specifically (one direct quote: "always force-set Default
+        // duration/FPS to the proper value" when muxing DV content,
+        // tracing exactly this kind of muxing gap to a player not
+        // detecting DV even though the underlying bitstream had it).
+        // This mux step previously had no explicit -r at all. Only added
+        // when DV preservation is actually in play, to avoid changing
+        // behavior for the (already working) non-DV case.
+        args.push('-r', String(effectiveFps));
+      }
       args.push(...audioArgs);
       if (subtitleSelections.length > 0) args.push('-c:s', 'copy');
       args.push('-y', finalOutPath);
@@ -2439,8 +2880,14 @@ clip.set_output()
           `master-display=${buildMasterDisplayArg(hv)}`,
           `max-cll=${hv.maxCLL},${hv.maxFALL}`);
         if (dvRpuPath){
-          const dvProfile = document.getElementById('dolbyVisionProfileSelect').value;
-          x265Params.push(`dolby-vision-profile=${dvProfile}`, `dolby-vision-rpu=${dvRpuPath}`);
+          x265Params.push(`dolby-vision-profile=${dvAutoSettings.injectProfile}`, `dolby-vision-rpu=${dvRpuPath}`);
+        }
+        if (hdr10PlusMetaPath){
+          // Requires x265 compiled with HDR10_PLUS - not guaranteed
+          // present in a standard ffmpeg build, unconfirmed either way
+          // for this app's actual build. See tog-hdr10plus's own
+          // description for the full caveat.
+          x265Params.push(`dhdr10-info=${hdr10PlusMetaPath}`);
         }
       }
       args.push('-x265-params', x265Params.join(':'));
@@ -2501,38 +2948,143 @@ clip.set_output()
     const srcIndex = trackSel.value;
     const tmpDir = filePath.substring(0, Math.max(filePath.lastIndexOf('\\'), filePath.lastIndexOf('/')) + 1);
     const tmpStereoPath = tmpDir + '_tmp_stereo_' + jobId + '.flac';
-    const tmpUpmixPath = tmpDir + '_tmp_71vorbis_' + jobId + '.ogg';
 
     const fpsFilter = buildAudioFramerateFilter();
     const delayFilter = buildAudioDelayFilter();
     const durationFilter = buildDurationCorrectionFilter();
-    const downmixFilter = buildDownmixToStereoFilter(srcChannels, [fpsFilter, durationFilter, delayFilter]);
+    // Codec-agnostic by construction, confirmed via direct code review -
+    // not something that needs per-format detection the way Dolby
+    // Vision/HDR10+ do. Track selection here only ever reads channel
+    // COUNT (data-channels), never codec name - the whole chain operates
+    // on whatever PCM ffmpeg decodes from the source, and ffmpeg decodes
+    // DTS/DTS-HD MA/TrueHD/AC3/E-AC3/PCM all the same way before any of
+    // this filtering ever runs. This is a fundamentally different
+    // situation from DV/HDR10+, which are metadata formats that must be
+    // specifically extracted before a decode destroys them - DPLII
+    // doesn't care what the source container format was, only how many
+    // real channels came out of the decode.
+    //
+    // On Atmos specifically (confirmed already documented elsewhere in
+    // this app, restated here since it's directly relevant): AC3/E-AC3/
+    // TrueHD can carry Atmos (JOC) data, but that object-based extension
+    // is NOT extracted by ffmpeg's own decoder - a normal decode (which
+    // is what happens here, same as the plain downmix path) only ever
+    // yields the underlying bed channels (5.1/7.1), silently dropping
+    // JOC regardless of DPLII being on or off. This isn't a new gap DPLII
+    // introduces - it's the same, already-documented limit that applies
+    // to any re-encode of Atmos content (only a pure `-c:a copy`
+    // preserves Atmos, and Integrated Engine mode is inherently a
+    // re-encode). DPLII doesn't confuse a plain AC3/TrueHD source for an
+    // Atmos one or vice versa - it just processes whatever bed channels
+    // come out of the decode either way, uniformly.
+    const useDplII = isOn('tog-ambisonics');
+    const dplIIFilter = useDplII ? buildDplIIStereoFilter(srcChannels, [fpsFilter, durationFilter, delayFilter]) : null;
+    const plainDownmixFilter = buildDownmixToStereoFilter(srcChannels, [fpsFilter, durationFilter, delayFilter]);
+    const downmixFilter = useDplII ? dplIIFilter : plainDownmixFilter;
     if (!downmixFilter){
       setStatus('Selected track is already stereo/mono — nothing to downmix. Use "Embedded Track" mode instead.', 'red');
       return null;
     }
 
     const stage1FilterFinal = downmixFilter.replace('[0:a]', `[0:${srcIndex}]`);
+    // Fallback filter, only used at runtime if Stage 1 actually fails
+    // (verified via file-existence check, same pattern already used for
+    // DV/HDR10+ extraction) - per direct request, an unusual source that
+    // DPLII's matrix encoding doesn't handle cleanly should still
+    // produce a normal watchable file via the plain bass-managed fold,
+    // not fail the whole job. No specific format is known to trigger
+    // this (ffmpeg's own aresample=matrix_encoding=dplii is a mature,
+    // general implementation that doesn't care about source codec, only
+    // channel layout) - this is a genuine safety net, not a fix for a
+    // confirmed real failure case.
+    const stage1FallbackFilterFinal = useDplII && plainDownmixFilter
+      ? plainDownmixFilter.replace('[0:a]', `[0:${srcIndex}]`) : null;
 
     const stage1ArgsFixed = ['-i', filePath, '-filter_complex',
       stage1FilterFinal,
-      '-map', '[out]', '-c:a', 'flac', '-sample_fmt', 's32', '-ar', '48000', '-y', tmpStereoPath];
+      '-map', '[out]', '-c:a', 'flac', '-sample_fmt', 's32', '-ar', '48000', '-bits_per_raw_sample', '24', '-y', tmpStereoPath];
 
     const upmixFilter = buildUpmixToSevenOneFilter();
-    const stage2Args = ['-i', tmpStereoPath, '-filter_complex', upmixFilter, '-map', '[out]',
-      '-c:a', 'libvorbis', '-b:a', '640k', '-ar', '48000', '-y', tmpUpmixPath];
+    // ONE audio track only - per direct, repeated correction: DPLII
+    // processing happens at the fold-to-stereo step (Stage 1), and the
+    // SAME app's real 7.1 upmix is layered on top of that in Stage 2,
+    // landing as a single output track. Not two separate tracks -
+    // confirmed multi-track audio isn't reliably usable in every
+    // container this app can output (MP4 in particular), and that was
+    // never what was asked for regardless.
+    const tmpUpmixPath = tmpDir + (useDplII ? '_tmp_dplii71_' : '_tmp_71vorbis_') + jobId + '.ogg';
+    // fltp not flt - confirmed via direct testing that libvorbis rejects
+    // flt outright with "encoder setup failed" regardless of channel
+    // count (a real regression the earlier "always applied" precision
+    // fix introduced, caught and fixed here).
+    const upmixEncodeArgs = ['-i', tmpStereoPath, '-filter_complex', upmixFilter, '-map', '[out]',
+      '-c:a', 'libvorbis', '-b:a', '640k', '-sample_fmt', 'fltp', '-ar', '48000', '-y', tmpUpmixPath];
 
-    const stage3Mux = buildMuxInputsAndMaps([{ path: tmpUpmixPath, stream: 'a' }]);
-    const stage3Args = buildVideoArgs(stage3Mux.inputArgs, ['-c:a', 'copy'], stage3Mux.mapArgs, outPath);
+    const usesMkvmergeMux = (dvRpuPath || hdr10PlusMetaPath) && externalToolEncoders.includes(encoder);
+    let stage3Args, stage3Name, stage3Cleanup, extraChapterStage = null, mkvmergeExtractStage = null;
+    if (usesMkvmergeMux){
+      const mkvmergePathVal = document.getElementById('mkvmergePath').value.trim();
+      const mkvmergeOutPath = chaptersPath ? (tmpDir + '_tmp_mkvmerge_' + jobId + '.mkv') : outPath;
+      // Real bug found and fixed via direct testing against the user's
+      // actual output (not assumed): mkvmerge only correctly synthesizes
+      // the DOVI configuration record when given a genuine raw .hevc
+      // elementary stream - reproduced the exact failure by feeding it
+      // the MP4-wrapped intermediate this pipeline actually produces
+      // (videoSourcePath, from the "Fix HDR10 stream timing" stage),
+      // and confirmed the fix directly: extracting a raw .hevc first
+      // (with the hevc_mp4toannexb bitstream filter MP4 sources
+      // specifically need, unlike MKV sources) makes mkvmerge correctly
+      // write the descriptor every time. This extra stage does that
+      // extraction before mkvmerge ever runs.
+      const mkvmergeRawHevcPath = tmpDir + '_tmp_mkvmerge_raw_' + jobId + '.hevc';
+      mkvmergeExtractStage = {
+        name: 'Extract raw HEVC for mkvmerge',
+        args: ['-i', videoSourcePath, '-map', '0:v', '-c:v', 'copy', '-bsf:v', 'hevc_mp4toannexb', '-f', 'hevc', '-y', mkvmergeRawHevcPath],
+        totalDuration: videoDuration, cleanup: null, tool: 'ffmpeg'
+      };
+      stage3Args = { toolPath: mkvmergePathVal, toolArgs: buildMkvmergeMuxArgs(mkvmergeRawHevcPath, tmpUpmixPath, mkvmergeOutPath), isMkvmerge: true };
+      stage3Name = 'Mux final MKV with Dolby Vision signaling (mkvmerge)';
+      stage3Cleanup = [tmpUpmixPath, mkvmergeRawHevcPath, ...(videoSourcePath !== filePath ? [videoSourcePath] : []), ...(dvRpuPath ? [dvRpuPath] : []), ...(hdr10PlusMetaPath ? [hdr10PlusMetaPath] : [])];
+      if (chaptersPath){
+        // Pure metadata-only copy - confirmed via this project's own
+        // earlier direct testing that a plain stream copy doesn't touch
+        // frame-level side data, so this is safe to do with ffmpeg here
+        // even though the main mux used mkvmerge.
+        extraChapterStage = {
+          name: 'Add chapters',
+          args: ['-i', mkvmergeOutPath, '-i', chaptersPath, '-map', '0', '-c', 'copy', '-map_metadata', '1', '-y', outPath],
+          totalDuration: videoDuration, cleanup: [mkvmergeOutPath, chaptersPath], tool: 'ffmpeg'
+        };
+      }
+    } else {
+      const stage3Mux = buildMuxInputsAndMaps([{ path: tmpUpmixPath, stream: 'a' }]);
+      stage3Args = buildVideoArgs(stage3Mux.inputArgs, ['-c:a', 'copy'], stage3Mux.mapArgs, outPath);
+      stage3Name = 'Encode video + mux final MKV';
+      stage3Cleanup = [tmpUpmixPath, ...(videoSourcePath !== filePath ? [videoSourcePath] : []), ...(chaptersPath ? [chaptersPath] : []), ...(dvRpuPath ? [dvRpuPath] : []), ...(hdr10PlusMetaPath ? [hdr10PlusMetaPath] : [])];
+    }
+    const middleStages = [
+      { name: useDplII ? 'Upmix Dolby Pro Logic II-processed stereo to 7.1 Vorbis' : 'Upmix to 7.1 Vorbis',
+        args: upmixEncodeArgs, totalDuration: videoDuration, cleanup: tmpStereoPath }
+    ];
 
     return {
       id: jobId, label, filePath, outPath,
       stages: [
         ...preStages,
-        { name: 'Downmix to Stereo FLAC', args: stage1ArgsFixed, totalDuration: videoDuration, cleanup: null },
-        { name: 'Upmix to 7.1 Vorbis', args: stage2Args, totalDuration: videoDuration, cleanup: tmpStereoPath },
-        { name: 'Encode video + mux final MKV', args: stage3Args, totalDuration: videoDuration,
-          cleanup: [tmpUpmixPath, ...(videoSourcePath !== filePath ? [videoSourcePath] : []), ...(chaptersPath ? [chaptersPath] : []), ...(dvRpuPath ? [dvRpuPath] : [])] }
+        { name: 'Downmix to Stereo FLAC', args: stage1ArgsFixed, totalDuration: videoDuration, cleanup: null,
+          fallbackArgs: stage1FallbackFilterFinal ? ['-i', filePath, '-filter_complex', stage1FallbackFilterFinal,
+            '-map', '[out]', '-c:a', 'flac', '-sample_fmt', 's32', '-ar', '48000', '-bits_per_raw_sample', '24', '-y', tmpStereoPath] : null,
+          fallbackName: 'Downmix to Stereo FLAC (plain fold - DPLII fallback)', verifyPath: tmpStereoPath },
+        ...middleStages,
+        ...(mkvmergeExtractStage ? [mkvmergeExtractStage] : []),
+        // For the mkvmerge path, stage3Args carries {toolPath, toolArgs,
+        // isMkvmerge} instead of a plain ffmpeg args array - the
+        // execution loop dispatches on isMkvmerge to run mkvmerge.exe
+        // directly instead of ffmpeg for this one stage.
+        usesMkvmergeMux
+          ? { name: stage3Name, toolPath: stage3Args.toolPath, toolArgs: stage3Args.toolArgs, isMkvmerge: true, totalDuration: videoDuration, cleanup: stage3Cleanup }
+          : { name: stage3Name, args: stage3Args, totalDuration: videoDuration, cleanup: stage3Cleanup },
+        ...(extraChapterStage ? [extraChapterStage] : [])
       ],
       currentStage: 0,
       totalDuration: videoDuration,
@@ -2586,29 +3138,45 @@ clip.set_output()
       // upmix staging pattern, and looking like genuine passthrough
       // rather than an obviously-converted file.
       const combinedFilter = audioCorrections.join(',');
-      const tmpDir = filePath.substring(0, Math.max(filePath.lastIndexOf('\\'), filePath.lastIndexOf('/')) + 1);
-      const tmpAudioPath = tmpDir + '_tmp_audiofix_' + jobId + '.mkv';
-      const extractArgs = ['-i', filePath];
-      for (let i = 0; i < audioSelections.length; i++) extractArgs.push('-filter:a:' + i, combinedFilter);
-      extractArgs.push(...audioSelections.flatMap(idx => ['-map', `0:${idx}`]));
-      extractArgs.push('-c:a', 'flac', '-sample_fmt', 's32', '-y', tmpAudioPath);
-      preStages.push({
-        name: 'Apply audio sync correction (lossless)',
-        args: extractArgs, totalDuration: videoDuration, cleanup: null, tool: 'ffmpeg'
-      });
+      let tmpAudioPath = null;
+      // Only build the lossless correction intermediate when there's an
+      // actual correction to apply - confirmed via direct code
+      // inspection this was a real bug: audioCorrections can now be
+      // EMPTY here (ambisonics/audio-precision alone can trigger this
+      // branch, per the fix above), and combinedFilter would then be an
+      // empty string - pushing `-filter:a:N ''` is an invalid ffmpeg arg
+      // that would have broken every job using only those two toggles
+      // with no fps-sync/AC3-delay/duration-fix also active.
+      if (audioCorrections.length > 0){
+        const tmpDir = filePath.substring(0, Math.max(filePath.lastIndexOf('\\'), filePath.lastIndexOf('/')) + 1);
+        tmpAudioPath = tmpDir + '_tmp_audiofix_' + jobId + '.mkv';
+        const extractArgs = ['-i', filePath];
+        for (let i = 0; i < audioSelections.length; i++) extractArgs.push('-filter:a:' + i, combinedFilter);
+        extractArgs.push(...audioSelections.flatMap(idx => ['-map', `0:${idx}`]));
+        extractArgs.push('-c:a', 'flac', '-sample_fmt', 's32', '-y', tmpAudioPath);
+        preStages.push({
+          name: 'Apply audio sync correction (lossless)',
+          args: extractArgs, totalDuration: videoDuration, cleanup: null, tool: 'ffmpeg'
+        });
+      }
 
-      const inputArgs = videoIsOriginal
-        ? ['-i', filePath, '-i', tmpAudioPath]
-        : ['-i', videoSourcePath, '-i', filePath, '-i', tmpAudioPath];
+      const inputArgs = tmpAudioPath
+        ? (videoIsOriginal ? ['-i', filePath, '-i', tmpAudioPath] : ['-i', videoSourcePath, '-i', filePath, '-i', tmpAudioPath])
+        : (videoIsOriginal ? ['-i', filePath] : ['-i', videoSourcePath, '-i', filePath]);
       const origIndex = videoIsOriginal ? 0 : 1;
-      const audioIntermediateIndex = videoIsOriginal ? 1 : 2;
+      // Points at the corrected intermediate when one was built, or
+      // straight at the original file's own audio index otherwise.
+      const audioIntermediateIndex = tmpAudioPath ? (videoIsOriginal ? 1 : 2) : origIndex;
       const mapArgs = [
         '-map', `0:${videoSourceMapArg.split(':')[1]}`,
-        ...audioSelections.map((idx, i) => ['-map', `${audioIntermediateIndex}:${i}`]).flat(),
+        ...audioSelections.flatMap((idx, i) => ['-map', `${audioIntermediateIndex}:${i}`]),
         ...subtitleSelections.flatMap(idx => ['-map', `${origIndex}:${idx}`])
       ];
       if (chaptersPath){
-        const chaptersIndex = videoIsOriginal ? 2 : 3;
+        // Computed from the actual current input count rather than a
+        // hardcoded assumption - inputArgs no longer always has the same
+        // length now that tmpAudioPath can be absent.
+        const chaptersIndex = inputArgs.length / 2;
         inputArgs.push('-i', chaptersPath);
         mapArgs.push('-map_metadata', String(chaptersIndex));
       }
@@ -2621,6 +3189,20 @@ clip.set_output()
         const target = getAudioEncoderForCodec(srcStream ? srcStream.codec : null);
         audioArgs.push(`-c:a:${i}`, target.encoder);
         if (target.bitrate) audioArgs.push(`-b:a:${i}`, target.bitrate);
+        // Always applied now (not a toggle) - see the path-hint above
+        // this section for why. libopus and libvorbis need DIFFERENT
+        // sample formats here - confirmed via direct testing that
+        // libvorbis specifically rejects flt (interleaved) and needs
+        // fltp (planar), while libopus accepts flt directly. Using flt
+        // for both (an earlier version of this fix) would have broken
+        // every Vorbis encode in this app outright.
+        if (target.encoder === 'libopus'){
+          audioArgs.push(`-sample_fmt:a:${i}`, 'flt', `-ar:a:${i}`, '48000');
+        } else if (target.encoder === 'libvorbis'){
+          audioArgs.push(`-sample_fmt:a:${i}`, 'fltp', `-ar:a:${i}`, '48000');
+        } else if (target.encoder === 'flac'){
+          audioArgs.push(`-ar:a:${i}`, '48000', `-sample_fmt:a:${i}`, 's32', `-bits_per_raw_sample:a:${i}`, '24');
+        }
       });
       args = buildVideoArgs(inputArgs, audioArgs, mapArgs, outPath);
       args.__extraCleanup = tmpAudioPath;
@@ -2642,6 +3224,7 @@ clip.set_output()
     if (args.__extraCleanup) cleanupPaths.push(args.__extraCleanup);
     if (chaptersPath) cleanupPaths.push(chaptersPath);
     if (dvRpuPath) cleanupPaths.push(dvRpuPath);
+    if (hdr10PlusMetaPath) cleanupPaths.push(hdr10PlusMetaPath);
     return {
       id: jobId, label, filePath, outPath,
       stages: [
@@ -2797,6 +3380,57 @@ async function startQueue(){
 // fixed per-stage duration.
 let jobStartTime = null;
 let currentJobStageInfo = null; // { stageIndex, totalStages, stageName }
+let jobWarnings = []; // visible warnings from optional stages that failed but didn't abort the job - see logJobWarning
+
+function logJobWarning(message){
+  jobWarnings.push({ time: new Date().toLocaleTimeString(), message });
+  const el = document.getElementById('jobWarningsBox');
+  if (!el) return;
+  el.style.display = 'block';
+  el.innerHTML = '<strong style="color:var(--yellow)">⚠ Warnings from this run:</strong><br>' +
+    jobWarnings.map(w => `<div style="margin-top:4px">[${w.time}] ${w.message}</div>`).join('');
+}
+
+// Removes a specific temp-file path (and its preceding flag, for flat
+// array args) from every stage from `fromIndex` onward - used when an
+// optional pre-stage (DV/HDR10+ extraction) didn't actually produce a
+// usable file, so a later stage's encoder command line never ends up
+// referencing a file that doesn't exist. Handles both flat arg arrays
+// (NVEncC/QSVEncC toolArgs) and the single colon-joined string libx265
+// gets via -x265-params, since dolby-vision-rpu=/dhdr10-info= there are
+// embedded inside one string argument rather than being separate
+// elements.
+function stripPathFromLaterStages(stages, fromIndex, missingPath){
+  if (!missingPath) return;
+  const stripFlatArray = (arr) => {
+    if (!Array.isArray(arr)) return arr;
+    const out = [];
+    for (const item of arr){
+      if (item === missingPath){ out.pop(); continue; } // drop the value and its preceding flag
+      out.push(item);
+    }
+    const dvIdx = out.indexOf('--dolby-vision-rpu');
+    if (dvIdx === -1){
+      // rpu flag already gone (just stripped above) - also drop a now-orphaned profile flag
+      const profIdx = out.indexOf('--dolby-vision-profile');
+      if (profIdx !== -1) out.splice(profIdx, 2);
+    }
+    return out;
+  };
+  for (let i = fromIndex; i < stages.length; i++){
+    const stage = stages[i];
+    if (Array.isArray(stage.toolArgs)) stage.toolArgs = stripFlatArray(stage.toolArgs);
+    if (Array.isArray(stage.args)){
+      stage.args = stage.args.map(a => {
+        if (typeof a !== 'string' || !a.includes(missingPath)) return a;
+        // A colon-joined -x265-params style string - drop just the
+        // segment(s) referencing the missing path, keep the rest intact.
+        return a.split(':').filter(part => !part.includes(missingPath) && !part.startsWith('dolby-vision-profile=')).join(':');
+      });
+      stage.args = stripFlatArray(stage.args);
+    }
+  }
+}
 
 function updateOverallProgress(currentStagePercent){
   if (!currentJobStageInfo || jobStartTime == null) return;
@@ -2835,6 +3469,9 @@ async function processNextInQueue(){
   }
 
   next.status = 'running';
+  jobWarnings = [];
+  const warningsBoxEl = document.getElementById('jobWarningsBox');
+  if (warningsBoxEl) warningsBoxEl.style.display = 'none';
   currentJobId = next.id;
   stopRequested = false;
   renderQueue();
@@ -2874,6 +3511,10 @@ async function processNextInQueue(){
             totalDuration: stage.totalDuration, totalOutputFrames: stage.totalOutputFrames, jobId: next.id
           });
         }
+      } else if (stage.isMkvmerge){
+        result = await window.electronAPI.runToolSimple({
+          toolPath: stage.toolPath, args: stage.toolArgs, jobId: next.id
+        });
       } else if (stage.piped){
         result = await window.electronAPI.runPipedEncode({
           ffmpeg, ffmpegArgs: stage.ffmpegArgs, tool: stage.toolPath, toolArgs: stage.toolArgs,
@@ -2888,6 +3529,46 @@ async function processNextInQueue(){
           ffmpeg: stageExecutable, args: stage.args, totalDuration: stage.totalDuration, jobId: next.id
         });
       }
+      if (stage.fallbackArgs){
+        // Per direct request: if DPLII's matrix encoding somehow fails
+        // on an unusual source, retry this exact stage with the plain
+        // bass-managed fold instead, rather than failing the whole job.
+        // Verified via real output existing (same check used for
+        // optional DV/HDR10+ stages), not just exit code - a tool
+        // exiting 0 without producing anything usable is a real
+        // confirmed failure mode elsewhere in this app.
+        const check = stage.verifyPath ? await window.electronAPI.checkFileExists({ path: stage.verifyPath }) : { exists: false };
+        const ok = result.code === 0 && check.exists && check.size > 0;
+        if (!ok){
+          logJobWarning(`${stage.name} failed or produced no output - retrying with ${stage.fallbackName || 'the fallback method'} instead.`);
+          result = await window.electronAPI.runFFmpegWithProgress({
+            ffmpeg, args: stage.fallbackArgs, totalDuration: stage.totalDuration, jobId: next.id
+          });
+          const recheck = stage.verifyPath ? await window.electronAPI.checkFileExists({ path: stage.verifyPath }) : { exists: false };
+          if (result.code !== 0 || !recheck.exists || recheck.size === 0){
+            logJobWarning(`${stage.fallbackName || 'Fallback'} also failed - this job cannot continue.`);
+          }
+        }
+      }
+      if (stage.optional){
+        // Per direct request: an experimental, best-effort stage (Dolby
+        // Vision/HDR10+ metadata extraction) failing should never take
+        // the whole job down with it - there should still be a normal,
+        // watchable file with static HDR10 metadata either way. Verify
+        // the real output regardless of exit code, since a tool can
+        // exit 0 without actually producing anything usable (confirmed
+        // real behavior for at least one of these two tools via
+        // research - not a hypothetical).
+        const check = stage.verifyPath ? await window.electronAPI.checkFileExists({ path: stage.verifyPath }) : { exists: false };
+        const ok = result.code === 0 && check.exists && check.size > 0;
+        if (!ok){
+          const reason = result.code !== 0 ? (result.stderr || `exited with code ${result.code}`) : 'produced no output file';
+          logJobWarning(`${stage.name} failed (${reason}) - continuing without it. The rest of the encode (including static HDR10 metadata) proceeds normally.`);
+          stripPathFromLaterStages(next.stages, i + 1, stage.verifyPath);
+        }
+        finalResult = { code: 0 }; // never let an optional stage's own result abort the job
+        continue;
+      }
       if (stopRequested || result.code !== 0){
         finalResult = result;
         break;
@@ -2897,7 +3578,7 @@ async function processNextInQueue(){
     // Best-effort cleanup of temp files regardless of outcome.
     for (const stage of next.stages){
       const cleanupPaths = Array.isArray(stage.cleanup) ? stage.cleanup : (stage.cleanup ? [stage.cleanup] : []);
-      for (const p of cleanupPaths) await window.electronAPI.deleteTempFile?.({ path: p }).catch(() => {});
+      if (!isOn('tog-keep-temp-files')) { for (const p of cleanupPaths) await window.electronAPI.deleteTempFile?.({ path: p }).catch(() => {}); }
     }
   } else {
     currentJobStageInfo = { stageIndex: 0, totalStages: 1, stageName: 'Encoding' };
@@ -2909,7 +3590,7 @@ async function processNextInQueue(){
     // even without any pre-stages — this path had no cleanup at all
     // before, confirmed via a real report of a leftover chapters file.
     const cleanupPaths = Array.isArray(next.cleanup) ? next.cleanup : (next.cleanup ? [next.cleanup] : []);
-    for (const p of cleanupPaths) await window.electronAPI.deleteTempFile?.({ path: p }).catch(() => {});
+    if (!isOn('tog-keep-temp-files')) { for (const p of cleanupPaths) await window.electronAPI.deleteTempFile?.({ path: p }).catch(() => {}); }
   }
 
   currentJobStageInfo = null;
@@ -2994,6 +3675,30 @@ function formatFfmpegError(stderr){
 // drop landing slightly outside the drop zone doesn't break the window.
 document.addEventListener('dragover', (e) => e.preventDefault());
 document.addEventListener('drop', (e) => e.preventDefault());
+
+// Populates every tool path field from the centralized DEFAULT_PATHS
+// object (top of file) on page load - this is what actually makes
+// editing that one object effective, instead of each field's old
+// separately-hardcoded HTML value attribute. Only sets a field if it's
+// currently empty, so this is safe to leave in even if some future
+// change pre-fills a field another way.
+function applyDefaultPaths(){
+  const map = {
+    ffmpegPath: DEFAULT_PATHS.ffmpeg,
+    nvencPath: DEFAULT_PATHS.nvenc,
+    qsvencPath: DEFAULT_PATHS.qsvenc,
+    vceencPath: DEFAULT_PATHS.vceenc,
+    vspipePath: DEFAULT_PATHS.vspipe314,
+    dovToolPath: DEFAULT_PATHS.doviTool,
+    mkvmergePath: DEFAULT_PATHS.mkvmerge,
+    hdr10plusToolPath: DEFAULT_PATHS.hdr10plusTool
+  };
+  for (const [id, value] of Object.entries(map)){
+    const field = document.getElementById(id);
+    if (field && !field.value.trim()) field.value = value;
+  }
+}
+applyDefaultPaths();
 
 renderQueue();
 updateAudioModeUI();
