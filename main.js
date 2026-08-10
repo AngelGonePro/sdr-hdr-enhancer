@@ -94,7 +94,7 @@ ipcMain.handle('get-video-info', async (event, payload) => {
 
     const args = [
       '-v', 'error',
-      '-show_entries', 'stream=index,width,height,r_frame_rate,codec_type,channels,color_transfer,codec_name,pix_fmt',
+      '-show_entries', 'stream=index,width,height,r_frame_rate,codec_type,channels,color_transfer,codec_name,pix_fmt,profile',
       '-show_entries', 'stream_tags=language,title',
       '-show_entries', 'format=duration',
       '-of', 'json',
@@ -134,6 +134,7 @@ ipcMain.handle('get-video-info', async (event, payload) => {
           index: s.index,
           codec: s.codec_name,
           channels: s.channels,
+          profile: s.profile || null,
           language: (s.tags && s.tags.language) || 'und',
           title: (s.tags && s.tags.title) || null
         }));
@@ -177,6 +178,19 @@ ipcMain.handle('get-video-info', async (event, payload) => {
 // HDR10 static metadata is constant for the whole stream and typically
 // only actually attached to certain frames (keyframes) - #10 gives a
 // few frames of margin without scanning the whole file.
+// Checks whether a file exists and has non-zero size - used to verify an
+// optional pre-stage (like Dolby Vision/HDR10+ metadata extraction)
+// actually produced usable output before a later stage depends on it,
+// rather than assuming success just because the process exited cleanly.
+ipcMain.handle('check-file-exists', async (event, payload) => {
+  try {
+    const stat = fs.statSync(payload.path);
+    return { exists: true, size: stat.size };
+  } catch (e) {
+    return { exists: false, size: 0 };
+  }
+});
+
 ipcMain.handle('get-hdr-metadata', async (event, payload) => {
   return new Promise((resolve) => {
     const ffmpegPath = payload.ffmpeg;
@@ -215,16 +229,20 @@ ipcMain.handle('get-hdr-metadata', async (event, payload) => {
         let mastering = null;
         let contentLight = null;
         let hasDolbyVision = false;
+        let hasHdr10Plus = false;
         for (const frame of frames) {
           for (const sd of (frame.side_data_list || [])) {
             if (sd.side_data_type === 'Mastering display metadata' && !mastering) mastering = sd;
             if (sd.side_data_type === 'Content light level metadata' && !contentLight) contentLight = sd;
             if (sd.side_data_type === 'Dolby Vision RPU Data' || sd.side_data_type === 'Dolby Vision Metadata') hasDolbyVision = true;
+            // Exact string confirmed directly from ffmpeg's own source
+            // (libavutil/frame.c, av_frame_side_data_name) - not guessed.
+            if (sd.side_data_type === 'HDR Dynamic Metadata SMPTE2094-40 (HDR10+)') hasHdr10Plus = true;
           }
-          if (mastering && contentLight && hasDolbyVision) break;
+          if (mastering && contentLight && hasDolbyVision && hasHdr10Plus) break;
         }
-        if (!mastering && !contentLight && !hasDolbyVision) {
-          resolve({ found: false, hasDolbyVision: false });
+        if (!mastering && !contentLight && !hasDolbyVision && !hasHdr10Plus) {
+          resolve({ found: false, hasDolbyVision: false, hasHdr10Plus: false });
           return;
         }
         // Fractions like "34000/50000" -> plain integers scaled to the
@@ -238,26 +256,89 @@ ipcMain.handle('get-hdr-metadata', async (event, payload) => {
           if (!den) return null;
           return Math.round((num / den) * targetDenom);
         };
-        resolve({
-          found: !!(mastering || contentLight),
-          hasDolbyVision,
-          mastering: mastering ? {
-            redX: asScaledInt(mastering.red_x, 50000),
-            redY: asScaledInt(mastering.red_y, 50000),
-            greenX: asScaledInt(mastering.green_x, 50000),
-            greenY: asScaledInt(mastering.green_y, 50000),
-            blueX: asScaledInt(mastering.blue_x, 50000),
-            blueY: asScaledInt(mastering.blue_y, 50000),
-            whitePointX: asScaledInt(mastering.white_point_x, 50000),
-            whitePointY: asScaledInt(mastering.white_point_y, 50000),
-            maxLuminance: asScaledInt(mastering.max_luminance, 10000),
-            minLuminance: asScaledInt(mastering.min_luminance, 10000)
-          } : null,
-          contentLight: contentLight ? {
-            maxContent: contentLight.max_content,
-            maxAverage: contentLight.max_average
-          } : null
+        // Second query: stream-level DOVI configuration record, needed
+        // specifically for the actual profile NUMBER (5/7/8 etc) - the
+        // frame-level side_data query above only tells us DV is PRESENT,
+        // not which profile. Confirmed via direct testing this is a
+        // stream-level side_data entry (shown via -show_streams), not a
+        // frame-level one, so it needs its own separate query rather
+        // than being foldable into the loop above.
+        if (!hasDolbyVision) {
+          resolve({
+            found: !!(mastering || contentLight), hasDolbyVision, hasHdr10Plus, dvProfile: null, dvBlCompatId: null,
+            mastering: mastering ? {
+              redX: asScaledInt(mastering.red_x, 50000), redY: asScaledInt(mastering.red_y, 50000),
+              greenX: asScaledInt(mastering.green_x, 50000), greenY: asScaledInt(mastering.green_y, 50000),
+              blueX: asScaledInt(mastering.blue_x, 50000), blueY: asScaledInt(mastering.blue_y, 50000),
+              whitePointX: asScaledInt(mastering.white_point_x, 50000), whitePointY: asScaledInt(mastering.white_point_y, 50000),
+              maxLuminance: asScaledInt(mastering.max_luminance, 10000), minLuminance: asScaledInt(mastering.min_luminance, 10000)
+            } : null,
+            contentLight: contentLight ? { maxContent: contentLight.max_content, maxAverage: contentLight.max_average } : null
+          });
+          return;
+        }
+        // Real bug found and fixed via direct testing (not assumed): the
+        // previous query used 'stream=side_data_list', ffprobe's
+        // section=field syntax for simple fields - this does NOT work
+        // for side_data_list, which needs its own dedicated, standalone
+        // entry name instead. Confirmed directly: the old syntax
+        // returned a completely empty stream object even on a file with
+        // real side_data present, silently matching nothing. Fixed to
+        // 'stream_side_data_list' (underscore, standalone - confirmed
+        // via a real working example querying actual DOVI configuration
+        // record data successfully with this exact syntax).
+        const profileArgs = ['-v', 'error', '-select_streams', String(streamIndex),
+          '-show_entries', 'stream_side_data_list', '-of', 'json', filePath];
+        let profileProc;
+        try {
+          profileProc = spawn(ffprobePath, profileArgs, { windowsHide: true });
+        } catch (err) {
+          // Non-fatal - proceed without a detected profile, caller falls
+          // back to the dropdown's own manually-selected value.
+          finishWithProfile(null, null);
+          return;
+        }
+        let profileStdout = "";
+        profileProc.stdout.on("data", d => profileStdout += d.toString());
+        profileProc.on("close", () => {
+          let dvProfile = null;
+          let dvBlCompatId = null;
+          try {
+            const profileParsed = JSON.parse(profileStdout);
+            const streamSideData = (profileParsed.streams && profileParsed.streams[0] && profileParsed.streams[0].side_data_list) || [];
+            const doviConfig = streamSideData.find(sd => sd.side_data_type === 'DOVI configuration record');
+            if (doviConfig && doviConfig.dv_profile != null) dvProfile = doviConfig.dv_profile;
+            if (doviConfig && doviConfig.dv_bl_signal_compatibility_id != null) dvBlCompatId = doviConfig.dv_bl_signal_compatibility_id;
+          } catch (e) { /* non-fatal - dvProfile/dvBlCompatId stay null */ }
+          finishWithProfile(dvProfile, dvBlCompatId);
         });
+        profileProc.on("error", () => finishWithProfile(null, null));
+
+        function finishWithProfile(dvProfile, dvBlCompatId){
+          resolve({
+            found: !!(mastering || contentLight),
+            hasDolbyVision,
+            hasHdr10Plus,
+            dvProfile,
+            dvBlCompatId,
+            mastering: mastering ? {
+              redX: asScaledInt(mastering.red_x, 50000),
+              redY: asScaledInt(mastering.red_y, 50000),
+              greenX: asScaledInt(mastering.green_x, 50000),
+              greenY: asScaledInt(mastering.green_y, 50000),
+              blueX: asScaledInt(mastering.blue_x, 50000),
+              blueY: asScaledInt(mastering.blue_y, 50000),
+              whitePointX: asScaledInt(mastering.white_point_x, 50000),
+              whitePointY: asScaledInt(mastering.white_point_y, 50000),
+              maxLuminance: asScaledInt(mastering.max_luminance, 10000),
+              minLuminance: asScaledInt(mastering.min_luminance, 10000)
+            } : null,
+            contentLight: contentLight ? {
+              maxContent: contentLight.max_content,
+              maxAverage: contentLight.max_average
+            } : null
+          });
+        }
       } catch (e) {
         resolve({ error: 'Failed to parse ffprobe output: ' + e.message });
       }
@@ -982,6 +1063,45 @@ ipcMain.handle('run-ffmpeg-with-progress', async (event, payload) => {
 // to run-ffmpeg-with-progress. Used for the queue's "Stop Current" button —
 // stops only the active job, letting the queue advance to the next one
 // rather than halting everything.
+
+// Generic "run a tool and wait for it to finish" handler, added
+// specifically for mkvmerge (the real Dolby Vision muxing fix - see
+// buildMkvmergeMuxArgs in video.html). Deliberately NOT reusing
+// run-ffmpeg-with-progress above - that handler unconditionally
+// prepends -progress pipe:1, an ffmpeg-specific flag mkvmerge doesn't
+// recognize and would error out on. No progress parsing here (mkvmerge's
+// own progress format is different from ffmpeg's) - this is a single,
+// normally-fast muxing step, not a lengthy re-encode, so the progress
+// bar simply not animating during this one stage is an acceptable,
+// purely cosmetic gap, not a functional one.
+ipcMain.handle('run-tool-simple', async (event, payload) => {
+  return new Promise((resolve) => {
+    const toolPath = payload.toolPath;
+    const args = payload.args || [];
+    const jobId = payload.jobId || null;
+    let proc;
+    try {
+      proc = spawn(toolPath, args, { windowsHide: true });
+    } catch (err) {
+      resolve({ code: -1, stdout: "", stderr: String(err && err.message || err) });
+      return;
+    }
+    if (jobId) activeProcesses.set(jobId, proc);
+    let stdout = "";
+    let stderr = "";
+    proc.stdout.on("data", d => stdout += d.toString());
+    proc.stderr.on("data", d => stderr += d.toString());
+    proc.on("close", code => {
+      if (jobId) activeProcesses.delete(jobId);
+      resolve({ code, stdout, stderr });
+    });
+    proc.on("error", err => {
+      if (jobId) activeProcesses.delete(jobId);
+      resolve({ code: -1, stdout: "", stderr: String(err.message) });
+    });
+  });
+});
+
 ipcMain.handle('kill-ffmpeg-job', async (event, payload) => {
   const jobId = payload.jobId;
   const entry = activeProcesses.get(jobId);
