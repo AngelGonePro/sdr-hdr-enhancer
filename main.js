@@ -4,6 +4,27 @@ const fs = require('fs');
 const os = require('os');
 const { spawn } = require('child_process');
 
+// Real, confirmed memory leak found and fixed: accumulating a spawned
+// process's stdout/stderr via naive string concatenation (`text += d`)
+// for the ENTIRE duration of a long-running job grows unboundedly -
+// encoders like NVEncC print progress continuously (many times per
+// second) for as long as the job runs, so a multi-hour encode
+// accumulates a massive, continuously-regrown string. Confirmed via a
+// real crash: "external memory pressure" OOM 87.6 minutes into a Blade
+// Runner 2049 encode, reproduced on a fresh single-job session (ruling
+// out a cross-job leak) and confirmed independent of the 4:4:4 toggle
+// (crashed identically with it off) - both point at something
+// duration-dependent, which unbounded accumulation exactly matches.
+// Only the RECENT tail actually matters for error reporting (the final
+// state when something fails), not the full transcript from the start,
+// so this keeps a bounded window instead of the whole thing.
+const MAX_ACCUMULATED_LOG_BYTES = 200 * 1024; // 200KB - ample for real error context, nowhere near able to cause memory pressure
+function appendBounded(existing, chunk) {
+  const combined = existing + chunk;
+  if (combined.length <= MAX_ACCUMULATED_LOG_BYTES) return combined;
+  return combined.slice(combined.length - MAX_ACCUMULATED_LOG_BYTES);
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1100,
@@ -65,8 +86,8 @@ ipcMain.handle('get-duration', async (event, payload) => {
     }
     let stdout = "";
     let stderr = "";
-    proc.stdout.on("data", d => stdout += d.toString());
-    proc.stderr.on("data", d => stderr += d.toString());
+    proc.stdout.on("data", d => stdout = appendBounded(stdout, d.toString()));
+    proc.stderr.on("data", d => stderr = appendBounded(stderr, d.toString()));
     proc.on("close", code => {
       if (code !== 0) {
         resolve({ error: stderr || `ffprobe exited with code ${code}` });
@@ -109,8 +130,8 @@ ipcMain.handle('get-video-info', async (event, payload) => {
     }
     let stdout = "";
     let stderr = "";
-    proc.stdout.on("data", d => stdout += d.toString());
-    proc.stderr.on("data", d => stderr += d.toString());
+    proc.stdout.on("data", d => stdout = appendBounded(stdout, d.toString()));
+    proc.stderr.on("data", d => stderr = appendBounded(stderr, d.toString()));
     proc.on("close", code => {
       if (code !== 0) {
         resolve({ error: stderr || `ffprobe exited with code ${code}` });
@@ -216,8 +237,8 @@ ipcMain.handle('get-hdr-metadata', async (event, payload) => {
     }
     let stdout = "";
     let stderr = "";
-    proc.stdout.on("data", d => stdout += d.toString());
-    proc.stderr.on("data", d => stderr += d.toString());
+    proc.stdout.on("data", d => stdout = appendBounded(stdout, d.toString()));
+    proc.stderr.on("data", d => stderr = appendBounded(stderr, d.toString()));
     proc.on("close", code => {
       if (code !== 0) {
         resolve({ error: stderr || `ffprobe exited with code ${code}` });
@@ -299,7 +320,7 @@ ipcMain.handle('get-hdr-metadata', async (event, payload) => {
           return;
         }
         let profileStdout = "";
-        profileProc.stdout.on("data", d => profileStdout += d.toString());
+        profileProc.stdout.on("data", d => profileStdout = appendBounded(profileStdout, d.toString()));
         profileProc.on("close", () => {
           let dvProfile = null;
           let dvBlCompatId = null;
@@ -433,7 +454,7 @@ ipcMain.handle('detect-crop', async (event, payload) => {
       return;
     }
     let stderr = "";
-    proc.stderr.on("data", d => stderr += d.toString());
+    proc.stderr.on("data", d => stderr = appendBounded(stderr, d.toString()));
     proc.on("close", (code) => {
       activeProcesses.delete('crop-detect');
       // Confirmed via a real report: a genuine process failure (e.g. GPU
@@ -521,8 +542,8 @@ ipcMain.handle('analyze-brightness', async (event, payload) => {
     }
     let stdout = "";
     let stderr = "";
-    proc.stdout.on("data", d => stdout += d.toString());
-    proc.stderr.on("data", d => stderr += d.toString());
+    proc.stdout.on("data", d => stdout = appendBounded(stdout, d.toString()));
+    proc.stderr.on("data", d => stderr = appendBounded(stderr, d.toString()));
     proc.on("close", (code) => {
       activeProcesses.delete('brightness-detect');
       // Same fix as crop detection above — a genuine process failure
@@ -575,7 +596,7 @@ ipcMain.handle('calibrate-npl', async (event, payload) => {
     return new Promise((resolve) => {
       const proc = spawn(ffmpeg, args, { windowsHide: true });
       let stderr = "";
-      proc.stderr.on("data", d => stderr += d.toString());
+      proc.stderr.on("data", d => stderr = appendBounded(stderr, d.toString()));
       proc.on("close", code => resolve({ code, stderr }));
       proc.on("error", err => resolve({ code: -1, stderr: err.message }));
     });
@@ -658,7 +679,7 @@ ipcMain.handle('extract-and-scale-chapters', async (event, payload) => {
       return;
     }
     let stderr = '';
-    proc.stderr.on('data', d => stderr += d.toString());
+    proc.stderr.on('data', d => stderr = appendBounded(stderr, d.toString()));
     proc.on('close', code => {
       if (code !== 0) { resolve({ hasChapters: false, error: stderr }); return; }
       try {
@@ -751,7 +772,7 @@ ipcMain.handle('run-piped-encode', async (event, payload) => {
 
     let ffmpegStderr = "";
     let toolStderr = "";
-    ffmpegProc.stderr.on("data", d => ffmpegStderr += d.toString());
+    ffmpegProc.stderr.on("data", d => ffmpegStderr = appendBounded(ffmpegStderr, d.toString()));
 
     // External tools' own progress format varies by tool and isn't
     // something testable from this environment — best-effort parse of
@@ -768,7 +789,7 @@ ipcMain.handle('run-piped-encode', async (event, payload) => {
     let lastReportedPercent = 0;
     toolProc.stderr.on("data", d => {
       const text = d.toString();
-      toolStderr += text;
+      toolStderr = appendBounded(toolStderr, text);
       const percentMatch = text.match(/(\d+(?:\.\d+)?)\s*%/);
       const elapsedSec = (Date.now() - startTime) / 1000;
       let percent = lastReportedPercent;
@@ -817,8 +838,8 @@ ipcMain.handle('run-piped-encode', async (event, payload) => {
       if (!ffmpegDone) { try { ffmpegProc.kill('SIGKILL'); } catch(e){} }
       maybeResolve();
     });
-    ffmpegProc.on("error", err => { ffmpegDone = true; ffmpegStderr += '\n[ffmpeg spawn error] ' + err.message; maybeResolve(); });
-    toolProc.on("error", err => { toolDone = true; toolCode = -1; toolStderr += '\n[tool spawn error] ' + err.message; if (!ffmpegDone) { try { ffmpegProc.kill('SIGKILL'); } catch(e){} } maybeResolve(); });
+    ffmpegProc.on("error", err => { ffmpegDone = true; ffmpegStderr = appendBounded(ffmpegStderr, '\n[ffmpeg spawn error] ' + err.message); maybeResolve(); });
+    toolProc.on("error", err => { toolDone = true; toolCode = -1; toolStderr = appendBounded(toolStderr, '\n[tool spawn error] ' + err.message); if (!ffmpegDone) { try { ffmpegProc.kill('SIGKILL'); } catch(e){} } maybeResolve(); });
   });
 });
 
@@ -891,7 +912,7 @@ ipcMain.handle('run-triple-piped-encode', async (event, payload) => {
     let lastFpsUpdateTime = startTimeVs;
     vspipeProc.stderr.on("data", d => {
       const text = d.toString();
-      vspipeStderr += text;
+      vspipeStderr = appendBounded(vspipeStderr, text);
       // Real-time, not just accumulated for the final result - without
       // this, a hung or crashed vspipe process is completely invisible
       // until (if ever) the whole job resolves, which may never happen.
@@ -914,14 +935,14 @@ ipcMain.handle('run-triple-piped-encode', async (event, payload) => {
       }
       lastFpsUpdateTime = now;
     });
-    ffmpegProc.stderr.on("data", d => { ffmpegStderr += d.toString(); });
+    ffmpegProc.stderr.on("data", d => { ffmpegStderr = appendBounded(ffmpegStderr, d.toString()); });
 
     // Progress now comes from vspipe's own throughput above - NVEncC here
     // only ever sees whatever trickle of frames survives two upstream
     // pipes, and its stderr format was never reliably producing a percent
     // match in practice (confirmed via a real report of this staying
     // stuck at 0%). Just capture its stderr for error reporting.
-    toolProc.stderr.on("data", d => { toolStderr += d.toString(); });
+    toolProc.stderr.on("data", d => { toolStderr = appendBounded(toolStderr, d.toString()); });
 
     let vspipeDone = false, ffmpegDone = false, toolDone = false;
     let vspipeCode = null, ffmpegCode = null, toolCode = null;
@@ -969,10 +990,10 @@ ipcMain.handle('run-triple-piped-encode', async (event, payload) => {
       if (!vspipeDone) { try { vspipeProc.kill('SIGKILL'); } catch(e){} }
       maybeResolve();
     });
-    vspipeProc.on("error", err => { vspipeDone = true; vspipeStderr += '\n[vspipe spawn error] ' + err.message; maybeResolve(); });
-    ffmpegProc.on("error", err => { ffmpegDone = true; ffmpegStderr += '\n[ffmpeg spawn error] ' + err.message; if (!vspipeDone) { try { vspipeProc.kill('SIGKILL'); } catch(e){} } maybeResolve(); });
+    vspipeProc.on("error", err => { vspipeDone = true; vspipeStderr = appendBounded(vspipeStderr, '\n[vspipe spawn error] ' + err.message); maybeResolve(); });
+    ffmpegProc.on("error", err => { ffmpegDone = true; ffmpegStderr = appendBounded(ffmpegStderr, '\n[ffmpeg spawn error] ' + err.message); if (!vspipeDone) { try { vspipeProc.kill('SIGKILL'); } catch(e){} } maybeResolve(); });
     toolProc.on("error", err => {
-      toolDone = true; toolCode = -1; toolStderr += '\n[tool spawn error] ' + err.message;
+      toolDone = true; toolCode = -1; toolStderr = appendBounded(toolStderr, '\n[tool spawn error] ' + err.message);
       if (!ffmpegDone) { try { ffmpegProc.kill('SIGKILL'); } catch(e){} }
       if (!vspipeDone) { try { vspipeProc.kill('SIGKILL'); } catch(e){} }
       maybeResolve();
@@ -1040,7 +1061,7 @@ ipcMain.handle('run-ffmpeg-with-progress', async (event, payload) => {
         }
       }
     });
-    proc.stderr.on("data", d => stderr += d.toString());
+    proc.stderr.on("data", d => stderr = appendBounded(stderr, d.toString()));
 
     proc.on("close", code => {
       if (jobId) activeProcesses.delete(jobId);
@@ -1089,8 +1110,8 @@ ipcMain.handle('run-tool-simple', async (event, payload) => {
     if (jobId) activeProcesses.set(jobId, proc);
     let stdout = "";
     let stderr = "";
-    proc.stdout.on("data", d => stdout += d.toString());
-    proc.stderr.on("data", d => stderr += d.toString());
+    proc.stdout.on("data", d => stdout = appendBounded(stdout, d.toString()));
+    proc.stderr.on("data", d => stderr = appendBounded(stderr, d.toString()));
     proc.on("close", code => {
       if (jobId) activeProcesses.delete(jobId);
       resolve({ code, stdout, stderr });
@@ -1256,8 +1277,8 @@ ipcMain.handle('get-channel-count', async (event, payload) => {
     }
     let stdout = "";
     let stderr = "";
-    proc.stdout.on("data", d => stdout += d.toString());
-    proc.stderr.on("data", d => stderr += d.toString());
+    proc.stdout.on("data", d => stdout = appendBounded(stdout, d.toString()));
+    proc.stderr.on("data", d => stderr = appendBounded(stderr, d.toString()));
     proc.on("close", code => {
       if (code !== 0) {
         resolve({ error: stderr || `ffprobe exited with code ${code}` });
@@ -1299,8 +1320,8 @@ ipcMain.handle('run-ffmpeg', async (event, payload) => {
     let stdout = "";
     let stderr = "";
 
-    proc.stdout.on("data", d => stdout += d.toString());
-    proc.stderr.on("data", d => stderr += d.toString());
+    proc.stdout.on("data", d => stdout = appendBounded(stdout, d.toString()));
+    proc.stderr.on("data", d => stderr = appendBounded(stderr, d.toString()));
 
     proc.on("close", code => {
       cleanup();
