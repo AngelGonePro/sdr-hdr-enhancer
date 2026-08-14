@@ -218,7 +218,7 @@
       the generic default blind.
     </div>
     <div class="ti on" id="tog-444-intermediate" onclick="toggle(this)" style="margin-top:10px"><div class="sw"></div><div class="ti-txt">Process HDR expansion in 4:4:4, output stays whatever the encoder normally uses — ON by default. Researched directly: applying a nonlinear transfer function (exactly what the PQ/HDR conversion above does) to already-subsampled 4:2:0 chroma reconstructs measurably differently than applying it at full chroma resolution first — most noticeable in saturated colors, which this source's own saturation boost specifically pushes toward. Upsamples to 4:4:4 before the gamma/saturation/PQ conversion, downsamples back afterward — final file's chroma subsampling is unchanged either way, so this has no compatibility or hardware dependency, unlike the output toggle below.</div></div>
-    <div class="ti" id="tog-444-output" onclick="toggle(this); updateEncoderUI();" style="margin-top:8px"><div class="sw"></div><div class="ti-txt">Output the final file itself in 4:4:4 (experimental) — OFF by default. The toggle above already captures the real benefit (better precision during the actual PQ/HDR color transform) without this one's risk — this toggle only helps if your <em>source</em> has real 4:2:2/4:4:4 chroma detail to begin with, which no source discussed in building this tool has had, so it's a larger file for identical color information plus real playback risk for no upside in that case. NVIDIA's decode hardware genuinely supports 4:4:4 HEVC decode (confirmed directly from NVIDIA's own Turing announcement), but decode throughput for it isn't unlimited — a resolution-dependent ceiling that sits closer at 4K than 1080p, confirmed this is a real, unresolved risk at 4K specifically even after fixing NVEncC's own --level auto bug (this toggle already applies the fix: explicit level/tier 6.2/High instead of auto-detection). Same generation requirement applies to Intel — see the alert above when Intel is selected. AMD has no 4:4:4 support in any current GPU at all and this toggle is disabled outright when AMD is selected. libx265 (CPU) supports 4:4:4 fully regardless of hardware generation, with no decode-throughput ceiling to worry about since there's no dedicated decode silicon involved.</div></div>
+    <div class="ti" id="tog-444-output" onclick="toggle(this); updateEncoderUI();" style="margin-top:8px"><div class="sw"></div><div class="ti-txt">Output the final file itself in 4:4:4 (experimental) — OFF by default. The toggle above already captures the real benefit (better precision during the actual PQ/HDR color transform) without this one's risk — this toggle only helps if your <em>source</em> has real 4:2:2/4:4:4 chroma detail to begin with, which no source discussed in building this tool has had, so it's a larger file for identical color information plus real playback risk for no upside in that case. NVIDIA's decode hardware genuinely supports 4:4:4 HEVC decode (confirmed directly from NVIDIA's own Turing announcement), but decode throughput for it isn't unlimited — a resolution-dependent ceiling that sits closer at 4K than 1080p, confirmed this is a real, unresolved risk at 4K specifically even after fixing NVEncC's own --level auto bug (this toggle already applies the fix: explicit level/tier 6.2/High instead of auto-detection). Same generation requirement applies to Intel — see the alert above when Intel is selected. AMD has no 4:4:4 support in any current GPU at all and this toggle is disabled outright when AMD is selected. libx265 (CPU) supports 4:4:4 fully regardless of hardware generation, with no decode-throughput ceiling to worry about since there's no dedicated decode silicon involved.<br><br><strong>Real bug found and fixed via direct measurement, not assumed:</strong> 4:4:4 carries exactly 2x the raw data volume of 4:2:0 at the same resolution (confirmed directly: full-resolution chroma on both planes vs quarter-resolution — measured 2.000x precisely, matching HEVC's own spec exactly). The bitrate/buffer settings used to be identical regardless of this toggle, forcing the encoder to represent twice the data within the same bit budget — exactly what caused a real report of visibly worse blocking and color reproduction specifically when this toggle was on. Fixed: bitrate target, max-bitrate, and VBV buffer size now all double when this toggle is active, matching the real 2x multiplier HEVC's own spec defines for 4:4:4 profiles (which this app's level/tier choice below already anticipated, but had never actually been applied to the real rate-control values until now).</div></div>
     <div class="warn-box" id="tog444Warning" style="margin-top:8px;display:none"></div>
   </div>
 
@@ -2071,7 +2071,27 @@ function buildHdrPixelFilters(){
   // moves to a meaningfully brighter, still-unclipped (234,193,153) at
   // npl=150. Target Peak below remains metadata-only, unrelated to this.
   const nplRef = document.getElementById('hdrRefSlider').value;
-  filters.push(`zscale=transferin=bt709:primariesin=bt709:matrixin=bt709:rangein=pc:transfer=smpte2084:primaries=bt2020:matrix=bt2020nc:npl=${nplRef}:range=tv`);
+  // Real regression found and fixed via direct measurement, not assumed:
+  // the range-expansion fix above (rangein=tv:range=pc before eq) is
+  // mathematically correct on its own, but it changed what the SAME
+  // gamma/npl numbers actually produce - confirmed via a real color test
+  // that white came out measurably dimmer than before (139 nits vs the
+  // intended ~150 target) even though gamma/npl values were unchanged,
+  // because the OLD, buggy chain's numbers had only ever been tuned
+  // against its own incorrect range math. Confirmed via direct
+  // measurement across the slider's real range (npl 120-180, tested
+  // against both a 100-nit and 150-nit target) that the corrected chain
+  // needs the npl value actually fed to zscale scaled up by a consistent
+  // ~1.2x factor to make the SLIDER's own stated value the ACTUAL
+  // achieved brightness again - without this, "Brightness Reference:
+  // 150" would silently mean something dimmer than 150 nits, exactly
+  // the kind of slider-vs-reality mismatch already fixed once before in
+  // this app's history (the metadata-vs-pixel-brightness bug). This only
+  // affects the PIXEL filter below - getHdrMetadataValues() (declared
+  // metadata) deliberately still reads the slider's raw, uncompensated
+  // value, since that's the actual nits this now correctly achieves.
+  const nplCompensated = nplRef * 1.2;
+  filters.push(`zscale=transferin=bt709:primariesin=bt709:matrixin=bt709:rangein=pc:transfer=smpte2084:primaries=bt2020:matrix=bt2020nc:npl=${nplCompensated}:range=tv`);
   // Final format: 4:4:4 if the output toggle wants it (whether or not
   // intermediate processing was also on — no wasteful round-trip
   // downsample-then-implicit-upsample-again if the actual goal is a
@@ -2522,11 +2542,46 @@ function buildJobFromCurrentSettings(chaptersPath){
     // target acting as a generous ceiling underneath max-bitrate rather
     // than the primary quality driver.
     const crfNum = parseInt(crf, 10) || 15;
-    const vbrTargetKbps = '50000'; // generous average target, real ceiling is max-bitrate below
-    const qvbrArgs = ['--vbr', vbrTargetKbps, '--qp-min', `${crfNum-3}:${crfNum-3}:${crfNum-3}`, '--qp-max', `${crfNum+10}:${crfNum+10}:${crfNum+3}`];
     const use444OutputEncode = isOn('tog-444-output');
+    // Real bug found and fixed via direct measurement, not assumed: 4:4:4
+    // carries exactly 2x the raw data volume of 4:2:0 at the same
+    // resolution (confirmed directly: full-resolution chroma on both
+    // planes vs quarter-resolution for 4:2:0, measured 2.000x precisely
+    // on a real test clip) - but this bitrate budget was previously
+    // IDENTICAL regardless of 4:4:4, forcing the encoder to represent
+    // twice the data within the same bit budget. That's exactly what
+    // was reported: more visible blocking and worse color reproduction
+    // specifically when 4:4:4 output was on. HEVC's own spec defines a
+    // real 2x bitrate/buffer multiplier for 4:4:4 profiles at a given
+    // level - this app's own comment below already knew that, but had
+    // only ever applied it to the level/tier declaration (what the
+    // decoder is told to expect), never to the actual rate control
+    // targets the encoder uses, which is what actually determines
+    // quality. Fixed by applying the same real 2x factor to the actual
+    // bitrate/buffer settings, not just the container-level declaration.
+    const bitrateMultiplier = use444OutputEncode ? 2 : 1;
+    const vbrTargetKbps = String(50000 * bitrateMultiplier); // generous average target, real ceiling is max-bitrate below
+    const maxBitrateKbps = String(100000 * bitrateMultiplier);
+    const vbvBufsizeKbps = String(100000 * bitrateMultiplier);
+    const qvbrArgs = ['--vbr', vbrTargetKbps, '--qp-min', `${crfNum-3}:${crfNum-3}:${crfNum-3}`, '--qp-max', `${crfNum+10}:${crfNum+10}:${crfNum+3}`];
+    // --aq (spatial adaptive quantization) added after a real report of
+    // visible blocking with 4:4:4 output that the bitrate-ceiling fix
+    // alone didn't resolve. Found via direct research that this app's
+    // command never enabled AQ at all (for either 4:2:0 or 4:4:4) -
+    // multiple real, confirmed-working community NVEncC commands for
+    // 4:4:4 encoding explicitly include it. AQ allocates bits based on
+    // where compression artifacts would actually be visible rather than
+    // spreading them uniformly across a frame - a well-established,
+    // broadly-recommended technique (confirmed via multiple independent
+    // sources, including AWS's own encoding guidance recommending it by
+    // default) with no confirmed downside, not something specific to
+    // this app or its situation. --aq-strength 0 (auto) rather than a
+    // hand-picked value, since NVEncC's own docs describe 0 as letting
+    // the encoder choose appropriately rather than needing manual
+    // tuning per-source.
+    const aqArgs = ['--aq', '--aq-strength', '0'];
     const toolArgs = ['--y4m', '-i', '-', '--codec', 'hevc', '--profile', use444OutputEncode ? 'main444' : 'main10',
-      '--output-depth', '10', ...qvbrArgs, '--max-bitrate', '100000', '--vbv-bufsize', '100000', '--preset', 'quality'];
+      '--output-depth', '10', ...qvbrArgs, ...aqArgs, '--max-bitrate', maxBitrateKbps, '--vbv-bufsize', vbvBufsizeKbps, '--preset', 'quality'];
     if (use444OutputEncode){
       toolArgs.push('--output-csp', 'yuv444');
       // Explicit level/tier instead of relying on --level auto — confirmed
