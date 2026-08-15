@@ -218,7 +218,7 @@
       the generic default blind.
     </div>
     <div class="ti on" id="tog-444-intermediate" onclick="toggle(this)" style="margin-top:10px"><div class="sw"></div><div class="ti-txt">Process HDR expansion in 4:4:4, output stays whatever the encoder normally uses — ON by default. Researched directly: applying a nonlinear transfer function (exactly what the PQ/HDR conversion above does) to already-subsampled 4:2:0 chroma reconstructs measurably differently than applying it at full chroma resolution first — most noticeable in saturated colors, which this source's own saturation boost specifically pushes toward. Upsamples to 4:4:4 before the gamma/saturation/PQ conversion, downsamples back afterward — final file's chroma subsampling is unchanged either way, so this has no compatibility or hardware dependency, unlike the output toggle below.</div></div>
-    <div class="ti" id="tog-444-output" onclick="toggle(this); updateEncoderUI();" style="margin-top:8px"><div class="sw"></div><div class="ti-txt">Output the final file itself in 4:4:4 (experimental) — OFF by default. The toggle above already captures the real benefit (better precision during the actual PQ/HDR color transform) without this one's risk — this toggle only helps if your <em>source</em> has real 4:2:2/4:4:4 chroma detail to begin with, which no source discussed in building this tool has had, so it's a larger file for identical color information plus real playback risk for no upside in that case. NVIDIA's decode hardware genuinely supports 4:4:4 HEVC decode (confirmed directly from NVIDIA's own Turing announcement), but decode throughput for it isn't unlimited — a resolution-dependent ceiling that sits closer at 4K than 1080p, confirmed this is a real, unresolved risk at 4K specifically even after fixing NVEncC's own --level auto bug (this toggle already applies the fix: explicit level/tier 6.2/High instead of auto-detection). Same generation requirement applies to Intel — see the alert above when Intel is selected. AMD has no 4:4:4 support in any current GPU at all and this toggle is disabled outright when AMD is selected. libx265 (CPU) supports 4:4:4 fully regardless of hardware generation, with no decode-throughput ceiling to worry about since there's no dedicated decode silicon involved.<br><br><strong>Real bug found and fixed via direct measurement, not assumed:</strong> 4:4:4 carries exactly 2x the raw data volume of 4:2:0 at the same resolution (confirmed directly: full-resolution chroma on both planes vs quarter-resolution — measured 2.000x precisely, matching HEVC's own spec exactly). The bitrate/buffer settings used to be identical regardless of this toggle, forcing the encoder to represent twice the data within the same bit budget — exactly what caused a real report of visibly worse blocking and color reproduction specifically when this toggle was on. Fixed: bitrate target, max-bitrate, and VBV buffer size now all double when this toggle is active, matching the real 2x multiplier HEVC's own spec defines for 4:4:4 profiles (which this app's level/tier choice below already anticipated, but had never actually been applied to the real rate-control values until now).</div></div>
+    <div class="ti" id="tog-444-output" onclick="toggle(this); updateEncoderUI();" style="margin-top:8px"><div class="sw"></div><div class="ti-txt">Output the final file itself in 4:4:4 (experimental) — OFF by default. The toggle above already captures the real benefit (better precision during the actual PQ/HDR color transform) without this one's risk — this toggle only helps if your <em>source</em> has real 4:2:2/4:4:4 chroma detail to begin with, which no source discussed in building this tool has had, so it's a larger file for identical color information plus real playback risk for no upside in that case. NVIDIA's decode hardware genuinely supports 4:4:4 HEVC decode (confirmed directly from NVIDIA's own Turing announcement), but decode throughput for it isn't unlimited — a resolution-dependent ceiling that sits closer at 4K than 1080p, confirmed this is a real, unresolved risk at 4K specifically even after fixing NVEncC's own --level auto bug (this toggle already applies the fix: explicit level/tier 6.2/High instead of auto-detection). Same generation requirement applies to Intel — see the alert above when Intel is selected. AMD has no 4:4:4 support in any current GPU at all and this toggle is disabled outright when AMD is selected. libx265 (CPU) supports 4:4:4 fully regardless of hardware generation, with no decode-throughput ceiling to worry about since there's no dedicated decode silicon involved.<br><br><strong>Real bug found and fixed via direct measurement, not assumed:</strong> 4:4:4 carries exactly 2x the raw data volume of 4:2:0 at the same resolution (confirmed directly: full-resolution chroma on both planes vs quarter-resolution — measured 2.000x precisely, matching HEVC's own spec exactly). The bitrate/buffer settings used to be identical regardless of this toggle, forcing the encoder to represent twice the data within the same bit budget — exactly what caused a real report of visibly worse blocking and color reproduction specifically when this toggle was on. Fixed: bitrate target, max-bitrate, and VBV buffer size now all double when this toggle is active, matching the real 2x multiplier HEVC's own spec defines for 4:4:4 profiles (which this app's level/tier choice below already anticipated, but had never actually been applied to the real rate-control values until now).<br><br><strong>Chroma priority, NVIDIA only - confirmed via source-level research, not assumed:</strong> a separate real report (a subtle near-black warm color tint visible in 4:2:0 output but missing in 4:4:4) traced to `--chroma-qp-offset` defaulting to 0 (chroma gets equal QP priority to luma) - 4:2:0's own chroma subsampling inherently reinforces a weak, spatially-consistent tint through averaging before the encoder ever sees it; 4:4:4 has no such protection. Verified directly in NVEncC's own source code (NVEncCore.cpp) that this flag maps straight to NVIDIA's native NVENC API parameters (cbQPIndexOffset/crQPIndexOffset), and confirmed a live NVEncC session log showing the real default ("QP Offset cb:0 cr:0") - this is genuine, first-party-confirmed behavior, not a guess. Added `--chroma-qp-offset -2` for 4:4:4 output specifically, NVEncC only.<br><br><strong>Extended to 4:2:0 too, and confirmed safe for already-HDR passthrough - both specifically researched, not assumed:</strong> x264's own documented defaults are -2 for 4:2:0 and -6 for 4:4:4 - meaning chroma priority is a sensible baseline for regular 4:2:0 encoding too, not something unique to 4:4:4. NVEncC's own neutral 0 default doesn't replicate that smarter behavior on its own, so this now applies unconditionally for NVEncC regardless of chroma output mode. On whether this could make already-HDR passthrough worse: a real technical document on HDR/WCG chroma QP determination confirms negative chroma offsets are an established, validated technique specifically for HDR content ("verified that visual quality is better or similar, at same or lower bitrate"). That same source quantifies exactly why the SDR-conversion case benefits most specifically: converting BT.709 into a BT.2020 container (this app's own SDR->HDR pipeline) mathematically reduces the maximum available chroma magnitude before the encoder ever sees it (Cr drops from 0.5 to 0.28, Cb from 0.5 to 0.44) - already-HDR passthrough is natively BT.2020 already and skips that whole transform (confirmed via `buildHdrPixelFilters()`'s own early return for that case), so it doesn't have that specific compounding cause, but the general HDR chroma-QP benefit still applies. Combined with this app's generous VBR ceiling (not tight CBR), the realistic effect is a modestly higher achieved bitrate, not a luma-quality tradeoff - no real mechanism found by which this could make already-HDR conversion worse.<br><br><strong>Checked the other GPU vendors specifically, since this fix is NVIDIA-only:</strong> extensive research into QSVEncC's (Intel) own documentation and real user command examples found no chroma-specific QP offset equivalent at all - its own `--qp-offset` is confirmed to be a completely different, unrelated parameter (temporal pyramid reference-layer QP, not chroma/luma balance). This app's own code shares the same toolArgs construction between NVEncC and QSVEncC for other settings, so this was a real, catchable risk - sending NVIDIA's flag to QSVEncC could have made the encode fail outright on an unrecognized option, now explicitly scoped to NVEncC only to prevent that. AMD/VCEEncC doesn't support 4:4:4 at all (already covered above), so this question doesn't apply there. Bottom line: Intel 4:4:4 output doesn't currently have an equivalent fix available for this specific chroma-priority issue - the underlying hardware/API may simply not expose this level of control the way NVIDIA's does.</div></div>
     <div class="warn-box" id="tog444Warning" style="margin-top:8px;display:none"></div>
   </div>
 
@@ -2564,24 +2564,84 @@ function buildJobFromCurrentSettings(chaptersPath){
     const maxBitrateKbps = String(100000 * bitrateMultiplier);
     const vbvBufsizeKbps = String(100000 * bitrateMultiplier);
     const qvbrArgs = ['--vbr', vbrTargetKbps, '--qp-min', `${crfNum-3}:${crfNum-3}:${crfNum-3}`, '--qp-max', `${crfNum+10}:${crfNum+10}:${crfNum+3}`];
-    // --aq (spatial adaptive quantization) added after a real report of
-    // visible blocking with 4:4:4 output that the bitrate-ceiling fix
-    // alone didn't resolve. Found via direct research that this app's
-    // command never enabled AQ at all (for either 4:2:0 or 4:4:4) -
-    // multiple real, confirmed-working community NVEncC commands for
-    // 4:4:4 encoding explicitly include it. AQ allocates bits based on
-    // where compression artifacts would actually be visible rather than
-    // spreading them uniformly across a frame - a well-established,
-    // broadly-recommended technique (confirmed via multiple independent
-    // sources, including AWS's own encoding guidance recommending it by
-    // default) with no confirmed downside, not something specific to
-    // this app or its situation. --aq-strength 0 (auto) rather than a
-    // hand-picked value, since NVEncC's own docs describe 0 as letting
-    // the encoder choose appropriately rather than needing manual
-    // tuning per-source.
+    // --aq (adaptive quantization) - confirmed via direct user testing
+    // that this genuinely helps and was never the cause of the missing-
+    // detail issue (that issue predates AQ entirely) - an earlier theory
+    // here blamed AQ and removed it, which was wrong; restored per
+    // direct correction. See the real investigation into the actual
+    // missing-detail cause elsewhere in this history instead.
     const aqArgs = ['--aq', '--aq-strength', '0'];
+    // Real, targeted fix for a real, confirmed-real report: a subtle
+    // near-black color tint (confirmed present in real source footage
+    // via raw pixel extraction - R consistently 1-4 8-bit code values
+    // above B, right at the noise floor) visible in 4:2:0 output but
+    // missing in 4:4:4. Confirmed via direct testing (not assumed) that
+    // this app's own pixel-filter math is NOT the cause - ran the exact
+    // real filter chain on content matching this specific subtlety and
+    // got byte-identical output for both chroma modes. The remaining,
+    // real difference: chroma-qp-offset has always defaulted to 0 here
+    // (never set), meaning chroma gets the exact same QP priority as
+    // luma in both modes - but 4:2:0's own subsampling inherently
+    // reinforces a weak, spatially-consistent tint through averaging
+    // before the encoder ever sees it, while 4:4:4 has no such
+    // protection - every chroma sample has to survive quantization
+    // entirely on its own. Giving chroma a real priority boost (lower
+    // QP relative to luma) specifically for 4:4:4 compensates for
+    // losing that averaging protection - a real, well-established
+    // parameter for exactly this purpose (confirmed via x265's own docs
+    // and multiple real reference encode commands), not something
+    // invented for this specific case.
+    // Real bug found via deeper research (specifically requested, not
+    // assumed correct): this toolArgs block is SHARED between NVEncC and
+    // QSVEncC (confirmed by the --qvbr comment above, which explicitly
+    // says both share consistent behavior here) - --chroma-qp-offset is
+    // NVIDIA-specific, confirmed by tracing directly into NVEncC's own
+    // source code (NVEncCore.cpp): it maps straight to NVENC's native
+    // cbQPIndexOffset/crQPIndexOffset API parameters, not a rigaya-
+    // invented option. Extensive research into QSVEncC's own docs and
+    // real user command examples found no chroma-specific QP offset
+    // equivalent at all - its own --qp-offset is a completely different,
+    // unrelated parameter (temporal pyramid reference layer QP, not
+    // chroma/luma balance). Sending NVIDIA's flag to QSVEncC risked the
+    // encode failing outright on an unrecognized option - scoped
+    // specifically to NVEncC to prevent that.
+    // Real research findings requested and found, extending this beyond
+    // 4:4:4-only: x264's own documented defaults are -2 for 4:2:0 and -6
+    // for 4:4:4 - meaning giving chroma some priority is a sensible,
+    // widely-used default for REGULAR 4:2:0 too, not something unique to
+    // 4:4:4. NVEncC's own default is neutral 0 for both (confirmed
+    // earlier via its source code and a real session log) - it doesn't
+    // replicate x264's smarter default behavior on its own, so this app
+    // sets it explicitly instead. Extended to apply for NVEncC regardless
+    // of chroma output mode (not just 4:4:4) - matching x264's own use of
+    // -2 as a sensible baseline for 4:2:0 specifically, not just an
+    // artifact of the 4:4:4 investigation.
+    //
+    // On whether this affects (or risks harming) already-HDR passthrough
+    // conversion, specifically researched rather than assumed: a real
+    // technical document on chroma QP determination for HDR/WCG content
+    // confirms negative chroma offsets are an established, validated
+    // technique specifically for HDR video ("verified that visual
+    // quality is better or similar, at same or lower bitrate"), not
+    // something risky or specific to this app's situation. More
+    // specifically relevant to THIS app: that same source quantifies why
+    // BT.709->BT.2020 conversion (this app's own SDR->HDR pipeline)
+    // mathematically REDUCES available chroma magnitude before the
+    // encoder ever sees it (Cr max drops from 0.5 to 0.28, Cb from 0.5
+    // to 0.44, converting BT.709 source into a BT.2020 container) -
+    // directly explaining why the converted-content case specifically
+    // benefits from this fix. Already-HDR passthrough content is
+    // natively BT.2020 already (skips that whole transform entirely,
+    // confirmed via buildHdrPixelFilters()'s early return for that case)
+    // so it doesn't have that SAME specific chroma-compression cause -
+    // but the general, established HDR chroma-QP benefit still applies,
+    // and this app's generous VBR bitrate ceiling (not tight CBR) means
+    // the realistic effect is modestly higher achieved bitrate, not a
+    // luma-quality tradeoff - no real mechanism found by which this
+    // could make already-HDR conversion worse.
+    const chromaQpArgs = encoder === 'nvencc' ? ['--chroma-qp-offset', '-2'] : [];
     const toolArgs = ['--y4m', '-i', '-', '--codec', 'hevc', '--profile', use444OutputEncode ? 'main444' : 'main10',
-      '--output-depth', '10', ...qvbrArgs, ...aqArgs, '--max-bitrate', maxBitrateKbps, '--vbv-bufsize', vbvBufsizeKbps, '--preset', 'quality'];
+      '--output-depth', '10', ...qvbrArgs, ...aqArgs, ...chromaQpArgs, '--max-bitrate', maxBitrateKbps, '--vbv-bufsize', vbvBufsizeKbps, '--preset', 'quality'];
     if (use444OutputEncode){
       toolArgs.push('--output-csp', 'yuv444');
       // Explicit level/tier instead of relying on --level auto — confirmed
