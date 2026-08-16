@@ -1095,6 +1095,71 @@ ipcMain.handle('run-ffmpeg-with-progress', async (event, payload) => {
 // normally-fast muxing step, not a lengthy re-encode, so the progress
 // bar simply not animating during this one stage is an acceptable,
 // purely cosmetic gap, not a functional one.
+// Converts this app's own FFMETADATA1 chapters file into mkvmerge's own
+// OGM-style "simple chapters" format, so mkvmerge can take chapters
+// directly via --chapters instead of needing a separate, wasteful full
+// stream-copy pass afterward just to inject them. Real bug fixed: that
+// separate copy pass doubled peak disk usage for the ENTIRE final output
+// (not just the video stream, unlike the earlier videoSourcePath fix) on
+// large movies specifically - confirmed via a real "No space left on
+// device" failure on a 2h36m/~60Mbps file, where the mkvmerge output and
+// its full duplicate (mid chapters-copy) needed to coexist on disk
+// simultaneously.
+ipcMain.handle('convert-chapters-to-mkvmerge', async (event, payload) => {
+  try {
+    const ffmetaPath = payload.ffmetaPath;
+    const outPath = payload.outPath;
+    const content = fs.readFileSync(ffmetaPath, 'utf8');
+    const lines = content.split(/\r?\n/);
+    const chapters = [];
+    let current = null;
+    let timebaseNum = 1, timebaseDen = 1000000000; // FFMETADATA1 default when unspecified
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed === '[CHAPTER]') {
+        current = { start: null, end: null, title: null };
+        chapters.push(current);
+        continue;
+      }
+      if (!current) continue;
+      const eq = trimmed.indexOf('=');
+      if (eq === -1) continue;
+      const key = trimmed.slice(0, eq);
+      const value = trimmed.slice(eq + 1);
+      if (key === 'TIMEBASE') {
+        const m = value.match(/^(\d+)\/(\d+)$/);
+        if (m) { timebaseNum = parseInt(m[1], 10); timebaseDen = parseInt(m[2], 10); }
+      } else if (key === 'START') {
+        current.start = parseInt(value, 10);
+      } else if (key === 'END') {
+        current.end = parseInt(value, 10);
+      } else if (key === 'title') {
+        current.title = value;
+      }
+    }
+    const toTimestamp = (rawUnits) => {
+      const totalSeconds = (rawUnits * timebaseNum) / timebaseDen;
+      const h = Math.floor(totalSeconds / 3600);
+      const m = Math.floor((totalSeconds % 3600) / 60);
+      const s = totalSeconds % 60;
+      const sInt = Math.floor(s);
+      const ms = Math.round((s - sInt) * 1000);
+      const pad = (n, len) => String(n).padStart(len, '0');
+      return `${pad(h, 2)}:${pad(m, 2)}:${pad(sInt, 2)}.${pad(ms, 3)}`;
+    };
+    const outLines = [];
+    chapters.forEach((ch, i) => {
+      const num = String(i + 1).padStart(2, '0');
+      outLines.push(`CHAPTER${num}=${toTimestamp(ch.start != null ? ch.start : 0)}`);
+      outLines.push(`CHAPTER${num}NAME=${ch.title || ('Chapter ' + num)}`);
+    });
+    fs.writeFileSync(outPath, outLines.join('\n') + '\n', 'utf8');
+    return { success: true, chapterCount: chapters.length };
+  } catch (err) {
+    return { success: false, error: String(err && err.message || err) };
+  }
+});
+
 ipcMain.handle('run-tool-simple', async (event, payload) => {
   return new Promise((resolve) => {
     const toolPath = payload.toolPath;
