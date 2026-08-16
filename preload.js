@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   calibrateNpl: (payload) => ipcRenderer.invoke('calibrate-npl', payload),
   runFFmpegWithProgress: (payload) => ipcRenderer.invoke('run-ffmpeg-with-progress', payload),
   runToolSimple: (payload) => ipcRenderer.invoke('run-tool-simple', payload),
+  convertChaptersToMkvmerge: (payload) => ipcRenderer.invoke('convert-chapters-to-mkvmerge', payload),
   runPipedEncode: (payload) => ipcRenderer.invoke('run-piped-encode', payload),
   runTriplePipedEncode: (payload) => ipcRenderer.invoke('run-triple-piped-encode', payload),
   killFFmpegJob: (payload) => ipcRenderer.invoke('kill-ffmpeg-job', payload),
