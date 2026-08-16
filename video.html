@@ -3173,14 +3173,24 @@ clip.set_output()
       // write the descriptor every time. This extra stage does that
       // extraction before mkvmerge ever runs.
       const mkvmergeRawHevcPath = tmpDir + '_tmp_mkvmerge_raw_' + jobId + '.hevc';
+      // Real disk-space bug found and fixed via a user's actual failure
+      // log ("No space left on device", 2h15m into a 2h36m/~60Mbps
+      // file): videoSourcePath (the MP4 intermediate) previously only
+      // got cleaned up at the very end of the whole job (in
+      // stage3Cleanup below) - meaning it coexisted on disk at the same
+      // time as this stage's own near-duplicate raw .hevc extraction of
+      // the exact same video stream, roughly doubling peak disk usage
+      // for large/long files for no reason, since videoSourcePath is
+      // never read again after this extraction completes. Cleaned up
+      // here instead, right when it actually becomes safe to remove.
       mkvmergeExtractStage = {
         name: 'Extract raw HEVC for mkvmerge',
         args: ['-i', videoSourcePath, '-map', '0:v', '-c:v', 'copy', '-bsf:v', 'hevc_mp4toannexb', '-f', 'hevc', '-y', mkvmergeRawHevcPath],
-        totalDuration: videoDuration, cleanup: null, tool: 'ffmpeg'
+        totalDuration: videoDuration, cleanup: (videoSourcePath !== filePath ? [videoSourcePath] : []), tool: 'ffmpeg'
       };
       stage3Args = { toolPath: mkvmergePathVal, toolArgs: buildMkvmergeMuxArgs(mkvmergeRawHevcPath, tmpUpmixPath, mkvmergeOutPath), isMkvmerge: true };
       stage3Name = 'Mux final MKV with Dolby Vision signaling (mkvmerge)';
-      stage3Cleanup = [tmpUpmixPath, mkvmergeRawHevcPath, ...(videoSourcePath !== filePath ? [videoSourcePath] : []), ...(dvRpuPath ? [dvRpuPath] : []), ...(hdr10PlusMetaPath ? [hdr10PlusMetaPath] : [])];
+      stage3Cleanup = [tmpUpmixPath, mkvmergeRawHevcPath, ...(dvRpuPath ? [dvRpuPath] : []), ...(hdr10PlusMetaPath ? [hdr10PlusMetaPath] : [])];
       if (chaptersPath){
         // Pure metadata-only copy - confirmed via this project's own
         // earlier direct testing that a plain stream copy doesn't touch
@@ -3482,8 +3492,37 @@ function renderQueue(){
 }
 
 function removeFromQueue(id){
+  const job = queue.find(j => j.id === id && j.status === 'pending');
+  if (job) cleanupJobTempFiles(job);
   queue = queue.filter(j => j.id !== id || j.status !== 'pending');
   renderQueue();
+}
+
+// Real bug fixed: some of a job's temp files (chapters specifically -
+// extracted and written to disk immediately when "Add to Queue" is
+// clicked, well before encoding ever starts) were left orphaned on disk
+// when a pending job was removed via the X button, since removal only
+// ever filtered the in-memory queue array and never touched anything on
+// disk. Collects every cleanup path across all of the job's stages
+// (flattening the mix of string/array/null shapes already used
+// throughout this app's stage definitions) and deletes each - safe to
+// call even for files that don't exist yet (any encode-time-only
+// intermediate, for a job that never actually started), since
+// deleteTempFile already resolves quietly on a missing file rather than
+// throwing.
+function cleanupJobTempFiles(job){
+  if (isOn('tog-keep-temp-files')) return;
+  const paths = new Set();
+  for (const stage of (job.stages || [])){
+    const raw = stage.cleanup;
+    if (!raw) continue;
+    for (const p of (Array.isArray(raw) ? raw : [raw])){
+      if (p) paths.add(p);
+    }
+  }
+  for (const p of paths){
+    window.electronAPI.deleteTempFile?.({ path: p }).catch(() => {});
+  }
 }
 
 async function startQueue(){
