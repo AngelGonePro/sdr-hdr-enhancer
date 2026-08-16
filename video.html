@@ -756,6 +756,23 @@ function selectInterpMode(mode){
 
 // Framerate Conform - independent of, and mutually exclusive with, the 5
 // interpolation toggles above. See its own description for the mechanism.
+// Single source of truth for Framerate Conform's target fps, per direct
+// request for manual control - previously hardcoded to Math.ceil(source)
+// in 4 separate places (video timing, audio sync, duration correction,
+// chapter rescaling), all now routed through this one function so a
+// manual override applies consistently everywhere the automatic value
+// used to, instead of needing to update each site separately (and
+// risking them disagreeing with each other).
+// Uses the SAME existing "Target FPS" control (motionInterpFpsSelect,
+// already shared by all 5 Framerate Upscale toggles) for Framerate
+// Conform too, instead of a separate control - per direct request, kept
+// in sync with whatever's already selected there rather than adding
+// anything new. "Automatic" in that dropdown already means round up to
+// the next whole number, which is the same thing this always did.
+function getConformTargetFps(sourceFps){
+  return parseFloat(getMotionInterpTargetFps()) || Math.ceil(sourceFps || 24);
+}
+
 function toggleFpsConform(){
   const el = document.getElementById('tog-fps-conform');
   if (el.classList.contains('disabled')) return; // greyed out while an interpolation mode is active
@@ -765,7 +782,8 @@ function toggleFpsConform(){
     ['tog-motion-interp-gpu','tog-motion-interp-gpu-trt','tog-motion-interp-gpu-vk','tog-motion-interp-mvtools','tog-motion-interp-cpu']
       .forEach(id => { document.getElementById(id).classList.remove('on'); document.getElementById(id).classList.add('disabled'); });
     document.getElementById('vspipePathRow').style.display = 'none';
-    document.getElementById('targetFpsRow').style.display = 'none';
+    // Target FPS row stays visible and in use - conform now reads the
+    // same control instead of it being hidden/replaced.
   } else {
     ['tog-motion-interp-gpu','tog-motion-interp-gpu-trt','tog-motion-interp-gpu-vk','tog-motion-interp-mvtools','tog-motion-interp-cpu']
       .forEach(id => document.getElementById(id).classList.remove('disabled'));
@@ -1928,7 +1946,7 @@ function buildDurationCorrectionFilter(){
   if (!isOn('tog-duration-fix')) return null;
   let targetDur = videoDuration;
   if (isOn('tog-fps-conform') && detectedSourceFps){
-    const conformTarget = Math.ceil(detectedSourceFps);
+    const conformTarget = getConformTargetFps(detectedSourceFps);
     if (Math.abs(conformTarget - detectedSourceFps) > 0.0001) targetDur = videoDuration * (detectedSourceFps / conformTarget);
   }
   const srcDur = detectedAudioTrackDuration;
@@ -1980,7 +1998,7 @@ function getAudioEncoderForCodec(codecName){
 function buildAudioFramerateFilter(){
   if (!isOn('tog-fps-conform')) return null;
   const sourceFps = detectedSourceFps || 24;
-  const targetFps = Math.ceil(sourceFps);
+  const targetFps = getConformTargetFps(sourceFps);
   if (Math.abs(targetFps - sourceFps) < 0.0001) return null; // already a whole number, nothing to conform
   const ratio = targetFps / sourceFps;
   const newRate = Math.round(48000 * ratio);
@@ -2278,7 +2296,7 @@ function buildJobFromCurrentSettings(chaptersPath){
   //    reached via scaling the source's own real values instead of
   //    overwriting them with an unrelated formula.
   if (isOn('tog-fps-conform')){
-    conformTargetFps = Math.ceil(detectedSourceFps || 24);
+    conformTargetFps = getConformTargetFps(detectedSourceFps || 24);
     if (!externalToolEncoders.includes(encoder) && detectedSourceFps && Math.abs(conformTargetFps - detectedSourceFps) > 0.0001){
       const tmpDirConform = filePath.substring(0, Math.max(filePath.lastIndexOf('\\'), filePath.lastIndexOf('/')) + 1);
       const tmpConformedPath = tmpDirConform + '_tmp_conformed_' + jobId + '.mkv';
@@ -2963,8 +2981,10 @@ clip.set_output()
   // video codec's own parameters or side data at all, confirmed via
   // this project's own earlier direct testing that a pure stream copy
   // doesn't affect frame-level side data.
-  function buildMkvmergeMuxArgs(videoPath, audioPath, finalOutPath){
-    const args = ['-o', finalOutPath, videoPath, audioPath];
+  function buildMkvmergeMuxArgs(videoPath, audioPath, finalOutPath, convertedChaptersPath){
+    const args = ['-o', finalOutPath];
+    if (convertedChaptersPath) args.push('--chapters', convertedChaptersPath);
+    args.push(videoPath, audioPath);
     if (subtitleSelections.length > 0){
       args.push('--no-video', '--no-audio', filePath);
     }
@@ -3157,10 +3177,9 @@ clip.set_output()
       '-c:a', 'libvorbis', '-b:a', '640k', '-sample_fmt', 'fltp', '-ar', '48000', '-y', tmpUpmixPath];
 
     const usesMkvmergeMux = (dvRpuPath || hdr10PlusMetaPath) && externalToolEncoders.includes(encoder);
-    let stage3Args, stage3Name, stage3Cleanup, extraChapterStage = null, mkvmergeExtractStage = null;
+    let stage3Args, stage3Name, stage3Cleanup, chapterConvertStage = null, mkvmergeExtractStage = null;
     if (usesMkvmergeMux){
       const mkvmergePathVal = document.getElementById('mkvmergePath').value.trim();
-      const mkvmergeOutPath = chaptersPath ? (tmpDir + '_tmp_mkvmerge_' + jobId + '.mkv') : outPath;
       // Real bug found and fixed via direct testing against the user's
       // actual output (not assumed): mkvmerge only correctly synthesizes
       // the DOVI configuration record when given a genuine raw .hevc
@@ -3188,20 +3207,34 @@ clip.set_output()
         args: ['-i', videoSourcePath, '-map', '0:v', '-c:v', 'copy', '-bsf:v', 'hevc_mp4toannexb', '-f', 'hevc', '-y', mkvmergeRawHevcPath],
         totalDuration: videoDuration, cleanup: (videoSourcePath !== filePath ? [videoSourcePath] : []), tool: 'ffmpeg'
       };
-      stage3Args = { toolPath: mkvmergePathVal, toolArgs: buildMkvmergeMuxArgs(mkvmergeRawHevcPath, tmpUpmixPath, mkvmergeOutPath), isMkvmerge: true };
-      stage3Name = 'Mux final MKV with Dolby Vision signaling (mkvmerge)';
-      stage3Cleanup = [tmpUpmixPath, mkvmergeRawHevcPath, ...(dvRpuPath ? [dvRpuPath] : []), ...(hdr10PlusMetaPath ? [hdr10PlusMetaPath] : [])];
+      // Real, SEPARATE disk-space bug found and fixed via a second
+      // instance of the same user's failure log: the previous "Add
+      // chapters" stage did a full plain-copy pass of the ENTIRE final
+      // mkvmerge output just to inject chapters (mkvmerge needs a
+      // different chapter file format than this app's FFMETADATA1
+      // chapters file, so a follow-up ffmpeg pass seemed like the
+      // simplest way to add them) - for a large movie, that meant the
+      // mkvmerge output and its full duplicate had to coexist on disk
+      // simultaneously, roughly doubling peak disk usage for the WHOLE
+      // final file (not just the video stream, unlike the extraction
+      // stage above). Fixed properly instead of just patching around it:
+      // converts this app's FFMETADATA1 chapters directly into
+      // mkvmerge's own OGM-style simple chapters format (a plain text
+      // conversion, no video/audio data touched or duplicated at all),
+      // then passes that straight to mkvmerge via --chapters in the SAME
+      // mux pass - no second full-file copy needed at all anymore.
+      const mkvmergeChaptersPath = chaptersPath ? (tmpDir + '_tmp_mkvmerge_chapters_' + jobId + '.txt') : null;
       if (chaptersPath){
-        // Pure metadata-only copy - confirmed via this project's own
-        // earlier direct testing that a plain stream copy doesn't touch
-        // frame-level side data, so this is safe to do with ffmpeg here
-        // even though the main mux used mkvmerge.
-        extraChapterStage = {
-          name: 'Add chapters',
-          args: ['-i', mkvmergeOutPath, '-i', chaptersPath, '-map', '0', '-c', 'copy', '-map_metadata', '1', '-y', outPath],
-          totalDuration: videoDuration, cleanup: [mkvmergeOutPath, chaptersPath], tool: 'ffmpeg'
+        chapterConvertStage = {
+          name: 'Convert chapters for mkvmerge',
+          isChapterConvert: true,
+          ffmetaPath: chaptersPath, outPath: mkvmergeChaptersPath,
+          totalDuration: 1, cleanup: [chaptersPath]
         };
       }
+      stage3Args = { toolPath: mkvmergePathVal, toolArgs: buildMkvmergeMuxArgs(mkvmergeRawHevcPath, tmpUpmixPath, outPath, mkvmergeChaptersPath), isMkvmerge: true };
+      stage3Name = 'Mux final MKV with Dolby Vision signaling (mkvmerge)';
+      stage3Cleanup = [tmpUpmixPath, mkvmergeRawHevcPath, ...(mkvmergeChaptersPath ? [mkvmergeChaptersPath] : []), ...(dvRpuPath ? [dvRpuPath] : []), ...(hdr10PlusMetaPath ? [hdr10PlusMetaPath] : [])];
     } else {
       const stage3Mux = buildMuxInputsAndMaps([{ path: tmpUpmixPath, stream: 'a' }]);
       stage3Args = buildVideoArgs(stage3Mux.inputArgs, ['-c:a', 'copy'], stage3Mux.mapArgs, outPath);
@@ -3223,14 +3256,14 @@ clip.set_output()
           fallbackName: 'Downmix to Stereo FLAC (plain fold - DPLII fallback)', verifyPath: tmpStereoPath },
         ...middleStages,
         ...(mkvmergeExtractStage ? [mkvmergeExtractStage] : []),
+        ...(chapterConvertStage ? [chapterConvertStage] : []),
         // For the mkvmerge path, stage3Args carries {toolPath, toolArgs,
         // isMkvmerge} instead of a plain ffmpeg args array - the
         // execution loop dispatches on isMkvmerge to run mkvmerge.exe
         // directly instead of ffmpeg for this one stage.
         usesMkvmergeMux
           ? { name: stage3Name, toolPath: stage3Args.toolPath, toolArgs: stage3Args.toolArgs, isMkvmerge: true, totalDuration: videoDuration, cleanup: stage3Cleanup }
-          : { name: stage3Name, args: stage3Args, totalDuration: videoDuration, cleanup: stage3Cleanup },
-        ...(extraChapterStage ? [extraChapterStage] : [])
+          : { name: stage3Name, args: stage3Args, totalDuration: videoDuration, cleanup: stage3Cleanup }
       ],
       currentStage: 0,
       totalDuration: videoDuration,
@@ -3457,7 +3490,7 @@ async function addToQueue(){
     // fractional position in the new, shorter runtime.
     let ratio = 1;
     if (isOn('tog-fps-conform') && detectedSourceFps){
-      const conformTarget = Math.ceil(detectedSourceFps);
+      const conformTarget = getConformTargetFps(detectedSourceFps);
       if (Math.abs(conformTarget - detectedSourceFps) > 0.0001) ratio = detectedSourceFps / conformTarget;
     }
     const ffmpeg = document.getElementById('ffmpegPath').value.trim();
@@ -3690,6 +3723,17 @@ async function processNextInQueue(){
         result = await window.electronAPI.runToolSimple({
           toolPath: stage.toolPath, args: stage.toolArgs, jobId: next.id
         });
+      } else if (stage.isChapterConvert){
+        // Plain async IPC call, not a spawned process - converts this
+        // app's FFMETADATA1 chapters into mkvmerge's own chapter format
+        // directly (no video/audio data touched), replacing what used to
+        // be a full extra copy of the entire final output just to add
+        // chapters - fixed a real "No space left on device" failure on
+        // large movies.
+        const convertResult = await window.electronAPI.convertChaptersToMkvmerge({
+          ffmetaPath: stage.ffmetaPath, outPath: stage.outPath
+        });
+        result = { code: convertResult && convertResult.success ? 0 : 1, stdout: '', stderr: convertResult && convertResult.error || '' };
       } else if (stage.piped){
         result = await window.electronAPI.runPipedEncode({
           ffmpeg, ffmpegArgs: stage.ffmpegArgs, tool: stage.toolPath, toolArgs: stage.toolArgs,
