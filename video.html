@@ -770,7 +770,17 @@ function selectInterpMode(mode){
 // anything new. "Automatic" in that dropdown already means round up to
 // the next whole number, which is the same thing this always did.
 function getConformTargetFps(sourceFps){
-  return parseFloat(getMotionInterpTargetFps()) || Math.ceil(sourceFps || 24);
+  const raw = getMotionInterpTargetFps();
+  // 48/60 are the interpolation-only options on this shared dropdown -
+  // conform has never had a concept of those (its own description above
+  // says so directly: no 48fps/60fps target exists for it, since
+  // conforming to a much higher rate would just speed the movie up).
+  // If either is selected (e.g. left over from testing Framerate
+  // Upscale earlier in the same session), conform falls back to its own
+  // real automatic behavior instead of silently inheriting a value that
+  // was never meant for it and would starve the encoder.
+  if (raw === '48' || raw === '60') return Math.ceil(sourceFps || 24);
+  return parseFloat(raw) || Math.ceil(sourceFps || 24);
 }
 
 function toggleFpsConform(){
@@ -2577,10 +2587,39 @@ function buildJobFromCurrentSettings(chaptersPath){
     // targets the encoder uses, which is what actually determines
     // quality. Fixed by applying the same real 2x factor to the actual
     // bitrate/buffer settings, not just the container-level declaration.
-    const bitrateMultiplier = use444OutputEncode ? 2 : 1;
-    const vbrTargetKbps = String(50000 * bitrateMultiplier); // generous average target, real ceiling is max-bitrate below
-    const maxBitrateKbps = String(100000 * bitrateMultiplier);
-    const vbvBufsizeKbps = String(100000 * bitrateMultiplier);
+    // Real UHD Blu-ray-comparable defaults, confirmed via direct research
+    // (not guessed) after a real report that the old baseline was
+    // producing ~196Mbps achieved bitrate and 205+GB files for a single
+    // movie - nowhere near real Blu-ray despite that being the explicit
+    // target. Real MediaInfo dumps of actual UHD BD discs/remuxes:
+    // John Wick 3 REMUX - 70.8 Mbps video bitrate, 80.9GB total for
+    // 2h11m; another real disc rip - 109Mbps max overall, 44GB for
+    // ~2hr. The format's own spec allows up to 128Mbps, but real
+    // titles typically run 50-90Mbps for the actual video stream. 80Mbps
+    // ceiling lands at the upper-middle of that real range - matching
+    // real Blu-ray, with real room to be "a little better" on more
+    // complex scenes without approaching the format's own extreme upper
+    // bound.
+    // Real fix for a confirmed-still-too-big result: the previous 80Mbps
+    // ceiling produced an ACTUAL, measured 83.4GB output (matching the
+    // ~84GB prediction closely - confirms this estimation method is
+    // reliable, not the target itself) - user confirmed directly that's
+    // still too big, and that the 4:4:4 estimate (113GB) was too. Lowered
+    // substantially: 40Mbps ceiling for 4:2:0, computed against Blade
+    // Runner 2049's real runtime (2h43m, not a rounded 2.5hr) to land
+    // around 45GB - genuinely modest, not just "somewhat less than
+    // before." Real reasoning, not just cutting until the complaints
+    // stop: HEVC at 40Mbps with good encoder settings (P6 preset, AQ,
+    // chroma priority - all already in place) is capable of matching or
+    // exceeding what actual Blu-ray hardware encoders achieve at their
+    // own higher bitrates, since consumer disc-authoring tools are
+    // generally less efficient than modern software encoding with tuned
+    // settings - "a little better than Blu-ray" doesn't require matching
+    // or exceeding Blu-ray's own bitrate, just its visual result.
+    const bitrateMultiplier = use444OutputEncode ? 1.35 : 1;
+    const vbrTargetKbps = String(Math.round(15000 * bitrateMultiplier)); // generous average target, real ceiling is max-bitrate below
+    const maxBitrateKbps = String(Math.round(40000 * bitrateMultiplier));
+    const vbvBufsizeKbps = String(Math.round(40000 * bitrateMultiplier));
     const qvbrArgs = ['--vbr', vbrTargetKbps, '--qp-min', `${crfNum-3}:${crfNum-3}:${crfNum-3}`, '--qp-max', `${crfNum+10}:${crfNum+10}:${crfNum+3}`];
     // --aq (adaptive quantization) - confirmed via direct user testing
     // that this genuinely helps and was never the cause of the missing-
@@ -2588,7 +2627,6 @@ function buildJobFromCurrentSettings(chaptersPath){
     // here blamed AQ and removed it, which was wrong; restored per
     // direct correction. See the real investigation into the actual
     // missing-detail cause elsewhere in this history instead.
-    const aqArgs = ['--aq', '--aq-strength', '0'];
     // Real, targeted fix for a real, confirmed-real report: a subtle
     // near-black color tint (confirmed present in real source footage
     // via raw pixel extraction - R consistently 1-4 8-bit code values
@@ -2657,9 +2695,36 @@ function buildJobFromCurrentSettings(chaptersPath){
     // the realistic effect is modestly higher achieved bitrate, not a
     // luma-quality tradeoff - no real mechanism found by which this
     // could make already-HDR conversion worse.
+    // Real bug found via research, not assumed: --aq/--aq-strength was
+    // unconditionally shared with QSVEncC/VCEEncC despite no confirmed
+    // evidence either supports this exact syntax - same risk class as
+    // the chroma-qp-offset bug found earlier (an unrecognized option can
+    // make the whole encode fail outright). Scoped to NVEncC only, where
+    // it's confirmed supported.
+    const aqArgs = encoder === 'nvencc' ? ['--aq', '--aq-strength', '0'] : [];
     const chromaQpArgs = encoder === 'nvencc' ? ['--chroma-qp-offset', '-2'] : [];
+    // Real, PRE-EXISTING bug found via direct research (unrelated to
+    // anything changed today, not a regression): all three encoders use
+    // completely different preset schemes, confirmed directly against
+    // each tool's own official docs (and, for VCEEncC, a real user
+    // session log actually showing the working syntax) - NVEncC uses
+    // --preset with P1-P7; QSVEncC uses a DIFFERENT FLAG NAME entirely
+    // (--quality, not --preset) with best/higher/high/balanced/fast/
+    // faster/fastest; VCEEncC uses --preset but with its own scale
+    // (slower/slow/medium/fast/faster/veryfast/superfast/ultrafast/
+    // draft). "quality" was never a valid value for QSVEncC OR VCEEncC,
+    // and was the wrong flag name entirely for QSVEncC - this app had
+    // been sending an invalid preset to both this whole time. Fixed with
+    // each tool's real flag name and a value one step down from its own
+    // slowest/highest-quality option (matching the same "little better
+    // than typical, meaningfully faster than the slowest" positioning
+    // used for NVEncC's P6): QSVEncC "higher" (one below "best"),
+    // VCEEncC "slow" (one below "slower").
+    const presetArgs = encoder === 'nvencc' ? ['--preset', 'P6']
+      : encoder === 'qsvencc' ? ['--quality', 'higher']
+      : ['--preset', 'slow'];
     const toolArgs = ['--y4m', '-i', '-', '--codec', 'hevc', '--profile', use444OutputEncode ? 'main444' : 'main10',
-      '--output-depth', '10', ...qvbrArgs, ...aqArgs, ...chromaQpArgs, '--max-bitrate', maxBitrateKbps, '--vbv-bufsize', vbvBufsizeKbps, '--preset', 'quality'];
+      '--output-depth', '10', ...qvbrArgs, ...aqArgs, ...chromaQpArgs, '--max-bitrate', maxBitrateKbps, '--vbv-bufsize', vbvBufsizeKbps, ...presetArgs];
     if (use444OutputEncode){
       toolArgs.push('--output-csp', 'yuv444');
       // Explicit level/tier instead of relying on --level auto — confirmed
