@@ -55,6 +55,7 @@ function createVideoWindow() {
   });
 
   win.loadFile('video.html');
+  win.webContents.openDevTools();
   return win;
 }
 
@@ -1106,6 +1107,7 @@ ipcMain.handle('run-ffmpeg-with-progress', async (event, payload) => {
 // its full duplicate (mid chapters-copy) needed to coexist on disk
 // simultaneously.
 ipcMain.handle('convert-chapters-to-mkvmerge', async (event, payload) => {
+  console.log("\n===== CHAPTER CONVERT START =====\n", payload.ffmetaPath, "->", payload.outPath, "\n===================================\n");
   try {
     const ffmetaPath = payload.ffmetaPath;
     const outPath = payload.outPath;
@@ -1154,8 +1156,10 @@ ipcMain.handle('convert-chapters-to-mkvmerge', async (event, payload) => {
       outLines.push(`CHAPTER${num}NAME=${ch.title || ('Chapter ' + num)}`);
     });
     fs.writeFileSync(outPath, outLines.join('\n') + '\n', 'utf8');
+    console.log(`[chapter convert finished] ${chapters.length} chapters written to ${outPath}`);
     return { success: true, chapterCount: chapters.length };
   } catch (err) {
+    console.log("[chapter convert error]", err && err.message || err);
     return { success: false, error: String(err && err.message || err) };
   }
 });
@@ -1165,10 +1169,22 @@ ipcMain.handle('run-tool-simple', async (event, payload) => {
     const toolPath = payload.toolPath;
     const args = payload.args || [];
     const jobId = payload.jobId || null;
+    // Real gap found and fixed: this handler covers mkvmerge, mkvextract,
+    // and PgsToSrt (every stage after the main video encode) but never
+    // logged anything to the console, unlike run-piped-encode above -
+    // meaning any failure in these stages was completely invisible in
+    // the terminal, confirmed via a real report where the log stopped
+    // dead right after the video-encode stage's own args with nothing
+    // shown for whatever ran (or failed) after it.
+    console.log("\n===== TOOL RUN START =====\n");
+    console.log("tool:", toolPath);
+    console.log("args:", args);
+    console.log("\n===========================\n");
     let proc;
     try {
       proc = spawn(toolPath, args, { windowsHide: true });
     } catch (err) {
+      console.log("[spawn threw synchronously]", err && err.message || err);
       resolve({ code: -1, stdout: "", stderr: String(err && err.message || err) });
       return;
     }
@@ -1179,10 +1195,18 @@ ipcMain.handle('run-tool-simple', async (event, payload) => {
     proc.stderr.on("data", d => stderr = appendBounded(stderr, d.toString()));
     proc.on("close", code => {
       if (jobId) activeProcesses.delete(jobId);
+      // Real gap found: mkvmerge writes its actual diagnostic/error
+      // output to stdout, not stderr (unlike ffmpeg/NVEncC) - confirmed
+      // via a real failure showing code=2 with zero stderr logged,
+      // hiding mkvmerge's real error message entirely. Logging stdout
+      // too now, specifically on a non-zero exit.
+      const outputForLog = code !== 0 ? `${stdout ? ' stdout=' + stdout.slice(0, 1000) : ''}${stderr ? ' stderr=' + stderr.slice(0, 500) : ''}` : '';
+      console.log(`[tool run finished] code=${code}${outputForLog}`);
       resolve({ code, stdout, stderr });
     });
     proc.on("error", err => {
       if (jobId) activeProcesses.delete(jobId);
+      console.log("[tool spawn error]", err.message);
       resolve({ code: -1, stdout: "", stderr: String(err.message) });
     });
   });
