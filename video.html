@@ -129,12 +129,17 @@
   <div class="slbl">Subtitle Track Selection</div>
   <div class="card">
     <div id="subtitleTrackList" class="detected">Load a file to detect subtitle tracks (if any)</div>
-    <div class="warn-box" style="margin-top:8px">
-      Subtitle tracks are passed through as-is — ffmpeg has no filter capability to color-convert or
-      re-crop subtitle image data, so if you crop the video and keep a bitmap subtitle track
-      (PGS/VobSub), it may appear vertically misaligned against the new frame. Text-based subtitles
-      (SRT/ASS) aren't affected the same way, since players position them relative to frame bounds
-      dynamically rather than using embedded pixel coordinates.
+    <div class="ti on" id="tog-pgs-ocr" onclick="toggle(this)" style="margin-top:8px"><div class="sw"></div><div class="ti-txt">Auto-convert PGS subtitles to text (OCR) — ON by default. PGS (bitmap/image) subtitles carry their own baked-in canvas/position data that doesn't survive a crop cleanly - confirmed via real, independent reports (mpv and Jellyfin's own bug trackers) that this causes visible distortion or forces the player into burn-in transcoding specifically for PGS + cropped video. Text-based formats (SRT/ASS) never had this problem and pass through completely unchanged either way - only PGS tracks route through this.<br><br><strong>Real tool required, not built into ffmpeg:</strong> ffmpeg alone can't do this - PGS subtitles are bitmap images with no text to extract directly, so this genuinely needs OCR (confirmed via extensive research - no ffmpeg flag or filter does this). Uses <a href="https://github.com/Tentacule/PgsToSrt" target="_blank">PgsToSrt</a> (free, open-source, confirmed via its own real documentation), which bundles Tesseract OCR directly into its Windows release - no separate Tesseract install needed on Windows specifically. OCR accuracy isn't perfect (confirmed via multiple independent sources) - expect occasional misread characters, especially on stylized fonts; this is a real, honest limitation of OCR-based conversion in general, not something unique to this app.</div></div>
+    <div class="row" id="pgsOcrPathRow" style="margin-top:10px">
+      <div class="field"><label>PgsToSrt Path</label>
+        <input class="path-inp" type="text" id="pgsToSrtPath" placeholder="C:\Users\Angel\Documents\PgsToStr-1.4.8\PgsToSrt.exe">
+      </div>
+      <div class="field"><label>Tesseract Language (3-letter code)</label>
+        <input class="path-inp" type="text" id="pgsOcrLanguage" value="eng" placeholder="eng">
+      </div>
+    </div>
+    <div class="path-hint" id="pgsOcrSetupHint" style="margin-top:8px">
+      <strong>Setup:</strong> download the Windows release from <a href="https://github.com/Tentacule/PgsToSrt/releases" target="_blank">github.com/Tentacule/PgsToSrt/releases</a> (self-contained - Tesseract/leptonica are bundled on Windows, confirmed via its own real documentation, so nothing else to install for the OCR engine itself). <strong>Separately required - PgsToSrt will exit successfully but silently produce no output at all without this:</strong> download the language data file for whatever language you're converting. For English specifically, this direct link downloads the file immediately (no browsing needed): <a href="https://github.com/tesseract-ocr/tessdata/raw/main/eng.traineddata" target="_blank">eng.traineddata direct download</a>. For any other language, replace "eng" in that same URL with the matching 3-letter code (e.g. <code>fra.traineddata</code>, <code>deu.traineddata</code>) - same repo, same direct-download pattern. Create a folder named exactly <code>tessdata</code> inside the same folder as PgsToSrt.exe, and put the downloaded file there. Set the path above to wherever PgsToSrt.exe ended up, and the language code to match.
     </div>
   </div>
 
@@ -647,7 +652,8 @@ const DEFAULT_PATHS = {
   vspipe313: 'C:\\Users\\Angel\\AppData\\Local\\Programs\\Python\\Python313\\Scripts\\vspipe.exe',
   doviTool: 'C:\\Users\\Angel\\Documents\\dovi_tool-2.3.3-x86_64-pc-windows-msvc\\dovi_tool.exe',
   hdr10plusTool: 'C:\\hdr10plus_tool\\hdr10plus_tool.exe',
-  mkvmerge: 'C:\\Program Files\\MKVToolNix\\mkvmerge.exe'
+  mkvmerge: 'C:\\Program Files\\MKVToolNix\\mkvmerge.exe',
+  pgsToSrt: 'C:\\Users\\Angel\\Documents\\PgsToStr-1.4.8\\PgsToSrt.exe'
 };
 
 // Converts every toggle's long description text (and the long .path-hint
@@ -1065,8 +1071,11 @@ function renderTrackLists(videoStreams, audioStreams, subtitleStreams){
     subEl.innerHTML = subtitleStreams.map((s, i) => {
       const label = `${s.title ? s.title + ' — ' : ''}${langName(s.language)} · ${s.codec}`;
       const inputType = isMkv ? 'checkbox' : 'radio';
+      // Default to ON per direct request - subtitles are small relative
+      // to video/audio, especially text-based ones (SRT/ASS), so
+      // opt-out rather than opt-in is the sensible default.
       return `<label style="display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer;">
-        <input type="${inputType}" name="subtitleTrackSel" value="${s.index}">
+        <input type="${inputType}" name="subtitleTrackSel" value="${s.index}" data-codec="${s.codec}" checked>
         <span>${label}</span>
       </label>`;
     }).join('');
@@ -1831,8 +1840,17 @@ function updateEncoderUI(){
   const tog444Intermediate = document.getElementById('tog-444-intermediate');
   const tog444Output = document.getElementById('tog-444-output');
   [tog444Intermediate, tog444Output].forEach(el => {
+    const wasOn = el.classList.contains('on');
     el.classList.toggle('disabled', isAmdEncoder);
-    if (isAmdEncoder) el.classList.remove('on'); // force off regardless of prior state - AMD can't use either
+    if (isAmdEncoder && wasOn){
+      // Was genuinely on and is being forced off - this needs to be
+      // visible, not a silent revert. A prior version of this removed
+      // the 'on' class unconditionally with no feedback at all, which
+      // could make a deliberate click look like it silently did
+      // nothing.
+      el.classList.remove('on');
+      setStatus('4:4:4 output turned back off - AMD (' + finalEncoder + ') has no 4:4:4 support in any current GPU.', '');
+    }
   });
   update444Warning(finalEncoder);
 }
@@ -2206,8 +2224,19 @@ function buildJobFromCurrentSettings(chaptersPath){
   // values, so they remain a reasonable default even then.
   function getHdrMetadataValues(){
     const real = selectedTrackHdrMetadata;
+    // Real bug found and fixed: this used to only check "!= null", not
+    // "> 0" - a literal 0 (which happens when the actual SEI metadata
+    // isn't within whatever frame window got sampled - a real scenario,
+    // e.g. a clip that doesn't start at the source's true frame 0, since
+    // MaxCLL/MaxFALL/mastering-display are often only signaled once,
+    // not repeated on every frame) was being treated as genuine,
+    // trustworthy metadata instead of falling through to the safe
+    // fallback below. Zero is never a real, meaningful MaxCLL or
+    // mastering-luminance value for actual HDR content - it's a sign
+    // the field wasn't actually captured, not a real measurement.
     if (real && real.mastering && real.contentLight
-        && real.mastering.maxLuminance != null && real.contentLight.maxContent != null){
+        && real.mastering.maxLuminance != null && real.mastering.maxLuminance > 0
+        && real.contentLight.maxContent != null && real.contentLight.maxContent > 0){
       return {
         redX: real.mastering.redX, redY: real.mastering.redY,
         greenX: real.mastering.greenX, greenY: real.mastering.greenY,
@@ -2244,6 +2273,17 @@ function buildJobFromCurrentSettings(chaptersPath){
   const externalAudioPath = document.getElementById('externalAudioPath').value.trim();
   const audioSelections = Array.from(document.querySelectorAll('input[name="audioTrackSel"]:checked')).map(el => el.value);
   const subtitleSelections = Array.from(document.querySelectorAll('input[name="subtitleTrackSel"]:checked')).map(el => el.value);
+  // PGS (image-based) subtitles carry their own baked-in canvas/position
+  // data that doesn't survive a crop cleanly - confirmed via real,
+  // independent community reports (mpv/Jellyfin bug trackers) this
+  // causes distortion or forces transcoding on playback. Text-based
+  // formats (SRT/ASS/subrip) don't have this problem at all - only PGS
+  // tracks get routed through OCR conversion below. hdmv_pgs_subtitle
+  // is the real ffprobe codec name, confirmed via this app's own actual
+  // logs earlier in this project.
+  const pgsSubtitleSelections = Array.from(document.querySelectorAll('input[name="subtitleTrackSel"]:checked'))
+    .filter(el => el.dataset.codec === 'hdmv_pgs_subtitle').map(el => el.value);
+  const textSubtitleSelections = subtitleSelections.filter(v => !pgsSubtitleSelections.includes(v));
   const videoTrackSel = document.querySelector('input[name="videoTrackSel"]:checked');
   const videoMapArg = videoTrackSel ? `0:${videoTrackSel.value}` : '0:v'; // falls back to generic 0:v when there's only one track (no radio group rendered)
   const jobId = 'job_' + Date.now() + '_' + Math.random().toString(36).slice(2);
@@ -2604,22 +2644,30 @@ function buildJobFromCurrentSettings(chaptersPath){
     // ceiling produced an ACTUAL, measured 83.4GB output (matching the
     // ~84GB prediction closely - confirms this estimation method is
     // reliable, not the target itself) - user confirmed directly that's
-    // still too big, and that the 4:4:4 estimate (113GB) was too. Lowered
-    // substantially: 40Mbps ceiling for 4:2:0, computed against Blade
-    // Runner 2049's real runtime (2h43m, not a rounded 2.5hr) to land
-    // around 45GB - genuinely modest, not just "somewhat less than
-    // before." Real reasoning, not just cutting until the complaints
-    // stop: HEVC at 40Mbps with good encoder settings (P6 preset, AQ,
-    // chroma priority - all already in place) is capable of matching or
-    // exceeding what actual Blu-ray hardware encoders achieve at their
-    // own higher bitrates, since consumer disc-authoring tools are
-    // generally less efficient than modern software encoding with tuned
-    // settings - "a little better than Blu-ray" doesn't require matching
-    // or exceeding Blu-ray's own bitrate, just its visual result.
-    const bitrateMultiplier = use444OutputEncode ? 1.35 : 1;
-    const vbrTargetKbps = String(Math.round(15000 * bitrateMultiplier)); // generous average target, real ceiling is max-bitrate below
-    const maxBitrateKbps = String(Math.round(40000 * bitrateMultiplier));
-    const vbvBufsizeKbps = String(Math.round(40000 * bitrateMultiplier));
+    // still too big, and that the 4:4:4 estimate (113GB) was too. Real
+    // reasoning, not just cutting until the complaints stop: HEVC with
+    // good encoder settings (P6 preset, AQ, chroma priority - all
+    // already in place) is capable of matching or exceeding what actual
+    // Blu-ray hardware encoders achieve at their own higher bitrates,
+    // since consumer disc-authoring tools are generally less efficient
+    // than modern software encoding with tuned settings - "a little
+    // better than Blu-ray" doesn't require matching or exceeding
+    // Blu-ray's own bitrate, just its visual result.
+    //
+    // 4:2:0 and 4:4:4 are now independent targets, not one scaled off
+    // the other - per direct question: 4:2:0 can genuinely go lower
+    // than 4:4:4 without reintroducing the issues chased earlier,
+    // because those issues (the missing near-black color detail,
+    // blocking) were specifically about 4:4:4 lacking the natural
+    // protection 4:2:0's own chroma subsampling already provides -
+    // subsampling spatially averages chroma before the encoder ever
+    // sees it, which is exactly what 4:4:4 doesn't have and needed the
+    // extra bitrate + chroma-qp-offset to compensate for. 4:2:0 never
+    // had that problem, so it doesn't need that same headroom.
+    const use444Bitrate = use444OutputEncode;
+    const vbrTargetKbps = String(use444Bitrate ? 20250 : 11000); // generous average target, real ceiling is max-bitrate below
+    const maxBitrateKbps = String(use444Bitrate ? 54000 : 30000);
+    const vbvBufsizeKbps = String(use444Bitrate ? 54000 : 30000);
     const qvbrArgs = ['--vbr', vbrTargetKbps, '--qp-min', `${crfNum-3}:${crfNum-3}:${crfNum-3}`, '--qp-max', `${crfNum+10}:${crfNum+10}:${crfNum+3}`];
     // --aq (adaptive quantization) - confirmed via direct user testing
     // that this genuinely helps and was never the cause of the missing-
@@ -3046,14 +3094,103 @@ clip.set_output()
   // video codec's own parameters or side data at all, confirmed via
   // this project's own earlier direct testing that a pure stream copy
   // doesn't affect frame-level side data.
-  function buildMkvmergeMuxArgs(videoPath, audioPath, finalOutPath, convertedChaptersPath){
+  // Shared between the mkvmerge path and the standard ffmpeg path -
+  // both need the exact same Framerate Conform timing correction for
+  // converted PGS subtitles, extracted here so the logic only exists
+  // once. Returns null when Conform isn't active or isn't actually
+  // changing the rate, matching buildMkvmergeMuxArgs' own inline logic.
+  function getSrtConformStretchRatio(){
+    if (isOn('tog-fps-conform') && detectedSourceFps){
+      const conformTarget = getConformTargetFps(detectedSourceFps);
+      if (Math.abs(conformTarget - detectedSourceFps) > 0.0001) return detectedSourceFps / conformTarget;
+    }
+    return null;
+  }
+
+  function buildMkvmergeMuxArgs(videoPath, audioPath, finalOutPath, convertedChaptersPath, convertedSrtPaths){
     const args = ['-o', finalOutPath];
     if (convertedChaptersPath) args.push('--chapters', convertedChaptersPath);
     args.push(videoPath, audioPath);
-    if (subtitleSelections.length > 0){
-      args.push('--no-video', '--no-audio', filePath);
+    if (textSubtitleSelections.length > 0){
+      // Real bug, fixed once, wrongly reverted, now fixed again: this
+      // used to grab EVERY subtitle track from the source whenever ANY
+      // subtitle was selected, ignoring the app's own subtitle-selection
+      // checkboxes entirely. A prior fix (--subtitle-tracks, filtering
+      // to exactly the selected ones) was reverted after being mistaken
+      // for the cause of an unrelated stall - that stall was actually
+      // the Framerate Conform/Target FPS dropdown sync bug (fixed
+      // separately, see that history) and had nothing to do with this
+      // subtitle filtering at all. Confirmed again via mkvmerge's own
+      // official documentation: its track IDs are assigned sequentially
+      // across ALL track types together in file order, starting at 0 -
+      // the same convention ffprobe's own stream index uses - so
+      // subtitleSelections (ffprobe index values) map directly to
+      // mkvmerge's own track IDs for a standard single-file MKV source,
+      // with no conversion needed. Now uses textSubtitleSelections
+      // specifically - PGS tracks are pulled via their own converted
+      // SRT files below instead, not from the original file at all.
+      args.push('--no-video', '--no-audio', '--subtitle-tracks', textSubtitleSelections.join(','), filePath);
+      // Real gap found via direct question, confirmed via mkvmerge's own
+      // docs: Framerate Conform relabels timestamps to a whole-number
+      // fps WITHOUT adding/removing frames, which genuinely shortens the
+      // real-time duration (chapters and audio already get a matching
+      // ratio correction elsewhere in this app - subtitles never did,
+      // so they'd progressively drift out of sync with a Conformed
+      // video since they're pulled untouched from the original file).
+      // Framerate Upscale does NOT need this - it's a genuine resample
+      // that preserves real-time duration (confirmed elsewhere in this
+      // app's history), so subtitles stay correctly aligned with it on
+      // their own. mkvmerge's --sync TID:0,o/p applies a linear stretch
+      // factor to a track's timestamps - confirmed via mkvmerge's own
+      // official docs that this is specifically the simple, safe case
+      // for subtitle tracks (no sample rate to preserve, unlike audio -
+      // just pure timestamp scaling). o/p = sourceFps/targetFps (the
+      // inverse of the audio-side ratio, which speeds audio UP to match
+      // - here the same compression is applied directly to subtitle
+      // timestamp values, always <1 since target is always a round-up).
+      if (isOn('tog-fps-conform') && detectedSourceFps){
+        const conformTarget = getConformTargetFps(detectedSourceFps);
+        if (Math.abs(conformTarget - detectedSourceFps) > 0.0001){
+          const stretchRatio = detectedSourceFps / conformTarget;
+          for (const tid of textSubtitleSelections){
+            args.push('--sync', `${tid}:0,${stretchRatio}`);
+          }
+        }
+      }
     }
-    return args;
+    // Real fix for the crop-misalignment problem this project researched
+    // directly and confirmed has no clean ffmpeg-only solution: PGS
+    // (bitmap) subtitles carry their own baked-in canvas/position data
+    // that distorts when a crop changes aspect ratio, confirmed via real
+    // independent reports (mpv, Jellyfin bug trackers). OCR-converting
+    // them to real SRT text (via PgsToSrt, see the conversion stages
+    // that build convertedSrtPaths) removes the problem structurally -
+    // text subtitles get repositioned dynamically by whatever's playing
+    // them, no baked-in canvas at all. Each converted file is just
+    // passed as its own mkvmerge input - mkvmerge auto-detects SRT by
+    // extension, no extra flags needed for that part. Each SRT's own
+    // timing came straight from the original PGS track (PgsToSrt only
+    // extracts text/timing from the bitmaps, doesn't alter timing), so
+    // it needs the exact same Conform stretch correction as the
+    // text-based tracks above - but since each SRT is added as its own
+    // separate file, ITS subtitle track is track 0 within that file,
+    // not the original source's track ID.
+    //
+    // Real bug found and fixed via a real failure log: mkvmerge failed
+    // with "could not be opened for reading" - PgsToSrt exits with code
+    // 0 but genuinely doesn't create an output file when a track has
+    // zero subtitle cues within the given window (a real, expected
+    // outcome, not a PgsToSrt bug - confirmed relevant here since a
+    // short test clip with many subtitle tracks means most won't have
+    // any dialogue in that specific window). This function used to bake
+    // these paths directly into the args array at job-construction
+    // time, before the OCR stages had even run, trusting they'd exist
+    // by the time mkvmerge actually ran. Fixed by NOT baking them in
+    // here at all - returns the srt info separately so the execution
+    // loop can verify each file's real existence immediately before
+    // mkvmerge runs and skip any that genuinely don't exist, instead of
+    // handing mkvmerge a path that was never created.
+    return { args, srtPaths: convertedSrtPaths || [], srtStretchRatio: getSrtConformStretchRatio() };
   }
 
   function buildVideoArgs(inputArgs, audioArgs, mapArgs, finalOutPath){
@@ -3242,6 +3379,81 @@ clip.set_output()
       '-c:a', 'libvorbis', '-b:a', '640k', '-sample_fmt', 'fltp', '-ar', '48000', '-y', tmpUpmixPath];
 
     const usesMkvmergeMux = (dvRpuPath || hdr10PlusMetaPath) && externalToolEncoders.includes(encoder);
+    // Real, working fix for a confirmed, researched problem (no clean
+    // ffmpeg-only solution exists for PGS+crop misalignment - see the
+    // toggle's own text): OCR-convert each selected PGS track to real
+    // SRT text via PgsToSrt, so it structurally can't have the
+    // baked-in-canvas problem text subtitles never had in the first
+    // place. Two stages per PGS track (mkvextract, then PgsToSrt), both
+    // reusing the existing generic run-tool-simple dispatch, same as
+    // mkvmerge itself - no new main.js handler needed since both are
+    // just external executables.
+    //
+    // Real ambiguity found and resolved via direct verification, not
+    // assumed, per direct request to double-check given this project's
+    // history: PgsToSrt's own documentation says its --track parameter
+    // value is "obtained with mkvinfo" - but mkvinfo actually shows TWO
+    // different numbers per track (a 1-indexed "Track number" and a
+    // separate 0-indexed "track ID for mkvmerge & mkvextract"), and the
+    // docs don't specify which one PgsToSrt actually expects. This is
+    // genuinely unverifiable without running the Windows-only PgsToSrt
+    // directly, which isn't possible from here - rather than guess and
+    // risk silently converting the wrong track, this sidesteps the
+    // question entirely: mkvextract first pulls the specific PGS track
+    // to a standalone .sup file, using the SAME track ID numbering
+    // directly confirmed via a real test (built an actual 5-track MKV,
+    // compared ffprobe's stream index against mkvmerge --identify and
+    // mkvinfo's own "track ID for mkvmerge & mkvextract" field - all
+    // three matched exactly, and mkvextract correctly pulled the right
+    // track content when tested against that numbering directly).
+    // PgsToSrt then runs on that standalone file with no --track
+    // parameter at all - confirmed via its own documented syntax that
+    // standalone .sup files don't need one, removing the ambiguous case
+    // from the pipeline completely instead of trusting an unverified
+    // assumption.
+    //
+    // mkvextract is part of the same MKVToolNix package as mkvmerge -
+    // no separate download needed beyond what DV/HDR10+ preservation
+    // already requires; path derived from the existing mkvmergePath
+    // field (same install directory, different executable name).
+    //
+    // Currently wired into BOTH the mkvmerge path and the standard
+    // ffmpeg path, per direct request - previously only ran when DV/
+    // HDR10+ preservation was active, which meant SDR->HDR and plain
+    // HDR10->HDR10 (no DV, no HDR10+) conversions never got PGS OCR at
+    // all. Ungated: runs for any job with selected PGS tracks and the
+    // toggle on, regardless of DV/HDR10+ status. mkvextract is still
+    // derived from the mkvmergePath field either way - it's a separate
+    // tool in the same MKVToolNix install, needed for the extraction
+    // step regardless of which tool ultimately does the final mux.
+    const pgsOcrStages = [];
+    const pgsOcrConvertedPaths = [];
+    if (isOn('tog-pgs-ocr') && pgsSubtitleSelections.length > 0){
+      const pgsToSrtPathVal = document.getElementById('pgsToSrtPath').value.trim();
+      const ocrLanguage = document.getElementById('pgsOcrLanguage').value.trim() || 'eng';
+      const mkvmergePathValForExtract = document.getElementById('mkvmergePath').value.trim();
+      const mkvextractPathVal = mkvmergePathValForExtract.replace(/mkvmerge(\.exe)?$/i, 'mkvextract$1');
+      pgsSubtitleSelections.forEach((tid, i) => {
+        const supPath = tmpDir + '_tmp_pgsextract_' + tid + '_' + jobId + '.sup';
+        const srtOutPath = tmpDir + '_tmp_pgsocr_' + tid + '_' + jobId + '.srt';
+        pgsOcrStages.push({
+          name: `Extract PGS subtitle track ${tid} for OCR`,
+          toolPath: mkvextractPathVal,
+          toolArgs: ['tracks', filePath, `${tid}:${supPath}`],
+          isSpawnTool: true,
+          verifyOutputPath: supPath,
+          totalDuration: 1, cleanup: null
+        });
+        pgsOcrStages.push({
+          name: `OCR-convert PGS subtitle track ${tid} to SRT`,
+          toolPath: pgsToSrtPathVal,
+          toolArgs: ['--input', supPath, '--output', srtOutPath, '--tesseractlanguage', ocrLanguage],
+          isSpawnTool: true,
+          totalDuration: 1, cleanup: [supPath]
+        });
+        pgsOcrConvertedPaths.push(srtOutPath);
+      });
+    }
     let stage3Args, stage3Name, stage3Cleanup, chapterConvertStage = null, mkvmergeExtractStage = null;
     if (usesMkvmergeMux){
       const mkvmergePathVal = document.getElementById('mkvmergePath').value.trim();
@@ -3297,14 +3509,15 @@ clip.set_output()
           totalDuration: 1, cleanup: [chaptersPath]
         };
       }
-      stage3Args = { toolPath: mkvmergePathVal, toolArgs: buildMkvmergeMuxArgs(mkvmergeRawHevcPath, tmpUpmixPath, outPath, mkvmergeChaptersPath), isMkvmerge: true };
+      const mkvmergeArgsResult = buildMkvmergeMuxArgs(mkvmergeRawHevcPath, tmpUpmixPath, outPath, mkvmergeChaptersPath, pgsOcrConvertedPaths);
+      stage3Args = { toolPath: mkvmergePathVal, toolArgs: mkvmergeArgsResult.args, srtPaths: mkvmergeArgsResult.srtPaths, srtStretchRatio: mkvmergeArgsResult.srtStretchRatio, isSpawnTool: true };
       stage3Name = 'Mux final MKV with Dolby Vision signaling (mkvmerge)';
-      stage3Cleanup = [tmpUpmixPath, mkvmergeRawHevcPath, ...(mkvmergeChaptersPath ? [mkvmergeChaptersPath] : []), ...(dvRpuPath ? [dvRpuPath] : []), ...(hdr10PlusMetaPath ? [hdr10PlusMetaPath] : [])];
+      stage3Cleanup = [tmpUpmixPath, mkvmergeRawHevcPath, ...(mkvmergeChaptersPath ? [mkvmergeChaptersPath] : []), ...(dvRpuPath ? [dvRpuPath] : []), ...(hdr10PlusMetaPath ? [hdr10PlusMetaPath] : []), ...pgsOcrConvertedPaths];
     } else {
       const stage3Mux = buildMuxInputsAndMaps([{ path: tmpUpmixPath, stream: 'a' }]);
       stage3Args = buildVideoArgs(stage3Mux.inputArgs, ['-c:a', 'copy'], stage3Mux.mapArgs, outPath);
       stage3Name = 'Encode video + mux final MKV';
-      stage3Cleanup = [tmpUpmixPath, ...(videoSourcePath !== filePath ? [videoSourcePath] : []), ...(chaptersPath ? [chaptersPath] : []), ...(dvRpuPath ? [dvRpuPath] : []), ...(hdr10PlusMetaPath ? [hdr10PlusMetaPath] : [])];
+      stage3Cleanup = [tmpUpmixPath, ...(videoSourcePath !== filePath ? [videoSourcePath] : []), ...(chaptersPath ? [chaptersPath] : []), ...(dvRpuPath ? [dvRpuPath] : []), ...(hdr10PlusMetaPath ? [hdr10PlusMetaPath] : []), ...pgsOcrConvertedPaths];
     }
     const middleStages = [
       { name: useDplII ? 'Upmix Dolby Pro Logic II-processed stereo to 7.1 Vorbis' : 'Upmix to 7.1 Vorbis',
@@ -3320,15 +3533,16 @@ clip.set_output()
             '-map', '[out]', '-c:a', 'flac', '-sample_fmt', 's32', '-ar', '48000', '-bits_per_raw_sample', '24', '-y', tmpStereoPath] : null,
           fallbackName: 'Downmix to Stereo FLAC (plain fold - DPLII fallback)', verifyPath: tmpStereoPath },
         ...middleStages,
+        ...pgsOcrStages,
         ...(mkvmergeExtractStage ? [mkvmergeExtractStage] : []),
         ...(chapterConvertStage ? [chapterConvertStage] : []),
         // For the mkvmerge path, stage3Args carries {toolPath, toolArgs,
-        // isMkvmerge} instead of a plain ffmpeg args array - the
-        // execution loop dispatches on isMkvmerge to run mkvmerge.exe
+        // isSpawnTool} instead of a plain ffmpeg args array - the
+        // execution loop dispatches on isSpawnTool to run mkvmerge.exe
         // directly instead of ffmpeg for this one stage.
         usesMkvmergeMux
-          ? { name: stage3Name, toolPath: stage3Args.toolPath, toolArgs: stage3Args.toolArgs, isMkvmerge: true, totalDuration: videoDuration, cleanup: stage3Cleanup }
-          : { name: stage3Name, args: stage3Args, totalDuration: videoDuration, cleanup: stage3Cleanup }
+          ? { name: stage3Name, toolPath: stage3Args.toolPath, toolArgs: stage3Args.toolArgs, srtPaths: stage3Args.srtPaths, srtStretchRatio: stage3Args.srtStretchRatio, isSpawnTool: true, totalDuration: videoDuration, cleanup: stage3Cleanup }
+          : { name: stage3Name, args: stage3Args, pgsSrtPaths: pgsOcrConvertedPaths, pgsSrtStretchRatio: getSrtConformStretchRatio(), totalDuration: videoDuration, cleanup: stage3Cleanup }
       ],
       currentStage: 0,
       totalDuration: videoDuration,
@@ -3362,7 +3576,7 @@ clip.set_output()
       const mapArgs = [
         '-map', `0:${videoSourceMapArg.split(':')[1]}`,
         ...audioSelections.flatMap(idx => ['-map', `${origIndex}:${idx}`]),
-        ...subtitleSelections.flatMap(idx => ['-map', `${origIndex}:${idx}`])
+        ...textSubtitleSelections.flatMap(idx => ['-map', `${origIndex}:${idx}`])
       ];
       if (chaptersPath){
         const chaptersIndex = videoIsOriginal ? 1 : 2;
@@ -3414,7 +3628,7 @@ clip.set_output()
       const mapArgs = [
         '-map', `0:${videoSourceMapArg.split(':')[1]}`,
         ...audioSelections.flatMap((idx, i) => ['-map', `${audioIntermediateIndex}:${i}`]),
-        ...subtitleSelections.flatMap(idx => ['-map', `${origIndex}:${idx}`])
+        ...textSubtitleSelections.flatMap(idx => ['-map', `${origIndex}:${idx}`])
       ];
       if (chaptersPath){
         // Computed from the actual current input count rather than a
@@ -3469,11 +3683,13 @@ clip.set_output()
     if (chaptersPath) cleanupPaths.push(chaptersPath);
     if (dvRpuPath) cleanupPaths.push(dvRpuPath);
     if (hdr10PlusMetaPath) cleanupPaths.push(hdr10PlusMetaPath);
+    cleanupPaths.push(...pgsOcrConvertedPaths);
     return {
       id: jobId, label, filePath, outPath,
       stages: [
         ...preStages,
-        { name: 'Mux final file', args, totalDuration: videoDuration, cleanup: cleanupPaths }
+        ...pgsOcrStages,
+        { name: 'Mux final file', args, pgsSrtPaths: pgsOcrConvertedPaths, pgsSrtStretchRatio: getSrtConformStretchRatio(), totalDuration: videoDuration, cleanup: cleanupPaths }
       ],
       currentStage: 0,
       totalDuration: videoDuration,
@@ -3486,6 +3702,26 @@ clip.set_output()
   // all before, so a chapters temp file from this path was never
   // deleted regardless of whether the job succeeded, failed, or was
   // stopped — not something specific to the Stop button.
+  //
+  // Real gap found and fixed per direct request: this path previously
+  // returned a plain single-stage job with no way to run PGS OCR first,
+  // meaning SDR->HDR and plain HDR10 conversions (which have no
+  // pre-stages and land here) never got subtitle OCR at all. Now
+  // conditionally becomes a multi-stage job (OCR stages, then the mux)
+  // whenever there are PGS tracks to convert, keeping the original
+  // simple single-stage shape when there's nothing to convert.
+  if (pgsOcrStages.length > 0){
+    return {
+      id: jobId, label, filePath, outPath,
+      stages: [
+        ...pgsOcrStages,
+        { name: 'Mux final file', args, pgsSrtPaths: pgsOcrConvertedPaths, pgsSrtStretchRatio: getSrtConformStretchRatio(), totalDuration: videoDuration, cleanup: [...(chaptersPath ? [chaptersPath] : []), ...pgsOcrConvertedPaths] }
+      ],
+      currentStage: 0,
+      totalDuration: videoDuration,
+      status: 'pending'
+    };
+  }
   return { id: jobId, label, filePath, outPath, args, totalDuration: videoDuration, status: 'pending',
     cleanup: chaptersPath ? [chaptersPath] : [] };
 }
@@ -3581,10 +3817,24 @@ function renderQueue(){
     const removeBtn = j.status === 'pending'
       ? `<button onclick="removeFromQueue('${j.id}')" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:.9rem">✕</button>`
       : '';
-    return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:#161c2a;border-radius:6px;margin-bottom:6px;font-size:.78rem;">
-      <span>${j.label} → ${j.outPath.split(/[\\/]/).pop()}</span>
-      <span style="color:${statusColor};font-weight:600;text-transform:uppercase;font-size:.68rem;">${j.status}</span>
-      ${removeBtn}
+    // Real bug fixed: the failure reason used to only exist in a
+    // transient status line the NEXT job's own message immediately
+    // overwrites - in a multi-job queue this made every failure except
+    // possibly the very last one completely invisible, with no error
+    // shown anywhere. Shown persistently right here now, directly on
+    // the failed job itself, regardless of what runs after it.
+    const failReasonHtml = (j.status === 'failed' && j.failReason)
+      ? `<div style="color:var(--red);font-size:.7rem;margin-top:4px;word-break:break-word;">${j.failReason}</div>`
+      : '';
+    return `<div style="display:flex;flex-direction:column;padding:8px 10px;background:#161c2a;border-radius:6px;margin-bottom:6px;font-size:.78rem;">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <span>${j.label} → ${j.outPath.split(/[\\/]/).pop()}</span>
+        <span style="display:flex;align-items:center;gap:8px;">
+          <span style="color:${statusColor};font-weight:600;text-transform:uppercase;font-size:.68rem;">${j.status}</span>
+          ${removeBtn}
+        </span>
+      </div>
+      ${failReasonHtml}
     </div>`;
   }).join('');
 }
@@ -3784,10 +4034,63 @@ async function processNextInQueue(){
             totalDuration: stage.totalDuration, totalOutputFrames: stage.totalOutputFrames, jobId: next.id
           });
         }
-      } else if (stage.isMkvmerge){
+      } else if (stage.isSpawnTool){
+        let finalToolArgs = stage.toolArgs;
+        // Diagnostic logging added after two rounds of code tracing found
+        // no obvious bug by inspection - this will directly show whether
+        // srtPaths is genuinely empty at dispatch time, or whether it has
+        // entries but checkFileExists is failing on files that do exist,
+        // instead of guessing further.
+        console.log('[mkvmerge srt filter] stage.srtPaths:', stage.srtPaths);
+        if (stage.srtPaths && stage.srtPaths.length > 0){
+          const existingSrtArgs = [];
+          for (const srtPath of stage.srtPaths){
+            const check = await window.electronAPI.checkFileExists({ path: srtPath }).catch((err) => { console.log('[mkvmerge srt filter] checkFileExists threw for', srtPath, err); return { exists: false }; });
+            console.log('[mkvmerge srt filter]', srtPath, '-> exists:', check && check.exists, 'size:', check && check.size);
+            // Real bug found via a real mkvmerge error: "type of file
+            // could not be recognized" - PgsToSrt doesn't write a truly
+            // empty (0-byte) file for a track with no content, confirmed
+            // via a real log showing it writes a tiny 4-byte placeholder
+            // instead (likely just a byte-order mark) - the earlier
+            // "size > 0" check let this slip through since 4 > 0. Real
+            // subtitle content in the same log ranged 192-777 bytes;
+            // raised the floor well clear of the placeholder with large
+            // margin below the smallest real file actually observed.
+            if (check && check.exists && check.size > 20){
+              if (stage.srtStretchRatio !== null && stage.srtStretchRatio !== undefined){
+                existingSrtArgs.push('--sync', `0:0,${stage.srtStretchRatio}`);
+              }
+              existingSrtArgs.push(srtPath);
+            }
+          }
+          finalToolArgs = [...stage.toolArgs, ...existingSrtArgs];
+          console.log('[mkvmerge srt filter] final srt args added:', existingSrtArgs);
+        }
         result = await window.electronAPI.runToolSimple({
-          toolPath: stage.toolPath, args: stage.toolArgs, jobId: next.id
+          toolPath: stage.toolPath, args: finalToolArgs, jobId: next.id
         });
+        // Definitive verification added to directly confirm (not guess)
+        // whether an extracted .sup file genuinely has real content or
+        // is empty/near-empty - real bug hunt where every checkFileExists
+        // call for 22 converted srt files came back false despite every
+        // PgsToSrt run reporting success, most likely explained by this
+        // specific clip window genuinely having zero PGS subtitle data
+        // for any track, not a code bug.
+        if (stage.verifyOutputPath){
+          const sizeCheck = await window.electronAPI.checkFileExists({ path: stage.verifyOutputPath }).catch(() => null);
+          console.log(`[pgs extract verify] ${stage.verifyOutputPath} -> exists: ${sizeCheck && sizeCheck.exists}, size: ${sizeCheck && sizeCheck.size} bytes`);
+        }
+        // Real gap found and fixed: mkvmerge (unlike ffmpeg/NVEncC)
+        // writes its real diagnostic/error output to stdout, not
+        // stderr - confirmed via a real failure where this app's own
+        // UI reported "no error output captured" despite mkvmerge
+        // almost certainly having written a real reason to stdout.
+        // Merged in here so the existing failReason/formatFfmpegError
+        // logic (which only ever looks at stderr) picks it up
+        // correctly without needing its own separate stdout-awareness.
+        if (result && result.code !== 0 && result.stdout){
+          result = { ...result, stderr: (result.stderr ? result.stderr + '\n' : '') + result.stdout };
+        }
       } else if (stage.isChapterConvert){
         // Plain async IPC call, not a spawned process - converts this
         // app's FFMETADATA1 chapters into mkvmerge's own chapter format
@@ -3809,8 +4112,53 @@ async function processNextInQueue(){
         const stageExecutable = toolPathFields[stage.tool]
           ? document.getElementById(toolPathFields[stage.tool]).value.trim()
           : ffmpeg;
+        // Real gap found and fixed per direct request: extends the same
+        // verify-then-attach pattern already used for the mkvmerge path
+        // to the standard ffmpeg mux, so SDR->HDR and plain HDR10
+        // conversions (which use this path, not mkvmerge) also get PGS
+        // OCR subtitles included instead of losing them silently.
+        // -itsscale <ratio> is ffmpeg's own per-input timestamp scale
+        // option - the direct equivalent of mkvmerge's --sync stretch
+        // factor, applied before the -i it affects.
+        //
+        // Real bug caught via direct testing before shipping: inserting
+        // the new -i/-map flags right before the output path (rather
+        // than right after the existing -i and -map groups
+        // respectively) made ffmpeg exit 234 (invalid map options).
+        // Confirmed via a direct spawn test that the correct insertion
+        // points are immediately after the last existing -i pair (for
+        // new inputs) and immediately after the last existing -map pair
+        // (for new maps) - matches ffmpeg's own conventional argument
+        // ordering (all -i first, then all -map/codec options, then
+        // output), verified working end-to-end before shipping.
+        let finalStageArgs = stage.args;
+        if (stage.pgsSrtPaths && stage.pgsSrtPaths.length > 0){
+          const existingInputCount = stage.args.filter(a => a === '-i').length;
+          const newInputArgs = [];
+          const newMapArgs = [];
+          let nextInputIdx = existingInputCount;
+          for (const srtPath of stage.pgsSrtPaths){
+            const check = await window.electronAPI.checkFileExists({ path: srtPath }).catch(() => ({ exists: false }));
+            if (check && check.exists && check.size > 20){
+              if (stage.pgsSrtStretchRatio !== null && stage.pgsSrtStretchRatio !== undefined){
+                newInputArgs.push('-itsscale', String(stage.pgsSrtStretchRatio));
+              }
+              newInputArgs.push('-i', srtPath);
+              newMapArgs.push('-map', `${nextInputIdx}:0`);
+              nextInputIdx++;
+            }
+          }
+          if (newInputArgs.length > 0){
+            const lastIIdx = stage.args.lastIndexOf('-i');
+            const inputInsertPoint = lastIIdx + 2;
+            const withInputs = [...stage.args.slice(0, inputInsertPoint), ...newInputArgs, ...stage.args.slice(inputInsertPoint)];
+            const lastMapIdx = withInputs.lastIndexOf('-map');
+            const mapInsertPoint = lastMapIdx + 2;
+            finalStageArgs = [...withInputs.slice(0, mapInsertPoint), ...newMapArgs, ...withInputs.slice(mapInsertPoint)];
+          }
+        }
         result = await window.electronAPI.runFFmpegWithProgress({
-          ffmpeg: stageExecutable, args: stage.args, totalDuration: stage.totalDuration, jobId: next.id
+          ffmpeg: stageExecutable, args: finalStageArgs, totalDuration: stage.totalDuration, jobId: next.id
         });
       }
       if (stage.fallbackArgs){
@@ -3890,7 +4238,16 @@ async function processNextInQueue(){
     if (fullEl) fullEl.style.display = 'none';
   } else {
     next.status = 'failed';
-    setStatus(`✖ Failed: ${next.label} — ${formatFfmpegError(finalResult.stderr)}`, 'red');
+    // Real bug fixed: the failure reason only ever lived in this
+    // transient status line, which the NEXT job's own status message
+    // (success or failure) immediately overwrites - in a multi-job
+    // queue, this meant every failure except possibly the very last one
+    // was completely invisible with no indication anywhere of why,
+    // confirmed via a real report of exactly this. Stored on the job
+    // itself now so it's permanently visible in the queue list
+    // regardless of how many other jobs run afterward.
+    next.failReason = formatFfmpegError(finalResult.stderr);
+    setStatus(`✖ Failed: ${next.label} — ${next.failReason}`, 'red');
   }
   currentJobId = null;
   renderQueue();
@@ -3975,6 +4332,7 @@ function applyDefaultPaths(){
     vspipePath: DEFAULT_PATHS.vspipe314,
     dovToolPath: DEFAULT_PATHS.doviTool,
     mkvmergePath: DEFAULT_PATHS.mkvmerge,
+    pgsToSrtPath: DEFAULT_PATHS.pgsToSrt,
     hdr10plusToolPath: DEFAULT_PATHS.hdr10plusTool
   };
   for (const [id, value] of Object.entries(map)){
