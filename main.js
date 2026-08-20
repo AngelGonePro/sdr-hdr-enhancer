@@ -116,7 +116,7 @@ ipcMain.handle('get-video-info', async (event, payload) => {
 
     const args = [
       '-v', 'error',
-      '-show_entries', 'stream=index,width,height,r_frame_rate,codec_type,channels,color_transfer,codec_name,pix_fmt,profile',
+      '-show_entries', 'stream=index,width,height,r_frame_rate,codec_type,channels,color_transfer,codec_name,pix_fmt,profile,start_time',
       '-show_entries', 'stream_tags=language,title',
       '-show_entries', 'format=duration',
       '-of', 'json',
@@ -149,6 +149,7 @@ ipcMain.handle('get-video-info', async (event, payload) => {
           frameRate: s.r_frame_rate,
           colorTransfer: s.color_transfer,
           pixFmt: s.pix_fmt,
+          startTime: s.start_time !== undefined ? parseFloat(s.start_time) : 0,
           title: (s.tags && s.tags.title) || null
         }));
         const videoStream = videoStreams[0]; // first, for backward-compatible fields below
@@ -158,6 +159,7 @@ ipcMain.handle('get-video-info', async (event, payload) => {
           channels: s.channels,
           profile: s.profile || null,
           language: (s.tags && s.tags.language) || 'und',
+          startTime: s.start_time !== undefined ? parseFloat(s.start_time) : 0,
           title: (s.tags && s.tags.title) || null
         }));
         const subtitleStreams = streams.filter(s => s.codec_type === 'subtitle').map(s => ({
@@ -1164,6 +1166,79 @@ ipcMain.handle('convert-chapters-to-mkvmerge', async (event, payload) => {
   }
 });
 
+// Native NVEncC execution - confirmed via a real, direct user test that
+// NVEncC's own --avhw decode reader keeps everything in GPU memory the
+// whole time (decode, crop, chroma upsample to 4:4:4, encode), avoiding
+// the CPU<->GPU round-trip ffmpeg's pipe-based approach requires. Real
+// numbers from that test: 53.80fps at 2.24x realtime (vs. well under 1x
+// via the ffmpeg-piped path), CPU at 0.5%, NVENC encode engine at 93.5%
+// (finally doing real, saturated work instead of sitting idle waiting on
+// a slow CPU-side conversion) - genuinely different mechanism from
+// scale_cuda (confirmed broken for this exact conversion) and libplacebo
+// (confirmed real color bug), and this one is directly hardware-verified
+// working, not just researched. Single process, no pipe - much simpler
+// than run-piped-encode above. Reuses the same generic percentage-
+// parsing pattern already proven there for external tools whose exact
+// progress format isn't testable from this environment.
+ipcMain.handle('run-nvencc-native', async (event, payload) => {
+  return new Promise((resolve) => {
+    const toolPath = payload.toolPath;
+    const args = payload.args || [];
+    const jobId = payload.jobId || null;
+
+    console.log("\n===== NVENCC NATIVE START =====\n");
+    console.log("tool:", toolPath);
+    console.log("args:", args);
+    console.log("\n================================\n");
+
+    let proc;
+    try {
+      proc = spawn(toolPath, args, { windowsHide: true });
+    } catch (err) {
+      resolve({ code: -1, stdout: "", stderr: String(err && err.message || err) });
+      return;
+    }
+
+    if (jobId) activeProcesses.set(jobId, proc);
+
+    let stderr = "";
+    const startTime = Date.now();
+    let lastReportedPercent = 0;
+    proc.stderr.on("data", d => {
+      const text = d.toString();
+      stderr = appendBounded(stderr, text);
+      const percentMatch = text.match(/(\d+(?:\.\d+)?)\s*%/);
+      const elapsedSec = (Date.now() - startTime) / 1000;
+      let percent = lastReportedPercent;
+      if (percentMatch) {
+        const parsed = parseFloat(percentMatch[1]);
+        if (parsed >= lastReportedPercent) percent = parsed;
+      }
+      lastReportedPercent = percent;
+      event.sender.send('ffmpeg-progress', {
+        percent, currentSec: elapsedSec, totalDuration: payload.totalDuration || 0, speed: 0,
+        etaSec: null, done: false, imprecise: !percentMatch
+      });
+    });
+    let stdout = "";
+    proc.stdout.on("data", d => { stdout = appendBounded(stdout, d.toString()); });
+
+    proc.on("close", code => {
+      if (jobId) activeProcesses.delete(jobId);
+      // NVEncC (unlike ffmpeg) writes its actual summary/error info to
+      // stdout as well as stderr in some cases - always log both here,
+      // matching the same "always log output" fix already applied to
+      // run-tool-simple, rather than only on failure.
+      console.log(`[nvencc native finished] code=${code}${stdout ? ' stdout=' + stdout.slice(0, 1000) : ''}${stderr ? ' stderr=' + stderr.slice(0, 500) : ''}`);
+      resolve({ code, stdout, stderr, killed: code === null });
+    });
+    proc.on("error", err => {
+      if (jobId) activeProcesses.delete(jobId);
+      resolve({ code: -1, stdout: "", stderr: String(err && err.message || err) });
+    });
+  });
+});
+
 ipcMain.handle('run-tool-simple', async (event, payload) => {
   return new Promise((resolve) => {
     const toolPath = payload.toolPath;
@@ -1200,7 +1275,13 @@ ipcMain.handle('run-tool-simple', async (event, payload) => {
       // via a real failure showing code=2 with zero stderr logged,
       // hiding mkvmerge's real error message entirely. Logging stdout
       // too now, specifically on a non-zero exit.
-      const outputForLog = code !== 0 ? `${stdout ? ' stdout=' + stdout.slice(0, 1000) : ''}${stderr ? ' stderr=' + stderr.slice(0, 500) : ''}` : '';
+      // Real gap found: this only logged output on a non-zero exit code,
+      // but a tool can genuinely exit 0 while silently doing nothing
+      // useful (confirmed real: PgsToSrt consistently exits 0 without
+      // ever producing its output file) - any diagnostic message it
+      // prints on its own stdout in that case was completely invisible.
+      // Always logs output now when present, regardless of exit code.
+      const outputForLog = `${stdout ? ' stdout=' + stdout.slice(0, 1000) : ''}${stderr ? ' stderr=' + stderr.slice(0, 500) : ''}`;
       console.log(`[tool run finished] code=${code}${outputForLog}`);
       resolve({ code, stdout, stderr });
     });
