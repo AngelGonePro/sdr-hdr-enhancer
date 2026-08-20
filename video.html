@@ -223,7 +223,11 @@
       the generic default blind.
     </div>
     <div class="ti on" id="tog-444-intermediate" onclick="toggle(this)" style="margin-top:10px"><div class="sw"></div><div class="ti-txt">Process HDR expansion in 4:4:4, output stays whatever the encoder normally uses — ON by default. Researched directly: applying a nonlinear transfer function (exactly what the PQ/HDR conversion above does) to already-subsampled 4:2:0 chroma reconstructs measurably differently than applying it at full chroma resolution first — most noticeable in saturated colors, which this source's own saturation boost specifically pushes toward. Upsamples to 4:4:4 before the gamma/saturation/PQ conversion, downsamples back afterward — final file's chroma subsampling is unchanged either way, so this has no compatibility or hardware dependency, unlike the output toggle below.</div></div>
-    <div class="ti" id="tog-444-output" onclick="toggle(this); updateEncoderUI();" style="margin-top:8px"><div class="sw"></div><div class="ti-txt">Output the final file itself in 4:4:4 (experimental) — OFF by default. The toggle above already captures the real benefit (better precision during the actual PQ/HDR color transform) without this one's risk — this toggle only helps if your <em>source</em> has real 4:2:2/4:4:4 chroma detail to begin with, which no source discussed in building this tool has had, so it's a larger file for identical color information plus real playback risk for no upside in that case. NVIDIA's decode hardware genuinely supports 4:4:4 HEVC decode (confirmed directly from NVIDIA's own Turing announcement), but decode throughput for it isn't unlimited — a resolution-dependent ceiling that sits closer at 4K than 1080p, confirmed this is a real, unresolved risk at 4K specifically even after fixing NVEncC's own --level auto bug (this toggle already applies the fix: explicit level/tier 6.2/High instead of auto-detection). Same generation requirement applies to Intel — see the alert above when Intel is selected. AMD has no 4:4:4 support in any current GPU at all and this toggle is disabled outright when AMD is selected. libx265 (CPU) supports 4:4:4 fully regardless of hardware generation, with no decode-throughput ceiling to worry about since there's no dedicated decode silicon involved.<br><br><strong>Real bug found and fixed via direct measurement, not assumed:</strong> 4:4:4 carries exactly 2x the raw data volume of 4:2:0 at the same resolution (confirmed directly: full-resolution chroma on both planes vs quarter-resolution — measured 2.000x precisely, matching HEVC's own spec exactly). The bitrate/buffer settings used to be identical regardless of this toggle, forcing the encoder to represent twice the data within the same bit budget — exactly what caused a real report of visibly worse blocking and color reproduction specifically when this toggle was on. Fixed: bitrate target, max-bitrate, and VBV buffer size now all double when this toggle is active, matching the real 2x multiplier HEVC's own spec defines for 4:4:4 profiles (which this app's level/tier choice below already anticipated, but had never actually been applied to the real rate-control values until now).<br><br><strong>Chroma priority, NVIDIA only - confirmed via source-level research, not assumed:</strong> a separate real report (a subtle near-black warm color tint visible in 4:2:0 output but missing in 4:4:4) traced to `--chroma-qp-offset` defaulting to 0 (chroma gets equal QP priority to luma) - 4:2:0's own chroma subsampling inherently reinforces a weak, spatially-consistent tint through averaging before the encoder ever sees it; 4:4:4 has no such protection. Verified directly in NVEncC's own source code (NVEncCore.cpp) that this flag maps straight to NVIDIA's native NVENC API parameters (cbQPIndexOffset/crQPIndexOffset), and confirmed a live NVEncC session log showing the real default ("QP Offset cb:0 cr:0") - this is genuine, first-party-confirmed behavior, not a guess. Added `--chroma-qp-offset -2` for 4:4:4 output specifically, NVEncC only.<br><br><strong>Extended to 4:2:0 too, and confirmed safe for already-HDR passthrough - both specifically researched, not assumed:</strong> x264's own documented defaults are -2 for 4:2:0 and -6 for 4:4:4 - meaning chroma priority is a sensible baseline for regular 4:2:0 encoding too, not something unique to 4:4:4. NVEncC's own neutral 0 default doesn't replicate that smarter behavior on its own, so this now applies unconditionally for NVEncC regardless of chroma output mode. On whether this could make already-HDR passthrough worse: a real technical document on HDR/WCG chroma QP determination confirms negative chroma offsets are an established, validated technique specifically for HDR content ("verified that visual quality is better or similar, at same or lower bitrate"). That same source quantifies exactly why the SDR-conversion case benefits most specifically: converting BT.709 into a BT.2020 container (this app's own SDR->HDR pipeline) mathematically reduces the maximum available chroma magnitude before the encoder ever sees it (Cr drops from 0.5 to 0.28, Cb from 0.5 to 0.44) - already-HDR passthrough is natively BT.2020 already and skips that whole transform (confirmed via `buildHdrPixelFilters()`'s own early return for that case), so it doesn't have that specific compounding cause, but the general HDR chroma-QP benefit still applies. Combined with this app's generous VBR ceiling (not tight CBR), the realistic effect is a modestly higher achieved bitrate, not a luma-quality tradeoff - no real mechanism found by which this could make already-HDR conversion worse.<br><br><strong>Checked the other GPU vendors specifically, since this fix is NVIDIA-only:</strong> extensive research into QSVEncC's (Intel) own documentation and real user command examples found no chroma-specific QP offset equivalent at all - its own `--qp-offset` is confirmed to be a completely different, unrelated parameter (temporal pyramid reference-layer QP, not chroma/luma balance). This app's own code shares the same toolArgs construction between NVEncC and QSVEncC for other settings, so this was a real, catchable risk - sending NVIDIA's flag to QSVEncC could have made the encode fail outright on an unrecognized option, now explicitly scoped to NVEncC only to prevent that. AMD/VCEEncC doesn't support 4:4:4 at all (already covered above), so this question doesn't apply there. Bottom line: Intel 4:4:4 output doesn't currently have an equivalent fix available for this specific chroma-priority issue - the underlying hardware/API may simply not expose this level of control the way NVIDIA's does.</div></div>
+    <div class="ti" id="tog-444-output" onclick="select444OutputMode('standard')" style="margin-top:8px"><div class="sw"></div><div class="ti-txt">Output the final file itself in 4:4:4 (experimental) — OFF by default. The toggle above already captures the real benefit (better precision during the actual PQ/HDR color transform) without this one's risk — this toggle only helps if your <em>source</em> has real 4:2:2/4:4:4 chroma detail to begin with, which no source discussed in building this tool has had, so it's a larger file for identical color information plus real playback risk for no upside in that case. NVIDIA's decode hardware genuinely supports 4:4:4 HEVC decode (confirmed directly from NVIDIA's own Turing announcement), but decode throughput for it isn't unlimited — a resolution-dependent ceiling that sits closer at 4K than 1080p, confirmed this is a real, unresolved risk at 4K specifically even after fixing NVEncC's own --level auto bug (this toggle already applies the fix: explicit level/tier 6.2/High instead of auto-detection). Same generation requirement applies to Intel — see the alert above when Intel is selected. AMD has no 4:4:4 support in any current GPU at all and this toggle is disabled outright when AMD is selected. libx265 (CPU) supports 4:4:4 fully regardless of hardware generation, with no decode-throughput ceiling to worry about since there's no dedicated decode silicon involved.<br><br><strong>Real bug found and fixed via direct measurement, not assumed:</strong> 4:4:4 carries exactly 2x the raw data volume of 4:2:0 at the same resolution (confirmed directly: full-resolution chroma on both planes vs quarter-resolution — measured 2.000x precisely, matching HEVC's own spec exactly). The bitrate/buffer settings used to be identical regardless of this toggle, forcing the encoder to represent twice the data within the same bit budget — exactly what caused a real report of visibly worse blocking and color reproduction specifically when this toggle was on. Fixed: bitrate target, max-bitrate, and VBV buffer size now all double when this toggle is active, matching the real 2x multiplier HEVC's own spec defines for 4:4:4 profiles (which this app's level/tier choice below already anticipated, but had never actually been applied to the real rate-control values until now).<br><br><strong>Chroma priority, NVIDIA only - confirmed via source-level research, not assumed:</strong> a separate real report (a subtle near-black warm color tint visible in 4:2:0 output but missing in 4:4:4) traced to `--chroma-qp-offset` defaulting to 0 (chroma gets equal QP priority to luma) - 4:2:0's own chroma subsampling inherently reinforces a weak, spatially-consistent tint through averaging before the encoder ever sees it; 4:4:4 has no such protection. Verified directly in NVEncC's own source code (NVEncCore.cpp) that this flag maps straight to NVIDIA's native NVENC API parameters (cbQPIndexOffset/crQPIndexOffset), and confirmed a live NVEncC session log showing the real default ("QP Offset cb:0 cr:0") - this is genuine, first-party-confirmed behavior, not a guess. Added `--chroma-qp-offset -2` for 4:4:4 output specifically, NVEncC only.<br><br><strong>Extended to 4:2:0 too, and confirmed safe for already-HDR passthrough - both specifically researched, not assumed:</strong> x264's own documented defaults are -2 for 4:2:0 and -6 for 4:4:4 - meaning chroma priority is a sensible baseline for regular 4:2:0 encoding too, not something unique to 4:4:4. NVEncC's own neutral 0 default doesn't replicate that smarter behavior on its own, so this now applies unconditionally for NVEncC regardless of chroma output mode. On whether this could make already-HDR passthrough worse: a real technical document on HDR/WCG chroma QP determination confirms negative chroma offsets are an established, validated technique specifically for HDR content ("verified that visual quality is better or similar, at same or lower bitrate"). That same source quantifies exactly why the SDR-conversion case benefits most specifically: converting BT.709 into a BT.2020 container (this app's own SDR->HDR pipeline) mathematically reduces the maximum available chroma magnitude before the encoder ever sees it (Cr drops from 0.5 to 0.28, Cb from 0.5 to 0.44) - already-HDR passthrough is natively BT.2020 already and skips that whole transform (confirmed via `buildHdrPixelFilters()`'s own early return for that case), so it doesn't have that specific compounding cause, but the general HDR chroma-QP benefit still applies. Combined with this app's generous VBR ceiling (not tight CBR), the realistic effect is a modestly higher achieved bitrate, not a luma-quality tradeoff - no real mechanism found by which this could make already-HDR conversion worse.<br><br><strong>Checked the other GPU vendors specifically, since this fix is NVIDIA-only:</strong> extensive research into QSVEncC's (Intel) own documentation and real user command examples found no chroma-specific QP offset equivalent at all - its own `--qp-offset` is confirmed to be a completely different, unrelated parameter (temporal pyramid reference-layer QP, not chroma/luma balance). This app's own code shares the same toolArgs construction between NVEncC and QSVEncC for other settings, so this was a real, catchable risk - sending NVIDIA's flag to QSVEncC could have made the encode fail outright on an unrecognized option, now explicitly scoped to NVEncC only to prevent that. AMD/VCEEncC doesn't support 4:4:4 at all (already covered above), so this question doesn't apply there. Bottom line: Intel 4:4:4 output doesn't currently have an equivalent fix available for this specific chroma-priority issue - the underlying hardware/API may simply not expose this level of control the way NVIDIA's does.</div></div>
+    <div class="ti" id="tog-nvenc-native-444" onclick="select444OutputMode('nvenc')" style="margin-top:8px"><div class="sw"></div><div class="ti-txt"><strong>Native NVEncC decode for 4:4:4 (replaces only the video encode step) — OFF by default. Hardware-confirmed working, not just researched.</strong> Requires NVEncC as the encoder and an already-HDR source. This toggle alone turns on 4:4:4 for this path - the main "Output the final file itself in 4:4:4" toggle above is for the standard ffmpeg path's other options and doesn't need to also be on.<br><br><strong>Architecture, corrected per direct request after an earlier version wrongly replaced the whole pipeline:</strong> this only swaps out the single video-encode stage - NVEncC decodes/crops/chroma-converts/encodes via its own native `--avhw` reader instead of receiving piped, pre-converted frames from ffmpeg, writing to the exact same temp file the standard path already uses. Everything else in this app runs completely unchanged and untouched: the full audio processing chain (Integrated Engine DPLII downmix + 7.1 Vorbis upmix, or plain copy, whichever you have selected), PGS OCR (subtitles still convert to real SRT text, same as always), and chapters all work exactly as they do on the standard path, because they genuinely are the standard path - only the one video-encode stage differs. <strong>Framerate Conform now works here too</strong> - confirmed via NVEncC's own `--fps` flag (a real, documented option for its `--avhw` reader, the direct equivalent of the standard path's `-r` override), applied using the exact same target rate this app's Conform toggle already computes elsewhere - video, audio, subtitles, and chapters all conform to the same shortened runtime together, regardless of which path encodes the video.<br><br><strong>Why this exists:</strong> the standard path pipes video through ffmpeg first (crop, chroma conversion), which showed a real, measured bottleneck - GPU only 40-45% utilized, meaning the encoder sat waiting on a slow CPU-side conversion step. NVEncC's own `--avhw` reader keeps decode/crop/chroma-convert entirely in GPU memory instead.<br><br><strong>Confirmed directly on real hardware</strong> (RTX 4070, this exact scenario): 53.80fps at 2.24x realtime encoding speed (vs. well under 1x via the standard path) - roughly 50-55 minutes for a 2-hour movie instead of several hours. CPU at 0.5%, NVENC's own encode engine at 93.5% - genuinely GPU-bound, not starved. Output file verified directly: correct `yuv444p10le`, correct HDR10 colorimetry, Dolby Vision RPU copied correctly, and a real extracted/tone-mapped frame showed completely natural colors matching the source exactly.<br><br><strong>Why this doesn't (yet) work for SDR→HDR:</strong> NVEncC's native SDR-to-HDR options (`--vpp-libplacebo-tonemapping` inverse tone mapping, and a newer AI `--vpp-onnx` model) don't replicate this app's own specific, validated gamma/saturation transform, and the libplacebo option shares the exact library that already showed a real color bug on this user's hardware in an earlier attempt. This toggle stays scoped to already-HDR sources until there's a validated way to do that natively.<br><br><strong>What IS preserved/applied here:</strong> real embedded HDR10 metadata and Dolby Vision RPU are copied straight from the source (not regenerated), the same `--chroma-qp-offset -2`/AQ fix that solved an earlier color-halo issue on this content class is applied, and Denoise/Sharpen use NVEncC's own native `--vpp-hqdn3d`/`--vpp-unsharp` filters at default strength if those toggles are on (a genuinely different parameter system than ffmpeg's own filters, so exact strength may differ slightly - same concept, not a guaranteed identical match).</div></div>
+    <div class="ti" id="tog-qsvenc-native-444" onclick="select444OutputMode('qsvenc')" style="margin-top:8px"><div class="sw"></div><div class="ti-txt"><strong>Native QSVEncC decode for 4:4:4 (Intel, same architecture as the NVIDIA toggle above) — OFF by default. GENUINELY UNVERIFIED — no Intel GPU available to test this from where these fixes are built.</strong> Requires QSVEncC as the encoder and an already-HDR source. Same only-swap-the-video-stage architecture as the NVIDIA toggle - see that toggle's own text for the full reasoning, including exactly what stays untouched (audio processing chain, PGS OCR, chapters, Framerate Conform).<br><br><strong>Why this is here:</strong> confirmed via multiple real QSVEncC diagnostic logs and its own documentation that it uses the identical underlying architecture as NVEncC above - a native `--avhw` GPU decode reader with its own `cspconv` chroma conversion, keeping everything in GPU memory. One of those real logs showed QSVEncC successfully building `main444` output directly. This is the same class of fix as the NVIDIA toggle, built the same way, but genuinely not hardware-tested.<br><br><strong>Test this on a short clip first, always</strong> - if it fails, the full error panel below will show exactly why, and turning this off returns you to the already-validated CPU/ffmpeg path with zero other changes. Same scope limits as the NVIDIA version. AMD/VCEEncC has no toggle here at all - confirmed via this app's own earlier research that AMD hardware doesn't support 4:4:4 encoding on any current GPU, so there's nothing this approach could do differently there.</div></div>
+    <div class="warn-box" id="nativeGpuSdrWarning" style="margin-top:8px;display:none">⚠ A native GPU 4:4:4 toggle above is on, but the currently selected video track is SDR, not already-HDR - this path only covers already-HDR sources (see either toggle's own text for why SDR→HDR isn't supported here yet). The standard ffmpeg-based pipeline will be used instead for this track, automatically and correctly, but without the native path's speed benefit. Select an already-HDR track, or turn the native toggle off if this file is staying SDR→HDR.</div>
+
     <div class="warn-box" id="tog444Warning" style="margin-top:8px;display:none"></div>
   </div>
 
@@ -254,12 +258,9 @@
       <div class="field"><label>dovi_tool Path</label>
         <input class="path-inp" type="text" id="dovToolPath" placeholder="C:\dovi_tool\dovi_tool.exe">
       </div>
-      <div class="field"><label>mkvmerge Path (MKVToolNix - required for the final mux when DV is active)</label>
-        <input class="path-inp" type="text" id="mkvmergePath" placeholder="C:\Program Files\MKVToolNix\mkvmerge.exe">
-      </div>
     </div>
     <div class="path-hint" id="mkvmergeSetupHint" style="margin-top:8px">
-      <strong>Setup:</strong> download MKVToolNix from <a href="https://mkvtoolnix.download/downloads.html#windows" target="_blank">mkvtoolnix.download</a> (the free installer includes mkvmerge.exe), install it, and set the path above to wherever it installed mkvmerge.exe (commonly <code>C:\Program Files\MKVToolNix\mkvmerge.exe</code>). Only needed when Dolby Vision preservation is on - every other feature in this app keeps using ffmpeg exactly as before.
+      <strong>Setup:</strong> download <code>dovi_tool</code> from <a href="https://github.com/quietvoid/dovi_tool/releases" target="_blank">github.com/quietvoid/dovi_tool/releases</a> (the Windows x86_64 zip), extract <code>dovi_tool.exe</code> somewhere permanent, and set the path above. Only needed when Dolby Vision preservation is on. mkvmerge's own path is set unconditionally near the top of this page now (Output section) since it's needed by several features beyond just Dolby Vision.
     </div>
 
 
@@ -567,6 +568,12 @@
   <div class="card">
     <label>FFmpeg Path</label>
     <input type="text" id="ffmpegPath">
+    <label style="margin-top:10px;display:block">MKVToolNix (mkvmerge) Path</label>
+    <input class="path-inp" type="text" id="mkvmergePath" placeholder="C:\Program Files\MKVToolNix\mkvmerge.exe">
+    <div class="path-hint" style="margin-top:8px">
+      <strong>Setup:</strong> download MKVToolNix from <a href="https://mkvtoolnix.download/downloads.html#windows" target="_blank">mkvtoolnix.download</a> (the free installer includes both mkvmerge.exe and mkvextract.exe), install it, and set the path above to wherever it installed mkvmerge.exe (commonly <code>C:\Program Files\MKVToolNix\mkvmerge.exe</code>) - mkvextract is auto-derived from this same path (same folder, filename swapped), no separate field needed.<br>
+      Used unconditionally by several features now, not just Dolby Vision: the final mux step whenever Dolby Vision/HDR10+ preservation is active, PGS subtitle OCR (mkvextract pulls each subtitle track for conversion), and the Native NVEncC/QSVEncC 4:4:4 paths' own mux stage. Moved here from a DV-only section it used to be hidden inside, per direct request that every external tool dependency have a discoverable UI field regardless of which feature happens to need it first.
+    </div>
     <div class="row" style="margin-top:10px">
       <div class="field">
         <label>Container</label>
@@ -731,6 +738,24 @@ function toggle(el){ el.classList.toggle('on'); }
 // closes that gap. References the centralized DEFAULT_PATHS object (top of
 // file) directly now, rather than a separate duplicate object - keeps every
 // default path in the one place per direct request.
+// Mutually exclusive per direct request: only one of the three real
+// 4:4:4 OUTPUT mechanisms (standard ffmpeg path, native NVEncC, native
+// QSVEncC) makes sense active at once - they're three different ways to
+// produce the same end result, not layerable options. tog-444-intermediate
+// ("Process HDR expansion in 4:4:4") is deliberately NOT part of this
+// group - it only affects internal color-transform precision, output
+// chroma subsampling is unchanged either way, so it's orthogonal to which
+// output mechanism is chosen and stays independently toggleable.
+function select444OutputMode(mode){
+  const ids = { standard: 'tog-444-output', nvenc: 'tog-nvenc-native-444', qsvenc: 'tog-qsvenc-native-444' };
+  const clicked = document.getElementById(ids[mode]);
+  const wasOn = clicked.classList.contains('on');
+  Object.values(ids).forEach(id => document.getElementById(id).classList.remove('on'));
+  if (!wasOn) clicked.classList.add('on');
+  updateEncoderUI();
+  updateNativeGpuSdrWarning();
+}
+
 function selectInterpMode(mode){
   const ids = { gpu: 'tog-motion-interp-gpu', 'gpu-trt': 'tog-motion-interp-gpu-trt', 'gpu-vk': 'tog-motion-interp-gpu-vk', mvtools: 'tog-motion-interp-mvtools', cpu: 'tog-motion-interp-cpu' };
   const clicked = document.getElementById(ids[mode]);
@@ -805,6 +830,7 @@ function toggleFpsConform(){
       .forEach(id => document.getElementById(id).classList.remove('disabled'));
     document.getElementById('targetFpsRow').style.display = '';
   }
+  updateNativeGpuSdrWarning();
 }
 
 // Called whenever an interpolation toggle turns on - greys out and force-
@@ -1309,6 +1335,24 @@ function onVideoTrackChange(){
   // Reuses the same get-duration handler built for audio track duration
   // detection, just pointed at the video track's own index instead.
   detectVideoTrackDuration(selected.value);
+  updateNativeGpuSdrWarning();
+}
+
+// Real gap found and fixed per direct question: neither native GPU 4:4:4
+// toggle had any visible feedback when it silently wouldn't apply (SDR
+// source, no already-HDR track selected) - buildJobFromCurrentSettings's
+// own isSelectedVideoTrackHDR() guard correctly falls through to the
+// standard pipeline in that case, but did so with zero indication to the
+// user, who could reasonably believe the fast native path was running
+// when the slower standard path silently took over instead. Checked
+// directly against the current track's own isSelectedVideoTrackHDR()
+// state (not assumed) - shows/hides a warning accordingly. Called on
+// both track change and encoder change, since either can affect whether
+// this applies.
+function updateNativeGpuSdrWarning(){
+  const warn = document.getElementById('nativeGpuSdrWarning');
+  const eitherNativeToggleOn = isOn('tog-nvenc-native-444') || isOn('tog-qsvenc-native-444');
+  if (warn) warn.style.display = (eitherNativeToggleOn && !isSelectedVideoTrackHDR()) ? 'block' : 'none';
 }
 
 async function detectVideoTrackDuration(streamIndex){
@@ -1853,6 +1897,7 @@ function updateEncoderUI(){
     }
   });
   update444Warning(finalEncoder);
+  updateNativeGpuSdrWarning();
 }
 
 // Researched directly per vendor rather than one generic caution — AMD is
@@ -2289,15 +2334,6 @@ function buildJobFromCurrentSettings(chaptersPath){
   const jobId = 'job_' + Date.now() + '_' + Math.random().toString(36).slice(2);
   const label = filePath.split(/[\\/]/).pop();
 
-  // External-tool encoding: ffmpeg does ALL filtering (crop/HDR/denoise/
-  // sharpen/fps) and pipes its output DIRECTLY into the external tool's
-  // stdin — no intermediate file. This replaces an earlier version that
-  // wrote an uncompressed Y4M temp file first, which was a real, serious
-  // bug caught on an actual full-length film: raw 10-bit video at this
-  // resolution runs ~136MB/second, so a feature-length movie needed
-  // several hundred GB of temp disk space and ran out partway through.
-  // Piping directly is also what these tools' own documentation
-  // recommends as normal usage, not a workaround invented here.
   const preStages = [];
   let videoSourcePath = filePath;
   let videoSourceMapArg = videoMapArg;
@@ -2610,7 +2646,16 @@ function buildJobFromCurrentSettings(chaptersPath){
     // target acting as a generous ceiling underneath max-bitrate rather
     // than the primary quality driver.
     const crfNum = parseInt(crf, 10) || 15;
-    const use444OutputEncode = isOn('tog-444-output');
+    // Real bug found and fixed: this previously only checked tog-444-
+    // output, but the native GPU toggles were made independent of that
+    // main toggle earlier (per direct request, since the main toggle is
+    // for the standard path's other options) - meaning toolArgs (which
+    // the native path reuses directly via toolArgs.slice(3)) never got
+    // told to use main444 profile unless tog-444-output was ALSO on,
+    // separately from the native toggle. Confirmed via a real user log:
+    // native toggle on, main toggle off, produced --profile main10 and
+    // 4:2:0 output despite the native toggle being explicitly for 4:4:4.
+    const use444OutputEncode = isOn('tog-444-output') || isOn('tog-nvenc-native-444') || isOn('tog-qsvenc-native-444');
     // Real bug found and fixed via direct measurement, not assumed: 4:4:4
     // carries exactly 2x the raw data volume of 4:2:0 at the same
     // resolution (confirmed directly: full-resolution chroma on both
@@ -2783,10 +2828,31 @@ function buildJobFromCurrentSettings(chaptersPath){
       // declaring less decoder resource requirement than 4:4:4 content
       // actually needs, causing exactly the kind of struggle a decoder
       // would show during the most demanding moments — high motion —
-      // even while nominally within its fps rating. Level 6.2/High tier
-      // is HEVC's own highest-defined level, comfortably covering the
-      // 100Mbps cap above even with the 4:4:4 multiplier applied.
-      toolArgs.push('--level', '6.2', '--tier', 'high');
+      // even while nominally within its fps rating.
+      //
+      // Real bug found and fixed: this was set to 6.2/High (HEVC's own
+      // highest-defined level, designed for 8K-class content) against a
+      // 100Mbps bitrate ceiling that existed earlier in this project -
+      // that ceiling has since been reduced to 54Mbps across several
+      // rounds of work, making 6.2 even more unnecessary now than when
+      // it was originally set.
+      //
+      // Made resolution-based per direct request instead of a single
+      // fixed value, since a level that's correctly-scoped for 4K would
+      // be wrong for 1080p (too high) or 8K (too low). Uses HEVC's own
+      // spec (Annex A Table A.1) max-luma-picture-size per level - the
+      // ".1" variant at each resolution tier (not ".0") since this app
+      // supports Framerate Upscale to 48/60fps, so levels need headroom
+      // for that even on 24fps source content.
+      const cropWNum = parseInt(document.getElementById('cropW').value, 10) || 0;
+      const cropHNum = parseInt(document.getElementById('cropH').value, 10) || 0;
+      const lumaSamples = cropWNum * cropHNum;
+      let hevcLevel;
+      if (lumaSamples <= 983040) hevcLevel = '3.1'; // up to ~720p
+      else if (lumaSamples <= 2228224) hevcLevel = '4.1'; // up to ~1080p, 60fps headroom
+      else if (lumaSamples <= 8912896) hevcLevel = '5.1'; // up to ~4K, 60fps headroom
+      else hevcLevel = '6.1'; // 8K and above, 60fps headroom
+      toolArgs.push('--level', hevcLevel, '--tier', 'high');
     }
     if (isOn('tog-hdr')){
       const hv = getHdrMetadataValues();
@@ -2967,12 +3033,69 @@ clip.set_output()
         totalDuration: videoDuration, cleanup: [vpyScriptPath, ffindexPath]
       };
     } else {
-      pipedStage = {
-        name: `${toolConfig.label} HDR10 encode (piped, no temp file)`,
-        piped: true,
-        ffmpegArgs: y4mArgs, toolPath, toolArgs,
-        totalDuration: videoDuration, cleanup: null
-      };
+      // Native GPU decode integration, per direct request to replace
+      // ONLY this one video-encode stage and leave the rest of this
+      // app's pipeline (audio processing chain, PGS OCR, mkvmerge
+      // subtitle/chapter handling below) completely untouched - a
+      // previous version replaced the WHOLE pipeline with a simplified
+      // one, which lost those features; this version instead swaps just
+      // the input mechanism on the SAME toolArgs already built above
+      // (with its already-correct level/HDR-metadata/chroma-QP-offset/
+      // bitrate settings) and outputs to the same tmpEncOutPath every
+      // other stage below already expects, so nothing downstream needs
+      // to know anything changed. Hardware-confirmed real numbers for
+      // NVEncC specifically: 53.80fps at 2.24x realtime vs. well under
+      // 1x via the standard y4m-pipe path (see the toggle's own text).
+      const useNativeGpuDecode = (isOn('tog-nvenc-native-444') && encoder === 'nvencc' || isOn('tog-qsvenc-native-444') && encoder === 'qsvencc')
+        && isSelectedVideoTrackHDR();
+      if (useNativeGpuDecode){
+        // --avhw's own --crop takes left,top,right,bottom pixel counts,
+        // not this app's width/height/x/y crop fields - convert between
+        // the two, confirmed via the exact syntax used in the user's
+        // own successful manual NVEncC test.
+        const nativeArgs = toolArgs.slice(3); // drop '--y4m','-i','-' - everything else (level/HDR metadata/bitrate/etc) is reused as-is
+        nativeArgs.unshift('--avhw', '--input', filePath);
+        if (document.getElementById('cropW').value && document.getElementById('cropH').value){
+          const cw = parseInt(document.getElementById('cropW').value, 10) || 0;
+          const ch = parseInt(document.getElementById('cropH').value, 10) || 0;
+          const cx = parseInt(document.getElementById('cropX').value, 10) || 0;
+          const cy = parseInt(document.getElementById('cropY').value, 10) || 0;
+          const selectedStreamInfo = lastVideoStreams.find(s => String(s.index) === videoTrackSel?.value) || lastVideoStreams[0] || {};
+          const srcW = parseInt(selectedStreamInfo.width, 10) || 0;
+          const srcH = parseInt(selectedStreamInfo.height, 10) || 0;
+          const right = Math.max(0, srcW - cx - cw);
+          const bottom = Math.max(0, srcH - cy - ch);
+          nativeArgs.splice(3, 0, '--crop', `${cx},${cy},${right},${bottom}`);
+        }
+        // Real gap fixed per direct request: Framerate Conform now
+        // applies here too, not just the standard ffmpeg-pipe path.
+        // Confirmed via multiple independent real sources (including a
+        // real rigaya/NVEnc GitHub issue - #17, "24p DVD video detected
+        // as 30p framerate" - using --fps 23.976 to fix exactly this
+        // class of framerate-relabeling problem) that NVEncC's own
+        // --avhw reader has its own --fps flag, the direct equivalent
+        // of the -r override the standard path already uses. Same
+        // conformTargetFps variable, same condition as the standard
+        // path uses elsewhere, so both conform identically to the same
+        // target rate.
+        if (isOn('tog-fps-conform') && conformTargetFps){
+          nativeArgs.push('--fps', String(conformTargetFps));
+        }
+        nativeArgs.push('--output', tmpEncOutPath);
+        pipedStage = {
+          name: `${toolConfig.label} native GPU decode+encode (no ffmpeg pipe)`,
+          isNvencNative: true,
+          toolPath, args: nativeArgs,
+          totalDuration: videoDuration, cleanup: null
+        };
+      } else {
+        pipedStage = {
+          name: `${toolConfig.label} HDR10 encode (piped, no temp file)`,
+          piped: true,
+          ffmpegArgs: y4mArgs, toolPath, toolArgs,
+          totalDuration: videoDuration, cleanup: null
+        };
+      }
     }
     preStages.push(pipedStage);
 
@@ -3043,14 +3166,24 @@ clip.set_output()
       mapArgs.push('-map', `${nextIndex}:${inp.stream}`);
       nextIndex++;
     }
-    if (subtitleSelections.length > 0){
+    // Real, confirmed bug fixed via a real user screenshot showing BOTH
+    // the original PGS tracks AND their OCR'd SRT conversions present in
+    // the same output file: this used to map the FULL subtitleSelections
+    // (text + PGS together) unconditionally, regardless of whether PGS
+    // OCR was also running and separately adding SRT versions of those
+    // same PGS tracks via pgsSrtPaths below. When OCR is actually
+    // converting a track, only its SRT version should end up in the
+    // output - map only textSubtitleSelections here in that case, same
+    // exclusion this app's mkvmerge-mux path already correctly applies.
+    const directSubtitleSelections = (isOn('tog-pgs-ocr') && pgsSubtitleSelections.length > 0) ? textSubtitleSelections : subtitleSelections;
+    if (directSubtitleSelections.length > 0){
       // Subtitles always come from the original file. If video source IS
       // the original file (no NVEncC redirect), reuse that same input
       // index instead of opening it twice.
       const videoIsOriginal = (videoSourcePath === filePath);
       const subInputIndex = videoIsOriginal ? 0 : nextIndex;
       if (!videoIsOriginal){ inputArgs.push('-i', filePath); nextIndex++; }
-      for (const idx of subtitleSelections) mapArgs.push('-map', `${subInputIndex}:${idx}`);
+      for (const idx of directSubtitleSelections) mapArgs.push('-map', `${subInputIndex}:${idx}`);
     }
     if (chaptersPath){
       // Metadata-only input — no stream map needed, just -map_metadata
@@ -3107,7 +3240,7 @@ clip.set_output()
     return null;
   }
 
-  function buildMkvmergeMuxArgs(videoPath, audioPath, finalOutPath, convertedChaptersPath, convertedSrtPaths){
+  function buildMkvmergeMuxArgs(videoPath, audioPath, finalOutPath, convertedChaptersPath, convertedSrtPaths, srtLanguages){
     const args = ['-o', finalOutPath];
     if (convertedChaptersPath) args.push('--chapters', convertedChaptersPath);
     args.push(videoPath, audioPath);
@@ -3190,7 +3323,7 @@ clip.set_output()
     // loop can verify each file's real existence immediately before
     // mkvmerge runs and skip any that genuinely don't exist, instead of
     // handing mkvmerge a path that was never created.
-    return { args, srtPaths: convertedSrtPaths || [], srtStretchRatio: getSrtConformStretchRatio() };
+    return { args, srtPaths: convertedSrtPaths || [], srtLanguages: srtLanguages || [], srtStretchRatio: getSrtConformStretchRatio() };
   }
 
   function buildVideoArgs(inputArgs, audioArgs, mapArgs, finalOutPath){
@@ -3299,6 +3432,56 @@ clip.set_output()
     return args;
   }
 
+  // Real bug fixed: this was previously declared separately inside both
+  // the integrated and standard audioMode branches below, but the
+  // standard branch's own declaration didn't cover code after that
+  // branch's closing brace (the "no pre-stages needed" fallthrough case
+  // further down) - a real ReferenceError for any SDR->HDR or plain
+  // HDR10 job with no special audio mixing, confirmed via a real error
+  // log. Declared once, here, before the branching, so every downstream
+  // path (integrated, standard, and the standard branch's own
+  // fallthrough) shares the same single declaration instead of each
+  // needing its own, easy-to-miss copy.
+  const sharedTmpDir = filePath.substring(0, Math.max(filePath.lastIndexOf('\\'), filePath.lastIndexOf('/')) + 1);
+  const pgsOcrStages = [];
+  const pgsOcrConvertedPaths = [];
+  // Real bug fixed: SRT files were never tagged with a language at all -
+  // confirmed via a real user screenshot showing every OCR'd subtitle
+  // track as "und" in the output. Tracks each SRT's source-track
+  // language alongside its path (looked up from detectedSubtitleStreams,
+  // which already holds this per the app's own track-detection code),
+  // so both mux consumers below can actually tag the language correctly
+  // instead of leaving mkvmerge/ffmpeg to default to undefined.
+  const pgsOcrConvertedLanguages = [];
+  if (isOn('tog-pgs-ocr') && pgsSubtitleSelections.length > 0){
+    const pgsToSrtPathVal = document.getElementById('pgsToSrtPath').value.trim();
+    const ocrLanguage = document.getElementById('pgsOcrLanguage').value.trim() || 'eng';
+    const mkvmergePathValForExtract = document.getElementById('mkvmergePath').value.trim();
+    const mkvextractPathVal = mkvmergePathValForExtract.replace(/mkvmerge(\.exe)?$/i, 'mkvextract$1');
+    pgsSubtitleSelections.forEach((tid, i) => {
+      const supPath = sharedTmpDir + '_tmp_pgsextract_' + tid + '_' + jobId + '.sup';
+      const srtOutPath = sharedTmpDir + '_tmp_pgsocr_' + tid + '_' + jobId + '.srt';
+      pgsOcrStages.push({
+        name: `Extract PGS subtitle track ${tid} for OCR`,
+        toolPath: mkvextractPathVal,
+        toolArgs: ['tracks', filePath, `${tid}:${supPath}`],
+        isSpawnTool: true,
+        verifyOutputPath: supPath,
+        totalDuration: 1, cleanup: null
+      });
+      pgsOcrStages.push({
+        name: `OCR-convert PGS subtitle track ${tid} to SRT`,
+        toolPath: pgsToSrtPathVal,
+        toolArgs: ['--input', supPath, '--output', srtOutPath, '--tesseractlanguage', ocrLanguage],
+        isSpawnTool: true,
+        totalDuration: 1, cleanup: [supPath]
+      });
+      pgsOcrConvertedPaths.push(srtOutPath);
+      const srcStream = detectedSubtitleStreams.find(s => String(s.index) === String(tid));
+      pgsOcrConvertedLanguages.push((srcStream && srcStream.language) || 'und');
+    });
+  }
+
   if (audioMode === 'integrated'){
     const trackSel = document.querySelector('input[name="integratedTrackSel"]:checked');
     if (!trackSel){ setStatus('Select a source track for the integrated engine first.', 'red'); return null; }
@@ -3358,7 +3541,27 @@ clip.set_output()
     const stage1FallbackFilterFinal = useDplII && plainDownmixFilter
       ? plainDownmixFilter.replace('[0:a]', `[0:${srcIndex}]`) : null;
 
-    const stage1ArgsFixed = ['-i', filePath, '-filter_complex',
+    // Real, confirmed bug fixed via direct measurement of a user-reported
+    // case: a clip's video track can start at a different point in the
+    // file's own timeline than its audio track (ffmpeg can only cut
+    // video cleanly at a keyframe, but audio at any sample - clipping a
+    // segment from a larger source routinely produces a small mismatch,
+    // confirmed directly on a real affected file: video start_time
+    // 0.918s, audio start_time 0.000s). This app's video pipeline
+    // discards per-frame timing entirely and treats the first frame it
+    // receives as time zero - silently erasing that original offset -
+    // but audio was never shifted to compensate, so its content stayed
+    // misaligned by the same amount in the output. Confirmed this is
+    // specific to ffmpeg-clipped segments, not full movies (both streams
+    // naturally start together there, so this evaluates to ~0 and does
+    // nothing). Skips the audio's extra lead-in so its content lines up
+    // with where video's content now begins.
+    const selectedVideoStreamForOffset = detectedVideoStreams.find(s => String(s.index) === videoTrackSel?.value) || detectedVideoStreams[0];
+    const selectedAudioStreamForOffset = detectedAudioStreams.find(s => String(s.index) === srcIndex);
+    const videoAudioStartOffset = ((selectedVideoStreamForOffset && selectedVideoStreamForOffset.startTime) || 0) - ((selectedAudioStreamForOffset && selectedAudioStreamForOffset.startTime) || 0);
+    const stage1ArgsFixed = [
+      ...(videoAudioStartOffset > 0.001 ? ['-ss', String(videoAudioStartOffset)] : []),
+      '-i', filePath, '-filter_complex',
       stage1FilterFinal,
       '-map', '[out]', '-c:a', 'flac', '-sample_fmt', 's32', '-ar', '48000', '-bits_per_raw_sample', '24', '-y', tmpStereoPath];
 
@@ -3379,81 +3582,6 @@ clip.set_output()
       '-c:a', 'libvorbis', '-b:a', '640k', '-sample_fmt', 'fltp', '-ar', '48000', '-y', tmpUpmixPath];
 
     const usesMkvmergeMux = (dvRpuPath || hdr10PlusMetaPath) && externalToolEncoders.includes(encoder);
-    // Real, working fix for a confirmed, researched problem (no clean
-    // ffmpeg-only solution exists for PGS+crop misalignment - see the
-    // toggle's own text): OCR-convert each selected PGS track to real
-    // SRT text via PgsToSrt, so it structurally can't have the
-    // baked-in-canvas problem text subtitles never had in the first
-    // place. Two stages per PGS track (mkvextract, then PgsToSrt), both
-    // reusing the existing generic run-tool-simple dispatch, same as
-    // mkvmerge itself - no new main.js handler needed since both are
-    // just external executables.
-    //
-    // Real ambiguity found and resolved via direct verification, not
-    // assumed, per direct request to double-check given this project's
-    // history: PgsToSrt's own documentation says its --track parameter
-    // value is "obtained with mkvinfo" - but mkvinfo actually shows TWO
-    // different numbers per track (a 1-indexed "Track number" and a
-    // separate 0-indexed "track ID for mkvmerge & mkvextract"), and the
-    // docs don't specify which one PgsToSrt actually expects. This is
-    // genuinely unverifiable without running the Windows-only PgsToSrt
-    // directly, which isn't possible from here - rather than guess and
-    // risk silently converting the wrong track, this sidesteps the
-    // question entirely: mkvextract first pulls the specific PGS track
-    // to a standalone .sup file, using the SAME track ID numbering
-    // directly confirmed via a real test (built an actual 5-track MKV,
-    // compared ffprobe's stream index against mkvmerge --identify and
-    // mkvinfo's own "track ID for mkvmerge & mkvextract" field - all
-    // three matched exactly, and mkvextract correctly pulled the right
-    // track content when tested against that numbering directly).
-    // PgsToSrt then runs on that standalone file with no --track
-    // parameter at all - confirmed via its own documented syntax that
-    // standalone .sup files don't need one, removing the ambiguous case
-    // from the pipeline completely instead of trusting an unverified
-    // assumption.
-    //
-    // mkvextract is part of the same MKVToolNix package as mkvmerge -
-    // no separate download needed beyond what DV/HDR10+ preservation
-    // already requires; path derived from the existing mkvmergePath
-    // field (same install directory, different executable name).
-    //
-    // Currently wired into BOTH the mkvmerge path and the standard
-    // ffmpeg path, per direct request - previously only ran when DV/
-    // HDR10+ preservation was active, which meant SDR->HDR and plain
-    // HDR10->HDR10 (no DV, no HDR10+) conversions never got PGS OCR at
-    // all. Ungated: runs for any job with selected PGS tracks and the
-    // toggle on, regardless of DV/HDR10+ status. mkvextract is still
-    // derived from the mkvmergePath field either way - it's a separate
-    // tool in the same MKVToolNix install, needed for the extraction
-    // step regardless of which tool ultimately does the final mux.
-    const pgsOcrStages = [];
-    const pgsOcrConvertedPaths = [];
-    if (isOn('tog-pgs-ocr') && pgsSubtitleSelections.length > 0){
-      const pgsToSrtPathVal = document.getElementById('pgsToSrtPath').value.trim();
-      const ocrLanguage = document.getElementById('pgsOcrLanguage').value.trim() || 'eng';
-      const mkvmergePathValForExtract = document.getElementById('mkvmergePath').value.trim();
-      const mkvextractPathVal = mkvmergePathValForExtract.replace(/mkvmerge(\.exe)?$/i, 'mkvextract$1');
-      pgsSubtitleSelections.forEach((tid, i) => {
-        const supPath = tmpDir + '_tmp_pgsextract_' + tid + '_' + jobId + '.sup';
-        const srtOutPath = tmpDir + '_tmp_pgsocr_' + tid + '_' + jobId + '.srt';
-        pgsOcrStages.push({
-          name: `Extract PGS subtitle track ${tid} for OCR`,
-          toolPath: mkvextractPathVal,
-          toolArgs: ['tracks', filePath, `${tid}:${supPath}`],
-          isSpawnTool: true,
-          verifyOutputPath: supPath,
-          totalDuration: 1, cleanup: null
-        });
-        pgsOcrStages.push({
-          name: `OCR-convert PGS subtitle track ${tid} to SRT`,
-          toolPath: pgsToSrtPathVal,
-          toolArgs: ['--input', supPath, '--output', srtOutPath, '--tesseractlanguage', ocrLanguage],
-          isSpawnTool: true,
-          totalDuration: 1, cleanup: [supPath]
-        });
-        pgsOcrConvertedPaths.push(srtOutPath);
-      });
-    }
     let stage3Args, stage3Name, stage3Cleanup, chapterConvertStage = null, mkvmergeExtractStage = null;
     if (usesMkvmergeMux){
       const mkvmergePathVal = document.getElementById('mkvmergePath').value.trim();
@@ -3509,7 +3637,7 @@ clip.set_output()
           totalDuration: 1, cleanup: [chaptersPath]
         };
       }
-      const mkvmergeArgsResult = buildMkvmergeMuxArgs(mkvmergeRawHevcPath, tmpUpmixPath, outPath, mkvmergeChaptersPath, pgsOcrConvertedPaths);
+      const mkvmergeArgsResult = buildMkvmergeMuxArgs(mkvmergeRawHevcPath, tmpUpmixPath, outPath, mkvmergeChaptersPath, pgsOcrConvertedPaths, pgsOcrConvertedLanguages);
       stage3Args = { toolPath: mkvmergePathVal, toolArgs: mkvmergeArgsResult.args, srtPaths: mkvmergeArgsResult.srtPaths, srtStretchRatio: mkvmergeArgsResult.srtStretchRatio, isSpawnTool: true };
       stage3Name = 'Mux final MKV with Dolby Vision signaling (mkvmerge)';
       stage3Cleanup = [tmpUpmixPath, mkvmergeRawHevcPath, ...(mkvmergeChaptersPath ? [mkvmergeChaptersPath] : []), ...(dvRpuPath ? [dvRpuPath] : []), ...(hdr10PlusMetaPath ? [hdr10PlusMetaPath] : []), ...pgsOcrConvertedPaths];
@@ -3541,8 +3669,8 @@ clip.set_output()
         // execution loop dispatches on isSpawnTool to run mkvmerge.exe
         // directly instead of ffmpeg for this one stage.
         usesMkvmergeMux
-          ? { name: stage3Name, toolPath: stage3Args.toolPath, toolArgs: stage3Args.toolArgs, srtPaths: stage3Args.srtPaths, srtStretchRatio: stage3Args.srtStretchRatio, isSpawnTool: true, totalDuration: videoDuration, cleanup: stage3Cleanup }
-          : { name: stage3Name, args: stage3Args, pgsSrtPaths: pgsOcrConvertedPaths, pgsSrtStretchRatio: getSrtConformStretchRatio(), totalDuration: videoDuration, cleanup: stage3Cleanup }
+          ? { name: stage3Name, toolPath: stage3Args.toolPath, toolArgs: stage3Args.toolArgs, srtPaths: stage3Args.srtPaths, srtLanguages: stage3Args.srtLanguages, srtStretchRatio: stage3Args.srtStretchRatio, isSpawnTool: true, totalDuration: videoDuration, cleanup: stage3Cleanup }
+          : { name: stage3Name, args: stage3Args, pgsSrtPaths: pgsOcrConvertedPaths, pgsSrtLanguages: pgsOcrConvertedLanguages, pgsSrtStretchRatio: getSrtConformStretchRatio(), totalDuration: videoDuration, cleanup: stage3Cleanup }
       ],
       currentStage: 0,
       totalDuration: videoDuration,
@@ -3571,7 +3699,30 @@ clip.set_output()
     if (audioCorrections.length === 0){
       // No correction needed — genuine stream copy, no re-encode at all.
       const audioArgs = ['-c:a', 'copy'];
-      const inputArgs = videoIsOriginal ? ['-i', filePath] : ['-i', videoSourcePath, '-i', filePath];
+      // Real, confirmed bug fixed - same class as the Integrated Engine
+      // fix above, applied here too (flagged as an open gap last round):
+      // a clip's audio/subtitle-carrying original file can have a
+      // different start_time than the video source this app produces
+      // (ffmpeg clipping a segment from a larger source routinely
+      // mismatches video's keyframe-constrained cut point against
+      // audio's sample-accurate one). Only relevant when video source
+      // differs from the original file (external-tool encoders
+      // specifically) - the encode pipeline discards video's own
+      // original start offset, treating its first frame as time zero,
+      // but this filePath input still carries its original, unshifted
+      // timing. Applied only to this input, not videoSourcePath, since
+      // that one's already correct.
+      const selectedVideoStreamForOffset = detectedVideoStreams.find(s => String(s.index) === videoTrackSel?.value) || detectedVideoStreams[0];
+      const firstAudioIdx = audioSelections[0];
+      const selectedAudioStreamForOffset = detectedAudioStreams.find(s => String(s.index) === firstAudioIdx);
+      const videoAudioStartOffsetEmbedded = !videoIsOriginal && firstAudioIdx
+        ? ((selectedVideoStreamForOffset && selectedVideoStreamForOffset.startTime) || 0) - ((selectedAudioStreamForOffset && selectedAudioStreamForOffset.startTime) || 0)
+        : 0;
+      const inputArgs = videoIsOriginal ? ['-i', filePath] : [
+        '-i', videoSourcePath,
+        ...(videoAudioStartOffsetEmbedded > 0.001 ? ['-ss', String(videoAudioStartOffsetEmbedded)] : []),
+        '-i', filePath
+      ];
       const origIndex = videoIsOriginal ? 0 : 1;
       const mapArgs = [
         '-map', `0:${videoSourceMapArg.split(':')[1]}`,
@@ -3689,7 +3840,7 @@ clip.set_output()
       stages: [
         ...preStages,
         ...pgsOcrStages,
-        { name: 'Mux final file', args, pgsSrtPaths: pgsOcrConvertedPaths, pgsSrtStretchRatio: getSrtConformStretchRatio(), totalDuration: videoDuration, cleanup: cleanupPaths }
+        { name: 'Mux final file', args, pgsSrtPaths: pgsOcrConvertedPaths, pgsSrtLanguages: pgsOcrConvertedLanguages, pgsSrtStretchRatio: getSrtConformStretchRatio(), totalDuration: videoDuration, cleanup: cleanupPaths }
       ],
       currentStage: 0,
       totalDuration: videoDuration,
@@ -3715,7 +3866,7 @@ clip.set_output()
       id: jobId, label, filePath, outPath,
       stages: [
         ...pgsOcrStages,
-        { name: 'Mux final file', args, pgsSrtPaths: pgsOcrConvertedPaths, pgsSrtStretchRatio: getSrtConformStretchRatio(), totalDuration: videoDuration, cleanup: [...(chaptersPath ? [chaptersPath] : []), ...pgsOcrConvertedPaths] }
+        { name: 'Mux final file', args, pgsSrtPaths: pgsOcrConvertedPaths, pgsSrtLanguages: pgsOcrConvertedLanguages, pgsSrtStretchRatio: getSrtConformStretchRatio(), totalDuration: videoDuration, cleanup: [...(chaptersPath ? [chaptersPath] : []), ...pgsOcrConvertedPaths] }
       ],
       currentStage: 0,
       totalDuration: videoDuration,
@@ -4018,7 +4169,17 @@ async function processNextInQueue(){
       setStatus(`${next.label} — Step ${i+1}/${next.stages.length}: ${stage.name}...`, '');
       renderQueue();
       let result;
-      if (stage.triplePiped){
+      if (stage.isNvencNative){
+        // Video-only native GPU encode stage - uses the dedicated
+        // handler built for this (real progress reporting, unlike
+        // run-tool-simple which is fire-and-forget). The mux stage that
+        // follows uses run-tool-simple as normal, matching every other
+        // mkvmerge stage in this app.
+        result = await window.electronAPI.runNvencNative({
+          toolPath: stage.toolPath, args: stage.args,
+          totalDuration: stage.totalDuration, jobId: next.id
+        });
+      } else if (stage.triplePiped){
         // Write the dynamically-generated VapourSynth script to disk first
         // — vspipe needs a real script file path, and the renderer can't
         // write files directly, so this has to happen here, right before
@@ -4044,7 +4205,8 @@ async function processNextInQueue(){
         console.log('[mkvmerge srt filter] stage.srtPaths:', stage.srtPaths);
         if (stage.srtPaths && stage.srtPaths.length > 0){
           const existingSrtArgs = [];
-          for (const srtPath of stage.srtPaths){
+          for (let srtIdx = 0; srtIdx < stage.srtPaths.length; srtIdx++){
+            const srtPath = stage.srtPaths[srtIdx];
             const check = await window.electronAPI.checkFileExists({ path: srtPath }).catch((err) => { console.log('[mkvmerge srt filter] checkFileExists threw for', srtPath, err); return { exists: false }; });
             console.log('[mkvmerge srt filter]', srtPath, '-> exists:', check && check.exists, 'size:', check && check.size);
             // Real bug found via a real mkvmerge error: "type of file
@@ -4057,6 +4219,15 @@ async function processNextInQueue(){
             // raised the floor well clear of the placeholder with large
             // margin below the smallest real file actually observed.
             if (check && check.exists && check.size > 20){
+              // Real bug fixed: confirmed via a real user screenshot
+              // that these SRT tracks came through as "und" - no
+              // --language flag was ever added, so mkvmerge defaulted
+              // to undefined. Applies to track 0 of THIS input file
+              // specifically (each SRT is its own separate mkvmerge
+              // input with a single subtitle track), same targeting
+              // pattern as --sync right below.
+              const srtLang = (stage.srtLanguages && stage.srtLanguages[srtIdx]) || 'und';
+              existingSrtArgs.push('--language', `0:${srtLang}`);
               if (stage.srtStretchRatio !== null && stage.srtStretchRatio !== undefined){
                 existingSrtArgs.push('--sync', `0:0,${stage.srtStretchRatio}`);
               }
@@ -4134,10 +4305,23 @@ async function processNextInQueue(){
         let finalStageArgs = stage.args;
         if (stage.pgsSrtPaths && stage.pgsSrtPaths.length > 0){
           const existingInputCount = stage.args.filter(a => a === '-i').length;
+          // -metadata:s:s:N addresses the Nth SUBTITLE stream in the
+          // OUTPUT specifically, not the Nth overall stream or input -
+          // count any subtitle-stream maps already present (e.g. text
+          // subtitles copied directly) so these new SRT streams get the
+          // correct starting index instead of assuming they're the only
+          // subtitle streams in the output.
+          let existingSubMapCount = 0;
+          for (let i = 0; i < stage.args.length - 1; i++){
+            if (stage.args[i] === '-map' && /:s(:|$)/.test(stage.args[i + 1])) existingSubMapCount++;
+          }
           const newInputArgs = [];
           const newMapArgs = [];
+          const newMetadataArgs = [];
           let nextInputIdx = existingInputCount;
-          for (const srtPath of stage.pgsSrtPaths){
+          let nextSubStreamIdx = existingSubMapCount;
+          for (let srtIdx = 0; srtIdx < stage.pgsSrtPaths.length; srtIdx++){
+            const srtPath = stage.pgsSrtPaths[srtIdx];
             const check = await window.electronAPI.checkFileExists({ path: srtPath }).catch(() => ({ exists: false }));
             if (check && check.exists && check.size > 20){
               if (stage.pgsSrtStretchRatio !== null && stage.pgsSrtStretchRatio !== undefined){
@@ -4145,7 +4329,13 @@ async function processNextInQueue(){
               }
               newInputArgs.push('-i', srtPath);
               newMapArgs.push('-map', `${nextInputIdx}:0`);
+              // Real bug fixed: confirmed via a real user screenshot
+              // that these SRT tracks came through as "und" on this
+              // path too - no language metadata was ever added.
+              const srtLang = (stage.pgsSrtLanguages && stage.pgsSrtLanguages[srtIdx]) || 'und';
+              newMetadataArgs.push(`-metadata:s:s:${nextSubStreamIdx}`, `language=${srtLang}`);
               nextInputIdx++;
+              nextSubStreamIdx++;
             }
           }
           if (newInputArgs.length > 0){
@@ -4154,7 +4344,7 @@ async function processNextInQueue(){
             const withInputs = [...stage.args.slice(0, inputInsertPoint), ...newInputArgs, ...stage.args.slice(inputInsertPoint)];
             const lastMapIdx = withInputs.lastIndexOf('-map');
             const mapInsertPoint = lastMapIdx + 2;
-            finalStageArgs = [...withInputs.slice(0, mapInsertPoint), ...newMapArgs, ...withInputs.slice(mapInsertPoint)];
+            finalStageArgs = [...withInputs.slice(0, mapInsertPoint), ...newMapArgs, ...newMetadataArgs, ...withInputs.slice(mapInsertPoint)];
           }
         }
         result = await window.electronAPI.runFFmpegWithProgress({
@@ -4199,6 +4389,21 @@ async function processNextInQueue(){
           stripPathFromLaterStages(next.stages, i + 1, stage.verifyPath);
         }
         finalResult = { code: 0 }; // never let an optional stage's own result abort the job
+        continue;
+      }
+      // Real bug found and fixed, confirmed via mkvmerge's own official
+      // docs: exit code 1 specifically means "completed successfully,
+      // with at least one warning" - NOT a failure, unlike code 2
+      // which is a genuine error. Without this, a job that actually
+      // succeeded (e.g. dropped one malformed OCR'd subtitle track but
+      // produced a real, usable final file) was being reported as
+      // fully failed. Scoped to mkvmerge specifically via toolPath -
+      // this exit-code convention belongs to mkvmerge, not other
+      // tools where any non-zero code genuinely means failure.
+      const isMkvmergeWarning = stage.isSpawnTool && stage.toolPath && /mkvmerge/i.test(stage.toolPath) && result.code === 1;
+      if (isMkvmergeWarning){
+        logJobWarning(`${stage.name} completed with a warning (not a failure) - mkvmerge dropped at least one problematic track but the rest of the file was produced normally. Full details: ${(result.stderr || '').slice(0, 800)}`);
+        finalResult = { code: 0, stdout: result.stdout, stderr: result.stderr };
         continue;
       }
       if (stopRequested || result.code !== 0){
