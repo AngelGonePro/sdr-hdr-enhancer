@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   convertChaptersToMkvmerge: (payload) => ipcRenderer.invoke('convert-chapters-to-mkvmerge', payload),
   runPipedEncode: (payload) => ipcRenderer.invoke('run-piped-encode', payload),
   runTriplePipedEncode: (payload) => ipcRenderer.invoke('run-triple-piped-encode', payload),
+  runNvencNative: (payload) => ipcRenderer.invoke('run-nvencc-native', payload),
   killFFmpegJob: (payload) => ipcRenderer.invoke('kill-ffmpeg-job', payload),
   deleteTempFile: (payload) => ipcRenderer.invoke('delete-temp-file', payload),
   writeTextFile: (payload) => ipcRenderer.invoke('write-text-file', payload),
