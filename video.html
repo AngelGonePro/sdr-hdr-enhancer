@@ -49,6 +49,15 @@
 <body>
   <h1>HDR Converter</h1>
   <div class="sub">Crop detection, SDR→HDR expansion, H.265 HDR10 encode, framerate conversion — GPU accelerated where available</div>
+  <div class="warn-box" id="chroma422444Warning" style="margin-bottom:16px;display:none">
+    ⚠ The selected video track is <strong id="chroma422444Format">4:2:2/4:4:4</strong> chroma - NVIDIA GPU hardware
+    decode (NVDEC) has no support for this at all, confirmed directly via NVIDIA's own developer forums: 4:2:2 is
+    never supported on any NVDEC hardware, and while some GPUs can technically decode 4:4:4, that requires
+    NVIDIA's own proprietary API extensions that ffmpeg doesn't implement - so hardware decode fails outright
+    either way, not just for crop detection specifically. This app automatically falls back to CPU (software)
+    decode for this source, which works correctly but is genuinely slower than the GPU path most other sources
+    get. This is a real hardware/driver limitation, not something a setting here can work around.
+  </div>
 
   <div class="slbl">Source File</div>
   <div class="drop" id="dropZone" onclick="document.getElementById('fileInput').click()"
@@ -1302,9 +1311,30 @@ async function refreshHdrMetadataForTrack(streamIndex, isHDR){
   }
 }
 
+// Real, confirmed hardware limitation surfaced clearly, per direct
+// request: NVIDIA's own developer forums confirm NVDEC has no 4:2:2
+// decode support on any hardware, and while some GPUs can technically
+// decode 4:4:4, that needs NVIDIA's own proprietary API extensions
+// ffmpeg doesn't implement - so hardware decode genuinely can't happen
+// for either format through this app's ffmpeg. This just detects and
+// surfaces that clearly; the actual CPU-decode fallback for crop
+// detection/brightness analysis lives in main.js's
+// buildDetectionHwaccelArgs, shared by both.
+function updateChroma422444Warning(){
+  const box = document.getElementById('chroma422444Warning');
+  const labelEl = document.getElementById('chroma422444Format');
+  if (!box) return;
+  const pixFmt = getSelectedVideoTrackPixFmt() || '';
+  const is444 = pixFmt.includes('444');
+  const is422 = pixFmt.includes('422');
+  if (labelEl) labelEl.textContent = is444 ? '4:4:4' : (is422 ? '4:2:2' : '4:2:2/4:4:4');
+  box.style.display = (is444 || is422) ? 'block' : 'none';
+}
+
 function onVideoTrackChange(){
   const selected = document.querySelector('input[name="videoTrackSel"]:checked');
   if (!selected) return;
+  updateChroma422444Warning();
   const isHDR = selected.dataset.hdr === 'true';
   // Note: tog-hdr itself is deliberately left alone here regardless of
   // track type - it correctly auto-branches per-track internally now
