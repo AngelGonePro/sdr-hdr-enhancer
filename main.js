@@ -382,6 +382,22 @@ ipcMain.handle('get-hdr-metadata', async (event, payload) => {
 // hwdownload,format=nv12 before the actual CPU-side filter — only the
 // decode step itself moves to the GPU.
 function buildDetectionHwaccelArgs(gpuVendor, sourcePixFmt){
+  // Real, confirmed bug fixed: sourcePixFmt was received but only ever
+  // checked for bit depth below - chroma subsampling was never checked
+  // at all, so hardware decode was always attempted regardless of
+  // whether the source could even be hardware-decoded. Confirmed
+  // directly via NVIDIA's own developer forums: NVDEC has zero 4:2:2
+  // decode support on any hardware ("There are no available
+  // work-arounds for encoding/decoding 4:2:2"), and while some GPUs can
+  // technically decode 4:4:4, that requires NVIDIA's own proprietary
+  // API extensions that ffmpeg doesn't implement at all - so hardware
+  // decode fails outright for both formats, on any GPU generation, not
+  // just older ones. Falls back to plain software decode (the same
+  // empty shape already used below for an unrecognized gpuVendor)
+  // rather than attempting hardware decode and crashing.
+  const is422or444 = !!(sourcePixFmt && /422|444/i.test(sourcePixFmt));
+  if (is422or444) return { pre: [], vfPrefix: '' };
+
   // hwdownload needs an EXPLICIT format matching the real native surface
   // format — confirmed via research (and a real, reproduced failure) that
   // it does NOT auto-negotiate against a downstream filter's request; it
