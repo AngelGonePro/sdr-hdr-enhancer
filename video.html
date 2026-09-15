@@ -1663,7 +1663,25 @@ async function runCropDetect(){
 // already the validated, recommended settings.
 const AUDIO_ENGINE_DEFAULTS = {
   fc: '0.7070', lfe: '0.4000', sl: '0.7070', bl: '0.7070', xo: 100,
-  cx: '0.7079', lx: '0.2985', sx: '0.6026', backRatio: 1.0,
+  // cx changed from '0.7079' (-3dB linear) to '0.3162' (-10dB linear) -
+  // same fix already validated in the audio-upmixer-electron project's
+  // identical filter structure (buildUpmixToSevenOneFilter below uses
+  // the exact same FL+FR sum derivation for FC_out that project uses).
+  // Confirmed via direct measurement on a real Atmos-derived track:
+  // -3dB linear produced a measurable +0.175dB left-shift in vocal-band
+  // balance when the upmixed 7.1 output is later downmixed back to
+  // stereo, because FC is built from a SUM (FL+FR)/2, which inherits
+  // whatever real phase/correlation asymmetry exists in the source's
+  // L/R content - genuinely common for Atmos height-derived material
+  // (measured directly: 0.27 L/R correlation, real 0.375ms lag on that
+  // track). -10dB linear measured at ~60% reduction in that shift while
+  // keeping real, audible FC presence. Scope: only affects this specific
+  // sum-based FC derivation in buildUpmixToSevenOneFilter - this file's
+  // downmix (buildDownmixToStereoFilter, folds an already-real, discrete
+  // FC channel) and DPLII (buildDplIIStereoFilter, ffmpeg's own native
+  // matrix_encoding=dplii) paths use different mechanisms entirely and
+  // don't share this vulnerability, so weren't touched.
+  cx: '0.3162', lx: '0.2985', sx: '0.6026', backRatio: 1.0,
   compThresh: '0.354813', compRatio: '3.00',
   peakLimit: '0.841395', peakAtk: '25.0', peakRel: '180.0',
   lufs: -18, tp: -1.5, lra: 13,
