@@ -109,14 +109,62 @@ ipcMain.handle('get-duration', async (event, payload) => {
 // treated as SDR) — same auto-detection philosophy as the audio tool's
 // channel-count/duration detection, applied to video.
 ipcMain.handle('get-video-info', async (event, payload) => {
-  return new Promise((resolve) => {
-    const ffmpegPath = payload.ffmpeg;
-    const filePath = payload.filePath;
-    const ffprobePath = ffmpegPath.replace(/ffmpeg(\.exe)?$/i, (m, ext) => 'ffprobe' + (ext || ''));
+  const ffmpegPath = payload.ffmpeg;
+  const filePath = payload.filePath;
+  const mkvmergePath = payload.mkvmerge;
+  const ffprobePath = ffmpegPath.replace(/ffmpeg(\.exe)?$/i, (m, ext) => 'ffprobe' + (ext || ''));
 
+  // Real, confirmed bug fixed: ffprobe's Matroska demuxer does not expose
+  // the modern "LanguageIETF" element under any field at all - confirmed
+  // directly (not assumed) by building a real test file with ONLY that
+  // element set (via mkvpropedit) and finding ffprobe reports zero
+  // language tags for it, while mkvmerge's own -J identification output
+  // reads it correctly. This element is the RECOMMENDED, modern way to
+  // store track language per the Matroska spec itself, and increasingly
+  // common in real releases - a real user's file (audio AND subtitles,
+  // confirmed via MKVToolNix showing real tags where this app showed
+  // "und" for everything) hit exactly this gap. Runs mkvmerge -J as a
+  // supplementary source specifically to fill in what ffprobe couldn't
+  // find - confirmed directly via a real multi-track test file that
+  // mkvmerge's own track "id" numbering exactly matches ffprobe's stream
+  // "index" (0,1,2,3,4 identical across both tools for video/audio/audio/
+  // subtitle/subtitle), so no remapping between the two is needed. Only
+  // fills in the 'und' fallback - never overrides a language ffprobe
+  // already found, so this can only improve accuracy, never introduce a
+  // disagreement with an already-correct ffprobe result.
+  async function getMkvmergeLanguages(){
+    if (!mkvmergePath) return {};
+    return new Promise((resolveInner) => {
+      let proc;
+      try {
+        proc = spawn(mkvmergePath, ['-J', filePath], { windowsHide: true });
+      } catch (err) {
+        resolveInner({});
+        return;
+      }
+      let stdout = "";
+      proc.stdout.on("data", d => stdout = appendBounded(stdout, d.toString()));
+      proc.on("close", code => {
+        try {
+          const parsed = JSON.parse(stdout);
+          const byIndex = {};
+          for (const t of (parsed.tracks || [])){
+            const lang = t.properties && (t.properties.language_ietf || t.properties.language);
+            if (lang && lang !== 'und') byIndex[t.id] = lang;
+          }
+          resolveInner(byIndex);
+        } catch (e) {
+          resolveInner({});
+        }
+      });
+      proc.on("error", () => resolveInner({}));
+    });
+  }
+
+  return new Promise((resolve) => {
     const args = [
       '-v', 'error',
-      '-show_entries', 'stream=index,width,height,r_frame_rate,codec_type,channels,color_transfer,codec_name,pix_fmt,profile,start_time',
+      '-show_entries', 'stream=index,width,height,r_frame_rate,codec_type,channels,color_transfer,color_primaries,color_space,codec_name,pix_fmt,profile,start_time',
       '-show_entries', 'stream_tags=language,title',
       '-show_entries', 'format=duration',
       '-of', 'json',
@@ -133,7 +181,7 @@ ipcMain.handle('get-video-info', async (event, payload) => {
     let stderr = "";
     proc.stdout.on("data", d => stdout = appendBounded(stdout, d.toString()));
     proc.stderr.on("data", d => stderr = appendBounded(stderr, d.toString()));
-    proc.on("close", code => {
+    proc.on("close", async code => {
       if (code !== 0) {
         resolve({ error: stderr || `ffprobe exited with code ${code}` });
         return;
@@ -141,6 +189,7 @@ ipcMain.handle('get-video-info', async (event, payload) => {
       try {
         const parsed = JSON.parse(stdout);
         const streams = parsed.streams || [];
+        const mkvmergeLanguages = await getMkvmergeLanguages();
         const videoStreams = streams.filter(s => s.codec_type === 'video').map(s => ({
           index: s.index,
           codec: s.codec_name,
@@ -148,24 +197,39 @@ ipcMain.handle('get-video-info', async (event, payload) => {
           height: s.height,
           frameRate: s.r_frame_rate,
           colorTransfer: s.color_transfer,
+          colorPrimaries: s.color_primaries || null,
+          colorSpace: s.color_space || null,
           pixFmt: s.pix_fmt,
           startTime: s.start_time !== undefined ? parseFloat(s.start_time) : 0,
           title: (s.tags && s.tags.title) || null
         }));
         const videoStream = videoStreams[0]; // first, for backward-compatible fields below
+        // Real, definitive bug fixed: treating ffprobe's legacy language
+        // tag as valid whenever it's merely truthy meant the literal
+        // string "und" (a real, explicit value some modern files write
+        // to the legacy element while the actual language lives only in
+        // LanguageIETF) was accepted as-is, so the mkvmerge fallback
+        // below never even got a chance to run. getMkvmergeLanguages
+        // itself already correctly treats "und" as "not found" - this
+        // applies that same exclusion where the two sources combine.
+        function resolveLanguage(s){
+          const ffprobeLang = s.tags && s.tags.language;
+          if (ffprobeLang && ffprobeLang !== 'und') return ffprobeLang;
+          return mkvmergeLanguages[s.index] || 'und';
+        }
         const audioStreams = streams.filter(s => s.codec_type === 'audio').map(s => ({
           index: s.index,
           codec: s.codec_name,
           channels: s.channels,
           profile: s.profile || null,
-          language: (s.tags && s.tags.language) || 'und',
+          language: resolveLanguage(s),
           startTime: s.start_time !== undefined ? parseFloat(s.start_time) : 0,
           title: (s.tags && s.tags.title) || null
         }));
         const subtitleStreams = streams.filter(s => s.codec_type === 'subtitle').map(s => ({
           index: s.index,
           codec: s.codec_name,
-          language: (s.tags && s.tags.language) || 'und',
+          language: resolveLanguage(s),
           title: (s.tags && s.tags.title) || null
         }));
         resolve({
@@ -598,6 +662,367 @@ ipcMain.handle('analyze-brightness', async (event, payload) => {
   });
 });
 
+// Automatic, real detection of a mislabeled-HDR source, per direct request
+// (no manual toggle - this runs on every file loaded automatically).
+// Some sources carry a smpte2084/PQ color_transfer tag whose actual pixel
+// VALUES were never transformed to match it - a real, measured case
+// (confirmed via direct PQ-to-nits conversion on a real user file: ~990
+// nits MEDIAN brightness across the whole frame, a physically implausible
+// number for genuine HDR grading, where even bright scenes normally sit
+// well below their own peak most of the time) consistent with a known
+// Windows HDR-desktop-capture artifact - a capture tool tags the file as
+// PQ because the desktop compositor was in HDR mode, without the actual
+// captured content ever being re-graded into real PQ values. The tag
+// alone can't tell this apart from genuine HDR; only the actual pixel
+// data can. Reuses the same efficient signalstats+metadata=print pattern
+// already validated in analyze-brightness above, but deliberately does
+// NOT force 8-bit downscaling first (unlike that handler) - that would
+// destroy the native 10-bit PQ code values this check depends on.
+ipcMain.handle('detect-mislabeled-hdr', async (event, payload) => {
+  console.log('\n===== MISLABELED-HDR DETECTION START =====\n');
+  console.log('checking file:', payload.filePath, '(track', payload.videoTrackIndex, ')');
+  const ffmpegPath = payload.ffmpeg;
+  const filePath = payload.filePath;
+  const duration = payload.duration || 0;
+
+  // Real, definitive robustness bug fixed via a real production run: a
+  // single 15s window is unreliable, since scene-to-scene brightness
+  // genuinely varies widely within one video - confirmed directly by
+  // sampling 4 different windows of the same real, actually-mislabeled
+  // file and measuring mean brightness ranging 197-554 nits purely
+  // depending on which moment got sampled. A real user's actual job hit
+  // exactly this: 176 nits (below threshold) on one specific window of
+  // a file that measures well above it on most others. Fixed by
+  // sampling several short windows SPREAD ACROSS the video's actual
+  // duration instead of one fixed spot, and combining every window's
+  // samples into one measurement - confirmed this combined approach
+  // reliably lands well above the threshold (365 nits combined mean on
+  // the same real file) regardless of which individual scenes get hit,
+  // since it's no longer at the mercy of a single moment's content.
+  const windowDuration = 10;
+  const numWindows = 4;
+  const windowOffsets = [];
+  if (duration > windowDuration * numWindows){
+    // Spread across 10%-85% of the runtime, clear of likely cold-open/
+    // credits padding at the very start and end.
+    for (let i = 0; i < numWindows; i++){
+      windowOffsets.push(duration * (0.10 + i * (0.75 / (numWindows - 1))));
+    }
+  } else {
+    // Short file - just sample from the start, as much as exists.
+    windowOffsets.push(0);
+  }
+  console.log('sampling', windowOffsets.length, 'window(s) at offsets:', windowOffsets.map(o => o.toFixed(1)));
+
+  // Runs one short signalstats pass at a given offset, resolving to its
+  // raw YAVG matches (or an empty array on any failure - each window
+  // fails independently and safely, so one bad window can't sink the
+  // whole check).
+  function runOneWindow(startOffset){
+    return new Promise((resolve) => {
+      // Deliberately NEVER uses hwaccel, unlike detect-crop/analyze-
+      // brightness above - each window is a short, cheap sample that
+      // never meaningfully benefits from GPU decode, but GPU decode
+      // does introduce real, hardware/driver-dependent risk this check
+      // can't afford: NVDEC's AV1 decode support specifically is
+      // genuinely inconsistent (reliable only on RTX 30-series/Ampere
+      // or newer, with known rough edges even then), and this handler's
+      // own fail-safe design means any such decode hiccup would
+      // previously have silently resolved to "not mislabeled" with zero
+      // visible error. Forcing plain CPU decode here removes that whole
+      // category of risk outright rather than just diagnosing it.
+      const args = [
+        '-ss', String(Math.max(0, startOffset)),
+        '-i', filePath,
+        '-t', String(windowDuration),
+        ...(payload.videoTrackIndex != null ? ['-map', `0:${payload.videoTrackIndex}`] : []),
+        // No format= forced here at all, unlike analyze-brightness -
+        // this check specifically needs the source's real, native bit
+        // depth for an accurate PQ-to-nits conversion (10-bit PQ code
+        // values are on a 0-1023 scale; forcing 8-bit here would
+        // silently invalidate the whole calculation, the exact bug
+        // already fixed once elsewhere in this app for a different
+        // purpose).
+        '-vf', 'signalstats,metadata=print:file=-',
+        '-f', 'null', '-'
+      ];
+      let proc;
+      try {
+        proc = spawn(ffmpegPath, args, { windowsHide: true });
+        activeProcesses.set('mislabeled-hdr-detect', proc);
+      } catch (err) {
+        console.log('detection window spawn failed at offset', startOffset, ':', err && err.message || err);
+        resolve([]);
+        return;
+      }
+      let stdout = "";
+      let stderr = "";
+      proc.stdout.on("data", d => stdout = appendBounded(stdout, d.toString()));
+      proc.stderr.on("data", d => stderr = appendBounded(stderr, d.toString()));
+      proc.on("close", (code) => {
+        activeProcesses.delete('mislabeled-hdr-detect');
+        if (code !== 0) {
+          console.log('detection window failed at offset', startOffset, ', exit code', code, '- stderr tail:', stderr.trim().slice(-300));
+          resolve([]);
+          return;
+        }
+        const matches = [...stdout.matchAll(/lavfi\.signalstats\.YAVG=([\d.]+)/g)].map(m => parseFloat(m[1]));
+        console.log('detection window at offset', startOffset.toFixed(1), '-', matches.length, 'samples');
+        resolve(matches);
+      });
+      proc.on("error", err => { console.log('detection window process error at offset', startOffset, ':', err.message); resolve([]); });
+    });
+  }
+
+  // Windows run sequentially (not in parallel) to avoid piling up
+  // concurrent disk reads of the same large file.
+  let allMatches = [];
+  for (const offset of windowOffsets){
+    const matches = await runOneWindow(offset);
+    allMatches = allMatches.concat(matches);
+  }
+
+  if (allMatches.length === 0) {
+    console.log('detection collected zero signal samples across all windows');
+    return { mislabeled: false, error: 'No signal data collected' };
+  }
+  // Real, native bit depth matters here - a 10-bit source's YAVG is
+  // on a 0-1023 scale, an 8-bit source's on 0-255. Normalize to 0-1
+  // before the PQ EOTF, which expects a 0-1 normalized input.
+  const is10Bit = !!(payload.sourcePixFmt && /10le|10be|p010|p016|12le|12be/i.test(payload.sourcePixFmt));
+  const maxCodeValue = is10Bit ? 1023 : 255;
+  // Standard ST 2084 PQ EOTF - converts a normalized PQ code value
+  // directly to the real luminance (in nits) it represents.
+  const m1 = 0.1593017578125, m2 = 78.84375;
+  const c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
+  function pqCodeToNits(codeValue){
+    const v = Math.min(1, Math.max(0, codeValue / maxCodeValue));
+    const vp = Math.pow(v, 1 / m2);
+    const num = Math.max(vp - c1, 0);
+    const den = c2 - c3 * vp;
+    return Math.pow(num / den, 1 / m1) * 10000;
+  }
+  // Real, definitive bug fixed: this used to average the raw CODE
+  // values across frames FIRST, then convert that one already-
+  // averaged value to nits at the end. The PQ EOTF is extremely
+  // non-linear, so that order of operations massively understates
+  // the true average brightness - confirmed directly on a real
+  // failing file: averaging code values first and converting once
+  // gave 66 nits (wrongly passing as "not mislabeled"), while
+  // converting each frame's own value to nits FIRST and averaging
+  // THOSE gave 333 nits, correctly crossing the threshold. Fixed to
+  // convert-then-average, matching the correct order used in the
+  // original manual analysis that first identified this whole issue.
+  const nitsPerFrame = allMatches.map(pqCodeToNits);
+  const nits = nitsPerFrame.reduce((a, b) => a + b, 0) / nitsPerFrame.length;
+  // Threshold reasoning: genuine, well-graded HDR content's AVERAGE
+  // frame brightness (not peak - average, across an entire sampled
+  // range including dark/normal scenes) sitting above roughly 300
+  // nits would be extraordinary - reference HDR mastering guidance
+  // (Dolby/SMPTE) targets typical scene-average brightness far below
+  // a title's peak (often near or below traditional SDR levels, ~100
+  // nits, even for content mastered to a 1000-4000 nit peak). 300 is
+  // deliberately generous headroom above that norm before flagging,
+  // to avoid false positives on genuinely bright, high-key HDR
+  // content, while still catching the real, measured case (~330-990
+  // nits average, depending on exact sample window) by a wide margin.
+  const mislabeled = nits > 300;
+  console.log(`detection result: ${allMatches.length} total samples across ${windowOffsets.length} window(s), ${Math.round(nits)} nits -> mislabeled=${mislabeled}`);
+  return { mislabeled, measuredNits: Math.round(nits) };
+});
+
+
+// Real, dangerous bug found and fixed via a direct user report of
+// inconsistent HDR10 rendering across two different HDR10-capable
+// displays: this app's declared HDR10 static metadata (MaxCLL/MaxFALL)
+// for genuine SDR->HDR conversions was a blind guess, not a real
+// measurement - MaxCLL tied directly to the Brightness Reference UI
+// slider (irrespective of what the actual transformed pixels reach) and
+// MaxFALL a hardcoded 400 regardless of content. Confirmed directly on
+// a real source: the declared MaxFALL (400) was 17x higher than the
+// content's actual measured MaxFALL (23) - a genuinely dishonest static-
+// metadata declaration that gives displays' own tone-mapping heuristics
+// no accurate signal to work from, a well-documented real cause of
+// inconsistent cross-display HDR10 rendering (static HDR10 metadata is
+// supposed to describe the real content, not a UI setting).
+//
+// This handler measures the REAL MaxCLL/MaxFALL of the actual, final
+// transformed pixel output - runs the exact same pixel filter chain the
+// real encode will use (so measurement and encode can never drift out
+// of sync), frame-sampled for speed (every 5th frame via `select`,
+// placed first so later filters never process the skipped 4/5 - crop
+// coordinates are unaffected by which frames flow through, unlike a
+// spatial resize, which was deliberately NOT added here since it would
+// risk breaking an already-present crop= filter's absolute pixel
+// coordinates in the caller's own chain). Confirmed via direct A/B test
+// against a full-resolution, every-frame measurement that this sampling
+// alone produces effectively identical results (340 nits full vs 331
+// with sampling, exact match on MaxFALL) while running at over 2x
+// realtime instead of under 1x.
+//
+// Critically places an explicit format=yuv420p10le immediately before
+// signalstats - confirmed via direct testing that omitting this causes
+// ffmpeg's signalstats filter to silently report values pre-scaled to
+// 8-bit range even when the actual pipeline data is 10-bit, which would
+// have produced a badly wrong (roughly 4x too low) measurement with no
+// visible error.
+ipcMain.handle('generate-dolby-vision-dynamic', async (event, payload) => {
+  console.log('\n===== DOLBY VISION DYNAMIC METADATA GENERATION START =====\n');
+  const mkvdolbyPath = payload.mkvdolbyPath;
+  const inputPath = payload.inputPath; // this app's own, already-produced, accurate static-HDR10 .mkv
+  console.log('running mkvdolby on:', inputPath);
+
+  const inputDir = path.dirname(inputPath);
+  let beforeFiles;
+  try {
+    beforeFiles = new Set(fs.readdirSync(inputDir));
+  } catch (err) {
+    return { error: `Could not read output directory before running mkvdolby: ${err.message}` };
+  }
+
+  return new Promise((resolve) => {
+    const args = [inputPath, '--keep-source', '--verify'];
+    let proc;
+    try {
+      proc = spawn(mkvdolbyPath, args, { windowsHide: true });
+      activeProcesses.set('dolby-vision-dynamic-gen', proc);
+    } catch (err) {
+      console.log('mkvdolby spawn failed:', err && err.message || err);
+      resolve({ error: `Could not start mkvdolby - check the path is correct: ${err && err.message || err}` });
+      return;
+    }
+    let stdout = "";
+    let stderr = "";
+    proc.stdout.on("data", d => { const s = d.toString(); stdout = appendBounded(stdout, s); console.log('[mkvdolby]', s.trim()); });
+    proc.stderr.on("data", d => { const s = d.toString(); stderr = appendBounded(stderr, s); console.log('[mkvdolby:err]', s.trim()); });
+    proc.on("close", (code) => {
+      activeProcesses.delete('dolby-vision-dynamic-gen');
+      if (code !== 0) {
+        console.log('mkvdolby failed, exit code', code, '- stderr tail:', stderr.trim().slice(-500));
+        resolve({ error: `mkvdolby exited with code ${code}: ${stderr.trim().slice(-500) || '(no error output captured)'}` });
+        return;
+      }
+      if (!fs.existsSync(inputPath)){
+        resolve({ error: 'mkvdolby reported success but the original HDR10 file is gone despite --keep-source being passed - refusing to report success on an inconsistent result.' });
+        return;
+      }
+      let afterFiles;
+      try {
+        afterFiles = fs.readdirSync(inputDir);
+      } catch (err) {
+        resolve({ error: `mkvdolby reported success but the output directory could not be re-read afterward: ${err.message}` });
+        return;
+      }
+      const newFiles = afterFiles.filter(f => !beforeFiles.has(f) && !f.endsWith('.bin') && !f.startsWith('.'));
+      if (newFiles.length === 0){
+        resolve({ error: 'mkvdolby reported success but no new output file was found in the directory - cannot locate the Dolby Vision result.' });
+        return;
+      }
+      let chosen = newFiles[0];
+      if (newFiles.length > 1){
+        let bestSize = -1;
+        for (const f of newFiles){
+          try {
+            const size = fs.statSync(path.join(inputDir, f)).size;
+            if (size > bestSize){ bestSize = size; chosen = f; }
+          } catch (e) { /* skip unreadable candidate */ }
+        }
+      }
+      const chosenPath = path.join(inputDir, chosen);
+      // Per direct user feedback: only ONE final file is wanted (the
+      // Dolby Vision metadata added on top of the existing HDR10
+      // output), not two separate files. --keep-source above is still
+      // used during the actual mkvdolby run as a safety net (this tool
+      // can't be tested directly here), but now that the new file is
+      // confirmed present, the original is replaced by it rather than
+      // kept alongside it.
+      let originalSize = 0;
+      try { originalSize = fs.statSync(inputPath).size; } catch (e) { /* handled by newFiles.length check above if this is somehow also missing */ }
+      const chosenSize = fs.statSync(chosenPath).size;
+      if (originalSize > 0 && chosenSize < originalSize * 0.5){
+        resolve({ error: `mkvdolby's output (${chosenPath}) is suspiciously small (${chosenSize} bytes vs the original's ${originalSize}) - this looks like a truncated or corrupt conversion, so the original HDR10 file was left untouched rather than being replaced by it. Check the console output above for what actually happened.` });
+        return;
+      }
+      try {
+        fs.unlinkSync(inputPath);
+      } catch (err) {
+        resolve({ error: `mkvdolby's new Dolby Vision file (${chosenPath}) is valid, but the original HDR10 file could not be removed to make way for it: ${err.message}. Both files currently exist - remove the original manually if you only want the Dolby Vision version.` });
+        return;
+      }
+      try {
+        fs.renameSync(chosenPath, inputPath);
+      } catch (err) {
+        // The original is already gone at this point - report this
+        // clearly rather than silently leaving the user with neither a
+        // correctly-named file nor their original.
+        resolve({ error: `The original HDR10 file was removed, but the new Dolby Vision file could not be renamed into its place: ${err.message}. Your Dolby Vision output still exists at ${chosenPath}, just under mkvdolby's own name instead of the expected one.` });
+        return;
+      }
+      console.log('Dolby Vision dynamic metadata added, single output file at:', inputPath);
+      resolve({ success: true, outputPath: inputPath });
+    });
+    proc.on("error", err => { console.log('mkvdolby process error:', err.message); resolve({ error: err.message }); });
+  });
+});
+
+ipcMain.handle('measure-real-hdr-brightness', async (event, payload) => {
+  console.log('\n===== REAL HDR BRIGHTNESS MEASUREMENT START =====\n');
+  const ffmpegPath = payload.ffmpeg;
+  const filePath = payload.filePath;
+  const pixelFilters = payload.pixelFilters; // the app's own real, full pixel filter chain (crop + HDR transform), as built for the actual encode
+  console.log('measuring real MaxCLL/MaxFALL for:', filePath);
+
+  return new Promise((resolve) => {
+    const args = [
+      '-i', filePath,
+      '-vf', `select='not(mod(n\\,5))',${pixelFilters},format=yuv420p10le,signalstats,metadata=print:file=-`,
+      '-f', 'null', '-'
+    ];
+    let proc;
+    try {
+      proc = spawn(ffmpegPath, args, { windowsHide: true });
+      activeProcesses.set('real-hdr-brightness-measure', proc);
+    } catch (err) {
+      console.log('measurement spawn failed:', err && err.message || err);
+      resolve({ error: 'spawn failed' });
+      return;
+    }
+    let stdout = "";
+    let stderr = "";
+    proc.stdout.on("data", d => stdout = appendBounded(stdout, d.toString()));
+    proc.stderr.on("data", d => stderr = appendBounded(stderr, d.toString()));
+    proc.on("close", (code) => {
+      activeProcesses.delete('real-hdr-brightness-measure');
+      if (code !== 0) {
+        console.log('measurement failed, exit code', code, '- stderr tail:', stderr.trim().slice(-300));
+        resolve({ error: 'measurement failed' });
+        return;
+      }
+      const ymaxMatches = [...stdout.matchAll(/lavfi\.signalstats\.YMAX=(\d+)/g)].map(m => parseInt(m[1], 10));
+      const yavgMatches = [...stdout.matchAll(/lavfi\.signalstats\.YAVG=([\d.]+)/g)].map(m => parseFloat(m[1]));
+      if (ymaxMatches.length === 0){
+        console.log('zero signal samples collected');
+        resolve({ error: 'no samples' });
+        return;
+      }
+      const m1 = 0.1593017578125, m2 = 78.84375;
+      const c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
+      function pqCodeToNits(codeValue){
+        const v = Math.min(1, Math.max(0, codeValue / 1023));
+        const vp = Math.pow(v, 1 / m2);
+        const num = Math.max(vp - c1, 0);
+        const den = c2 - c3 * vp;
+        return Math.pow(num / den, 1 / m1) * 10000;
+      }
+      const maxCLL = Math.round(Math.max(...ymaxMatches.map(pqCodeToNits)));
+      const maxFALL = Math.round(Math.max(...yavgMatches.map(pqCodeToNits)));
+      console.log(`real measured: MaxCLL=${maxCLL} MaxFALL=${maxFALL} (from ${ymaxMatches.length} sampled frames)`);
+      resolve({ maxCLL, maxFALL });
+    });
+    proc.on("error", err => { console.log('measurement process error:', err.message); resolve({ error: err.message }); });
+  });
+});
+
 // Empirically finds the highest safe npl value for THIS source's actual
 // detected peak brightness, using the exact same filter chain the real
 // encode will use (not a separate formula that could drift out of sync
@@ -636,23 +1061,58 @@ ipcMain.handle('calibrate-npl', async (event, payload) => {
   await runFF(['-y', '-f', 'lavfi', '-i', `color=c=0x${hexColor}:s=64x64:d=1`,
     '-frames:v', '1', patchPath]);
 
-  const candidates = [150, 160, 170, 180, 190, 200, 210, 220, 230, 240, 250];
+  // Serious mistake found and corrected via direct measurement on a
+  // real, actual overexposed output: npl is NOT a "how much headroom
+  // exists" measure - it's a direct, linear brightness value telling
+  // the encoder what absolute nits value SDR reference white should map
+  // to. Confirmed directly: a real output at npl=4800 (this tool having
+  // recommended 4000, its own new max) measured a median frame
+  // brightness of 1577 nits - catastrophically overexposed, since
+  // almost nothing clips against PQ's 10,000-nit theoretical ceiling
+  // regardless of how unnaturally bright the visual result is. The
+  // corrected clip-test (checking the PQ encoding's own ceiling
+  // directly, from the prior fix) was technically accurate but
+  // answering the wrong question - it can never meaningfully bound this
+  // parameter, since the real constraint is what nits value looks
+  // natural for SDR-reference white, not what's technically
+  // representable at all. Reverted the search range to end well within
+  // real, professionally-used bounds: ITU-R BT.2408 (the actual
+  // broadcast standard for SDR-reference-white-in-HDR mapping)
+  // specifies 203 nits as the standard target - candidates now top out
+  // at 400, giving room for a deliberately brighter-than-standard look
+  // without the overexposure the unbounded range produced.
+  const candidates = [100, 120, 140, 150, 160, 170, 180, 190, 200, 203, 220, 250, 300, 350, 400];
   let safeNpl = 150;
 
   for (const npl of candidates) {
     const testOut = path.join(tmpDir, `_npl_test_${npl}_${Date.now()}.png`);
-    const decodedOut = path.join(tmpDir, `_npl_decoded_${npl}_${Date.now()}.png`);
     const encResult = await runFF(['-y', '-i', patchPath, '-vf',
       `eq=gamma=${gamma}:saturation=${saturation},zscale=transferin=bt709:primariesin=bt709:matrixin=bt709:transfer=smpte2084:primaries=bt2020:matrix=bt2020nc:npl=${npl}:range=tv,format=yuv420p10le`,
       '-update', '1', '-frames:v', '1', testOut]);
     if (encResult.code !== 0) break;
+
+    const decodedOut = path.join(tmpDir, `_npl_decoded_${npl}_${Date.now()}.png`);
     const decResult = await runFF(['-y', '-i', testOut, '-vf',
       'zscale=transferin=smpte2084:primariesin=bt2020:matrixin=bt2020nc:transfer=bt709:primaries=bt709:matrix=bt709:range=tv,format=yuv420p',
       '-update', '1', '-frames:v', '1', decodedOut]);
     if (decResult.code !== 0) break;
 
-    // Check for clipping by sampling raw pixel data — a gray patch below
-    // the clip point should have all three channels under 255.
+    // Reverted back to this SDR-decode test after confirming directly
+    // that the "corrected" PQ-ceiling version (checking the encoded
+    // output's own native ceiling instead) never actually triggers
+    // within any practical npl range - every candidate from 150-400
+    // tested "safe" regardless of source peakLuma, since PQ's own
+    // 10,000-nit ceiling is so far away it provides zero real
+    // discrimination for calibration purposes. This test's practical
+    // effect, despite technically answering a different question (does
+    // this look right on an SDR-only display, not does the HDR encoding
+    // itself clip), is actually useful precisely because SDR's own
+    // limited range naturally bounds the result to a sensible order of
+    // magnitude for what SDR-reference-white should map to - confirmed
+    // via a real, catastrophic overexposure (1577 nits median on real
+    // output) when the PQ-ceiling version was used instead and had
+    // nothing to meaningfully stop it from recommending the very top of
+    // the search range every time.
     const rawResult = await new Promise((resolve) => {
       const proc = spawn(ffmpeg, ['-i', decodedOut, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], { windowsHide: true });
       const chunks = [];

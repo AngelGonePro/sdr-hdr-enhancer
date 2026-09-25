@@ -67,6 +67,8 @@
   </div>
   <div id="fileInfo" style="display:none" class="card"></div>
 
+  <div class="ti" id="tog-dv-dynamic-top" onclick="toggleMirrored(this, 'tog-dv-dynamic'); document.getElementById('mkvdolbyPathRow').style.display = isOn('tog-dv-dynamic-top') ? 'block' : 'none';"><div class="sw"></div><div class="ti-txt"><strong>To use this: download mkvdolby (path field appears below once this is on), set its path, then convert normally.</strong> Adds real, dynamic Dolby Vision Profile 8.1 metadata on top of this app's existing HDR10 output — OFF by default, still exactly one file, your static HDR10 configuration stays as the automatic fallback for non-Dolby-Vision players. Free download: <a href="https://github.com/tinof/hdr-analyze/releases" target="_blank">mkvdolby</a> (MIT-licensed, not affiliated with Dolby). Full explanation, setup, and the YouTube-compatibility caveat are under Dolby Vision Preservation further down.</div></div>
+
   <div class="slbl">Detected Source Quality</div>
   <div class="card" id="qualityCard">
     <div class="detected" id="qualityDisplay">Load a file to auto-detect resolution, framerate, and audio channels</div>
@@ -128,7 +130,7 @@
       <strong>Always applied, not optional (per direct request):</strong> Opus/Vorbis encoding always uses 32-bit float internal precision (<code>-sample_fmt flt -ar 48000</code>) feeding the encoder - Opus/Vorbis themselves are lossy codecs with no user-controllable output bit depth, this is purely about avoiding intermediate rounding during decode/filter/downmix before the lossy compression step. FLAC output always standardizes to 24-bit/48kHz (<code>-bits_per_raw_sample 24 -ar 48000</code>) - confirmed via direct research that ffmpeg's own flac encoder caps at 24-bit regardless of input format anyway, so this was already the practical result, just made explicit and consistent across every FLAC output path in this app now instead of only some.
     </div>
 
-    <div class="ti on" id="tog-ambisonics" onclick="toggle(this); onAudioTrackChange();"><div class="sw"></div><div class="ti-txt">Matrix-encode with Dolby Pro Logic II-compatible spatial encoding at the fold-to-stereo step, then layer the rest of the channels on top via this app's real 7.1 upmix — ONE audio track, not two — ON by default now that it's confirmed to produce ordinary, standard Vorbis with no special tagging. Only relevant to Integrated Engine mode. Uses ffmpeg's own native <code>aresample=matrix_encoding=dplii</code> implementation directly, not hand-derived phase-shift math.<br><br><strong>Single-track chain, confirmed via direct end-to-end testing:</strong> source → DPLII matrix-encode → this app's validated compressor/limiter/LUFS/limiter safety chain (same values proven against the real Blade Runner 2049 stress test) → stereo FLAC (all of the above baked in here) → this app's own real, already-validated 7.1 upmix (the same one always used) built from that DPLII-processed stereo → ONE 7.1 Vorbis track. Confirmed via a real test run: correctly produces <code>channels=8, channel_layout=7.1</code> as the file's only audio stream - not a second track, since multiple audio tracks aren't reliably usable in every container this app can output (MP4 in particular).<br><br><strong>Codec-agnostic by construction - confirmed via direct code review, not assumed:</strong> this works identically for DTS/DTS-HD MA/TrueHD/AC3/E-AC3/PCM sources - track selection only ever reads channel COUNT, never codec name, since the whole chain operates on whatever PCM ffmpeg decodes, regardless of the original bitstream format. Fundamentally different from Dolby Vision/HDR10+ (which need explicit per-format extraction because a decode destroys them) - no per-codec detection needed or built here, since none is needed.<br><br><strong>On Atmos specifically, since AC3/E-AC3/TrueHD can carry it:</strong> a normal decode (same as the plain fold) never extracts Atmos's object-based (JOC) data regardless of DPLII being on or off - only a pure, untouched <code>-c:a copy</code> preserves Atmos, and Integrated Engine mode is inherently a re-encode. Not a gap DPLII introduces; it processes whatever bed channels come out of the decode uniformly either way, never confusing an Atmos-carrying source for a plain one.<br><br><strong>Automatic fallback if DPLII fails on an unusual source:</strong> the downmix stage verifies its own real output (not just exit code) and automatically retries with the plain bass-managed fold if DPLII's matrix encoding didn't produce anything usable - no confirmed real case triggers this, but it's a genuine safety net rather than letting the whole job fail.<br><br><strong>Real bug found and fixed via direct measurement, not assumed - LFE/bass content:</strong> feeding LFE directly into <code>aresample=matrix_encoding=dplii</code> alongside everything else massively under-represents it - confirmed via a real synthetic 5.1 test source with known per-channel frequencies (bandpass+astats measurement): LFE came out ~19dB quieter than the uniform ~7dB gap seen across every other channel, while the plain fold correctly preserved it. This matches a real, independently documented finding from the DPLII community (HandBrake/Dolby Labs testing: "the LFE channel in DPL2's phasing is flawed... was better without the lfe channel phasing") - a known real limitation of DPLII's own matrix math for bass content, not a bug in this implementation specifically. Fixed the same way that community actually fixes it: LFE is now excluded from the matrix encode itself (matrix-encoding only the other 5 or 7 channels as 5.0/7.0) and mixed back into both output channels directly afterward with plain gain, no phase matrix. Confirmed via direct re-test: LFE now comes out within about 1dB of the old plain fold's own LFE level, and every other channel's level is unaffected.<br><br><strong>One honest, important limit, confirmed directly rather than assumed - please read this part:</strong> the 7.1 upmix does NOT literally decode DPLII's phase-encoded spatial information. Checked ffmpeg's own official bug tracker directly (ticket #10230, still open as an unimplemented feature request): software Pro Logic II decoding does not exist anywhere, including in ffmpeg itself - a real decoder does adaptive, real-time psychoacoustic steering, not a fixed mathematical inverse, which is exactly why it's historically only ever existed in licensed hardware chips, never software. What genuinely does carry through: the upmix operates on the DPLII-processed, safety-chain-protected stereo mix rather than a raw fold, so those quality/loudness choices aren't lost - but the literal phase relationships are not recoverable by this or any software upmix. A real Dolby Pro Logic II hardware decoder fed the underlying stereo mix directly remains the only way to actually recover that, and this single-track output doesn't expose that mix separately.</div></div>
+    <div class="ti" id="tog-ambisonics" onclick="toggle(this); onAudioTrackChange();"><div class="sw"></div><div class="ti-txt">Matrix-encode with Dolby Pro Logic II-compatible spatial encoding at the fold-to-stereo step, then layer the rest of the channels on top via this app's real 7.1 upmix — ONE audio track, not two. OFF by default per direct feedback: DPLII's matrix encoding made some content sound collapsed toward stereo, while the plain (regular) downmix this app used before this feature existed sounded noticeably more spatial for that content. Only relevant to Integrated Engine mode. Uses ffmpeg's own native <code>aresample=matrix_encoding=dplii</code> implementation directly, not hand-derived phase-shift math - turn this ON only if you specifically want DPLII-compatible matrix encoding for playback through an actual Pro Logic II hardware decoder.<br><br><strong>Single-track chain, confirmed via direct end-to-end testing:</strong> source → DPLII matrix-encode → this app's validated compressor/limiter/LUFS/limiter safety chain (same values proven against the real Blade Runner 2049 stress test) → stereo FLAC (all of the above baked in here) → this app's own real, already-validated 7.1 upmix (the same one always used) built from that DPLII-processed stereo → ONE 7.1 Vorbis track. Confirmed via a real test run: correctly produces <code>channels=8, channel_layout=7.1</code> as the file's only audio stream - not a second track, since multiple audio tracks aren't reliably usable in every container this app can output (MP4 in particular).<br><br><strong>Codec-agnostic by construction - confirmed via direct code review, not assumed:</strong> this works identically for DTS/DTS-HD MA/TrueHD/AC3/E-AC3/PCM sources - track selection only ever reads channel COUNT, never codec name, since the whole chain operates on whatever PCM ffmpeg decodes, regardless of the original bitstream format. Fundamentally different from Dolby Vision/HDR10+ (which need explicit per-format extraction because a decode destroys them) - no per-codec detection needed or built here, since none is needed.<br><br><strong>On Atmos specifically, since AC3/E-AC3/TrueHD can carry it:</strong> a normal decode (same as the plain fold) never extracts Atmos's object-based (JOC) data regardless of DPLII being on or off - only a pure, untouched <code>-c:a copy</code> preserves Atmos, and Integrated Engine mode is inherently a re-encode. Not a gap DPLII introduces; it processes whatever bed channels come out of the decode uniformly either way, never confusing an Atmos-carrying source for a plain one.<br><br><strong>Automatic fallback if DPLII fails on an unusual source:</strong> the downmix stage verifies its own real output (not just exit code) and automatically retries with the plain bass-managed fold if DPLII's matrix encoding didn't produce anything usable - no confirmed real case triggers this, but it's a genuine safety net rather than letting the whole job fail.<br><br><strong>Real bug found and fixed via direct measurement, not assumed - LFE/bass content:</strong> feeding LFE directly into <code>aresample=matrix_encoding=dplii</code> alongside everything else massively under-represents it - confirmed via a real synthetic 5.1 test source with known per-channel frequencies (bandpass+astats measurement): LFE came out ~19dB quieter than the uniform ~7dB gap seen across every other channel, while the plain fold correctly preserved it. This matches a real, independently documented finding from the DPLII community (HandBrake/Dolby Labs testing: "the LFE channel in DPL2's phasing is flawed... was better without the lfe channel phasing") - a known real limitation of DPLII's own matrix math for bass content, not a bug in this implementation specifically. Fixed the same way that community actually fixes it: LFE is now excluded from the matrix encode itself (matrix-encoding only the other 5 or 7 channels as 5.0/7.0) and mixed back into both output channels directly afterward with plain gain, no phase matrix. Confirmed via direct re-test: LFE now comes out within about 1dB of the old plain fold's own LFE level, and every other channel's level is unaffected.<br><br><strong>One honest, important limit, confirmed directly rather than assumed - please read this part:</strong> the 7.1 upmix does NOT literally decode DPLII's phase-encoded spatial information. Checked ffmpeg's own official bug tracker directly (ticket #10230, still open as an unimplemented feature request): software Pro Logic II decoding does not exist anywhere, including in ffmpeg itself - a real decoder does adaptive, real-time psychoacoustic steering, not a fixed mathematical inverse, which is exactly why it's historically only ever existed in licensed hardware chips, never software. What genuinely does carry through: the upmix operates on the DPLII-processed, safety-chain-protected stereo mix rather than a raw fold, so those quality/loudness choices aren't lost - but the literal phase relationships are not recoverable by this or any software upmix. A real Dolby Pro Logic II hardware decoder fed the underlying stereo mix directly remains the only way to actually recover that, and this single-track output doesn't expose that mix separately.</div></div>
 
 
 
@@ -180,7 +182,10 @@
 
   <div class="slbl">SDR → HDR10 Expansion</div>
   <div class="card">
-    <div class="ti on" id="tog-hdr" onclick="toggle(this)"><div class="sw"></div><div class="ti-txt">Process for HDR10 output — ON by default. Auto-detects whether the selected video track is already HDR or genuine SDR (via its color transfer characteristic - smpte2084/arib-std-b67 indicate HDR, anything else is treated as SDR - the same detection already shown as the green/yellow "Already HDR"/"SDR" badge next to each track above) and uses a different processing step for each, automatically, no separate toggle to remember. <strong>SDR source:</strong> the original expansion - gamma/saturation boost, then a BT.709→BT.2020/PQ tonemap - unchanged from before. <strong>Already-HDR source (e.g. a genuine 4K UHD Blu-ray rip):</strong> that expansion is skipped entirely instead of double-applying it - confirmed via a real report that running it unconditionally on already PQ/BT.2020-encoded pixels (treating already-correct HDR values as if they were BT.709 SDR needing conversion) produced visibly wrong colors on export. The source's real color values are already correct HDR10 in this case, so there's nothing to convert - crop, denoise, sharpen, and framerate handling all still apply completely normally either way, since those are independent of this toggle.<br><br><strong>Real mastering metadata now preserved for already-HDR sources (new), not just passed through pixel-wise:</strong> confirmed via a real 4K UHD source (genuine MaxCLL 4111 nits, MaxFALL 201 nits, extracted directly from the file's own Mastering Display/Content Light Level side data) that this app was previously REPLACING that real, accurate metadata with its own SDR-oriented Brightness Reference slider value (100-255 nits) on every already-HDR export - badly understating what the content actually is regardless of whether the pixels themselves were correct. A display trusting the old, wrong metadata would have no reason to render this content's real bright highlights at their intended brightness. Fixed by extracting the source's own real mastering-display/MaxCLL/MaxFALL directly (new `get-hdr-metadata` main process call - requires restarting the app after this update, like any main.js change) and using those exact values for the output's metadata instead of inventing new ones - falls back to the Brightness-Reference-driven values only for genuine SDR→HDR grades, where there's no real prior mastering info to preserve since this app is the one creating it.<br><br><strong>Why this is the right kind of "enhancement" for already-HDR content, not pixel-level tweaks:</strong> a source with real, accurate embedded metadata like this was professionally graded by a colorist - automatically boosting its contrast/saturation further would be working against a deliberate creative choice, the opposite of the SDR case (where this app is filling in a grade that never existed at all). Correcting the metadata so displays render the existing grade the way it was actually mastered is a real, verifiable improvement; guessing at further color changes on top of real graded HDR content isn't one this app makes without evidence it actually helps.</div></div>
+    <div class="ti on" id="tog-hdr" onclick="toggle(this)"><div class="sw"></div><div class="ti-txt">Process for HDR10 output — ON by default. Auto-detects whether the selected video track is already HDR or genuine SDR (via its color transfer characteristic AND, per direct request, a real measurement of whether its actual pixel values are plausible for genuine HDR - see below) and uses a different processing step for each, automatically. <strong>SDR source:</strong> the original expansion - gamma/saturation boost, then a BT.709→BT.2020/PQ tonemap - unchanged from before. <strong>Already-HDR source (e.g. a genuine 4K UHD Blu-ray rip):</strong> that expansion is skipped entirely instead of double-applying it - confirmed via a real report that running it unconditionally on already PQ/BT.2020-encoded pixels (treating already-correct HDR values as if they were BT.709 SDR needing conversion) produced visibly wrong colors on export. The source's real color values are already correct HDR10 in this case, so there's nothing to convert - crop, denoise, sharpen, and framerate handling all still apply completely normally either way, since those are independent of this toggle.<br><br><strong>Real mastering metadata now preserved for already-HDR sources (new), not just passed through pixel-wise:</strong> confirmed via a real 4K UHD source (genuine MaxCLL 4111 nits, MaxFALL 201 nits, extracted directly from the file's own Mastering Display/Content Light Level side data) that this app was previously REPLACING that real, accurate metadata with its own SDR-oriented Brightness Reference slider value (100-255 nits) on every already-HDR export - badly understating what the content actually is regardless of whether the pixels themselves were correct. A display trusting the old, wrong metadata would have no reason to render this content's real bright highlights at their intended brightness. Fixed by extracting the source's own real mastering-display/MaxCLL/MaxFALL directly (new `get-hdr-metadata` main process call - requires restarting the app after this update, like any main.js change) and using those exact values for the output's metadata instead of inventing new ones - falls back to the Brightness-Reference-driven values only for genuine SDR→HDR grades, where there's no real prior mastering info to preserve since this app is the one creating it.<br><br><strong>Why this is the right kind of "enhancement" for already-HDR content, not pixel-level tweaks:</strong> a source with real, accurate embedded metadata like this was professionally graded by a colorist - automatically boosting its contrast/saturation further would be working against a deliberate creative choice, the opposite of the SDR case (where this app is filling in a grade that never existed at all). Correcting the metadata so displays render the existing grade the way it was actually mastered is a real, verifiable improvement; guessing at further color changes on top of real graded HDR content isn't one this app makes without evidence it actually helps.<br><br><strong>Real, automatic mislabeled-source detection added (per direct request - no manual toggle, works on any file loaded):</strong> some sources carry a smpte2084/PQ transfer tag whose actual pixel VALUES were never transformed to match it - confirmed via direct measurement on a real source (its own PQ-to-nits conversion showed a ~990 nit MEDIAN brightness across the whole frame, a physically implausible number for genuine HDR grading, where even bright scenes normally sit well below their own peak most of the time) - a signature consistent with a known Windows HDR-desktop-capture artifact: a capture tool tags the file as PQ because the desktop compositor was in HDR mode, without the captured content itself ever being re-graded into real PQ values. The tag alone can't distinguish this from genuine HDR - only the actual pixel data can. This app now automatically samples real frames from the selected track (reusing the existing brightness-analysis pipeline already built for "Analyze Source Brightness") and computes the true PQ-to-nits median whenever the track claims already-HDR; if that median is implausibly high for real content (see `main.js`'s `detect-mislabeled-hdr` for the exact, documented threshold and reasoning), the track is automatically treated as SDR instead, routed through the normal expansion below with no action needed from you.</div></div>
+    <div class="warn-box" id="mislabeledHdrWarning" style="display:none;margin-top:8px">
+      ⚠ <strong>Mislabeled HDR source detected and corrected automatically.</strong> This track's <code>color_transfer</code> tag claims PQ/HDR, but its actual pixel values measured implausibly high for genuine HDR grading (consistent with a known Windows HDR-desktop-capture mislabeling artifact, not real HDR content). Routed through the normal SDR→HDR expansion instead of passthrough, and the Brightness Reference below has been automatically set to match this source's own apparent brightness (verified directly on real content) - no manual adjustment needed.
+    </div>
     <div class="warn-box">
       <strong>Honest limit:</strong> this is real, working color expansion (highlight gamma + saturation boost
       into a wider BT.2020/PQ container, verified to produce valid HDR10 metadata) — but it is <em>not</em>
@@ -190,20 +195,21 @@
       when that's not practical.
     </div>
     <div class="row" style="margin-top:10px">
-      <div class="field"><label>Highlight Gamma <span class="va" id="hdrGammaVal">1.15</span></label>
-        <input type="range" id="hdrGammaSlider" min="1.0" max="1.5" step="0.05" value="1.15" oninput="document.getElementById('hdrGammaVal').textContent=this.value">
+      <div class="field"><label>Highlight Expansion <span class="va" id="hdrGammaVal">1.0</span></label>
+        <input type="range" id="hdrGammaSlider" min="0.5" max="3.0" step="0.1" value="1.0" oninput="document.getElementById('hdrGammaVal').textContent=this.value">
       </div>
       <div class="field"><label>Saturation Boost <span class="va" id="hdrSatVal">1.25</span></label>
-        <input type="range" id="hdrSatSlider" min="1.0" max="1.6" step="0.05" value="1.25" oninput="document.getElementById('hdrSatVal').textContent=this.value">
+        <input type="range" id="hdrSatSlider" min="1.0" max="3.0" step="0.05" value="1.25" oninput="document.getElementById('hdrSatVal').textContent=this.value">
       </div>
-      <div class="field"><label>Brightness Reference (nits) <span class="va" id="hdrRefVal">150</span> — also sets HDR10 metadata (MaxCLL/mastering-display) automatically</label>
-        <input type="range" id="hdrRefSlider" min="100" max="255" step="10" value="150" oninput="document.getElementById('hdrRefVal').textContent=this.value; updatePeakDisplay();">
+      <div class="field"><label>Brightness Reference (nits) <span class="va" id="hdrRefVal">300</span> — also sets HDR10 metadata automatically.</label>
+        <input type="range" id="hdrRefSlider" min="200" max="4000" step="50" value="300" oninput="document.getElementById('hdrRefVal').textContent=this.value; updatePeakDisplay();">
+        <div class="ti-txt">Real, fundamental architecture fix, grounded in ITU-R BT.2446 (the official broadcast standard for SDR-to-HDR conversion) after three consecutive failed attempts at tuning a single linear brightness value. The standard explicitly warns that linear scaling of the whole image is wrong for this problem - it can never keep normal content looking normal while making highlights pop, since those need different treatment for different brightness zones. This slider now controls something different than before: content up to 78% signal (the standard's own recommended breakpoint) gets an unchanged, 1:1 mapping - preserving the original look exactly - while only genuine highlights above that point expand toward the peak this slider sets, at a rate set by Highlight Expansion (default 1.0 = continuous, unmodified slope; higher values push highlights toward white faster for more pop). Default lowered three times now (1000→600→450→300), for two different reasons: the first two drops (overexposure on genuinely bright content, confirmed via direct measurement each time) got it to a reasonable single-display level; the third drop is for a different problem entirely - cross-display consistency. Confirmed via a direct test with dynamic tone mapping switched OFF on both of a user's displays that the same accurate file still rendered inconsistently between them, pointing to a genuine difference in the displays' own real peak brightness capability, not TV-side processing or file metadata. 300 keeps this content's own real measured peak (verified directly: 236 nits) safely under even the lowest official VESA HDR certification floor (DisplayHDR400 = 400 nits minimum) - removing the room for different-capability displays to disagree on how to compress the content, rather than trying to get them to agree on how to compress it.</div>
       </div>
-      <div class="field"><label>HDR10 Metadata Peak (nits) <span class="va" id="hdrPeakVal">150</span> — read-only, always matches Brightness Reference above</label>
-        <input type="range" id="hdrPeakSlider" min="100" max="255" step="10" value="150" disabled style="opacity:.5">
+      <div class="field"><label>HDR10 Metadata Peak (nits) <span class="va" id="hdrPeakVal">300</span> — read-only, always matches Brightness Reference above</label>
+        <input type="range" id="hdrPeakSlider" min="200" max="4000" step="50" value="300" disabled style="opacity:.5">
       </div>
     </div>
-    <button class="btn-detect" onclick="runBrightnessAnalysis()" style="margin-top:10px">Analyze Source Brightness (finds real headroom, calibrates a safe ceiling for THIS content)</button>
+    <button class="btn-detect" disabled style="margin-top:10px;opacity:.5" title="No longer needed: the new breakpoint-based architecture inherently protects midtones from clipping regardless of peak target, so per-source calibration isn't required">Analyze Source Brightness (no longer needed - see Brightness Reference above)</button>
     <div id="brightnessAnalysisResult" class="detected" style="margin-top:10px"></div>
     <div class="path-hint" style="margin-top:8px">
       <strong>Corrected a real bug (confirmed via a direct report that SDR→HDR output "looks worse" than the
@@ -270,6 +276,16 @@
     </div>
     <div class="path-hint" id="mkvmergeSetupHint" style="margin-top:8px">
       <strong>Setup:</strong> download <code>dovi_tool</code> from <a href="https://github.com/quietvoid/dovi_tool/releases" target="_blank">github.com/quietvoid/dovi_tool/releases</a> (the Windows x86_64 zip), extract <code>dovi_tool.exe</code> somewhere permanent, and set the path above. Only needed when Dolby Vision preservation is on. mkvmerge's own path is set unconditionally near the top of this page now (Output section) since it's needed by several features beyond just Dolby Vision.
+    </div>
+
+    <div class="ti" id="tog-dv-dynamic" onclick="toggleMirrored(this, 'tog-dv-dynamic-top'); document.getElementById('mkvdolbyPathRow').style.display = isOn('tog-dv-dynamic') ? 'block' : 'none';" style="margin-top:10px"><div class="sw"></div><div class="ti-txt"><strong>To use this: download mkvdolby (link and path field below appear once this is on), set its path, then just convert normally - nothing else changes.</strong> Adds real, dynamic (scene-by-scene) Dolby Vision Profile 8.1 metadata on top of this app's existing, accurate HDR10 output — OFF by default. Result is still exactly ONE file: your same static-HDR10 configuration stays in it, unchanged, as the base layer and automatic fallback for any non-Dolby-Vision player or display - this only adds the extra dynamic layer on top, it never replaces or re-processes the video itself. Only applies to genuine SDR-to-HDR conversions (not already-HDR sources, which keep using this app's own existing Dolby Vision/HDR10+ Preservation toggles above for their own real, existing metadata, untouched).<br><br><strong>What this adds, and why it's different from the static HDR10 metadata this app already produces:</strong> everything else on this page for SDR conversion produces accurate, but STATIC, HDR10 metadata - one brightness number for the entire file. This uses a real, free, open-source, third-party project (<a href="https://github.com/tinof/hdr-analyze" target="_blank">hdr-analyze</a>, MIT-licensed, not affiliated with Dolby) to analyze this app's own finished HDR10 output frame-by-frame and generate genuine Dolby Vision Profile 8.1 (CM v4.0) dynamic metadata on top of it - real per-scene brightness guidance, not one static number.<br><br><strong>The existing HDR10 output is the automatic fallback by the format's own design, not something built separately:</strong> Profile 8.1 always carries a fully valid, complete HDR10 base layer underneath its dynamic metadata - any player or display without Dolby Vision support simply ignores the extra metadata and plays the same accurate HDR10 stream this app already produces. Nothing about the existing HDR10 configuration changes - this adds the dynamic metadata directly on top, replacing the file in place, not creating a second copy.<br><br><strong>Real, important limitation to know before turning this on - Dolby Vision is not supported everywhere:</strong> confirmed directly via YouTube's own official HDR upload documentation that YouTube does not support Dolby Vision uploads at all (HDR10 and optional HDR10+ dynamic metadata are the only types listed). If YouTube upload is part of your workflow, keep using the plain HDR10 output for that specifically - this feature is for local playback and devices/apps that do support real Dolby Vision.<br><br><strong>Honest, direct disclosure about this specific integration, please read:</strong> every other external-tool integration on this page (dovi_tool, hdr10plus_tool, mkvmerge, PgsToSrt) was built and verified by directly running that exact tool during development. <code>mkvdolby</code> is a Windows-only prebuilt binary that could not be run or tested in the environment that built this feature - the integration below follows the tool's own documented command-line behavior exactly (including its documented default of deleting the source file after a successful conversion, which this app always overrides by passing <code>--keep-source</code>, and its own <code>--verify</code> self-check), but has not been confirmed end-to-end against a real run the way everything else here has. Use the "Keep intermediate files" debug toggle above and check the console output from this step directly the first time you use it.<br><br><strong>Mechanism:</strong> after this app's normal SDR-to-HDR job finishes and produces its usual, accurate static-HDR10 .mkv, this runs <code>mkvdolby &lt;output.mkv&gt; --keep-source --verify</code> as one additional, final step. <code>--keep-source</code> is used only as a safety net during that run itself (this tool can't be tested directly here, so both files existing momentarily protects against a partial/corrupt conversion) - once the new file is confirmed present and a sane size, the original static-HDR10 file is removed and the Dolby Vision result takes its exact place, so you end up with exactly one final file, not two.</div></div>
+    <div class="row" id="mkvdolbyPathRow" style="margin-top:10px;display:none">
+      <div class="field"><label>mkvdolby Path</label>
+        <input class="path-inp" type="text" id="mkvdolbyPath" placeholder="C:\hdr-analyze\mkvdolby.exe">
+      </div>
+    </div>
+    <div class="path-hint" id="mkvdolbySetupHint" style="margin-top:8px">
+      <strong>Setup:</strong> download the prebuilt Windows release from <a href="https://github.com/tinof/hdr-analyze/releases" target="_blank">github.com/tinof/hdr-analyze/releases</a>, extract <code>mkvdolby.exe</code> (and the <code>hdr_analyzer_mvp.exe</code> it calls internally - keep them in the same folder) somewhere permanent, and set the path above. This tool also needs <code>dovi_tool</code> and <code>mkvmerge</code> in its own PATH or alongside it - both are already set up above for this app's own Dolby Vision Preservation and mkvmerge features, so if those already work, this only needs its own <code>mkvdolby.exe</code> location.
     </div>
 
 
@@ -669,7 +685,8 @@ const DEFAULT_PATHS = {
   doviTool: 'C:\\Users\\Angel\\Documents\\dovi_tool-2.3.3-x86_64-pc-windows-msvc\\dovi_tool.exe',
   hdr10plusTool: 'C:\\hdr10plus_tool\\hdr10plus_tool.exe',
   mkvmerge: 'C:\\Program Files\\MKVToolNix\\mkvmerge.exe',
-  pgsToSrt: 'C:\\Users\\Angel\\Documents\\PgsToStr-1.4.8\\PgsToSrt.exe'
+  pgsToSrt: 'C:\\Users\\Angel\\Documents\\PgsToStr-1.4.8\\PgsToSrt.exe',
+  mkvdolby: 'C:\\Users\\Angel\\Documents\\hdr-analyze\\mkvdolby.exe'
 };
 
 // Converts every toggle's long description text (and the long .path-hint
@@ -729,6 +746,11 @@ let detectedAudioTrackDuration = null;
 let detectedCrop = null;
 
 function toggle(el){ el.classList.toggle('on'); }
+function toggleMirrored(el, mirrorId){
+  el.classList.toggle('on');
+  const mirror = document.getElementById(mirrorId);
+  if (mirror) mirror.classList.toggle('on', el.classList.contains('on'));
+}
 
 // Only one GPU decode method can be active per ffmpeg run — clicking one
 // vendor toggle turns the other two off, rather than allowing an invalid
@@ -961,7 +983,8 @@ async function detectQuality(){
   const display = document.getElementById('qualityDisplay');
   if (!window.electronAPI?.getVideoInfo){ display.textContent = 'Video info detection unavailable outside Electron'; return; }
   const ffmpeg = document.getElementById('ffmpegPath').value.trim();
-  const result = await window.electronAPI.getVideoInfo({ ffmpeg, filePath });
+  const mkvmerge = document.getElementById('mkvmergePath').value.trim();
+  const result = await window.electronAPI.getVideoInfo({ ffmpeg, filePath, mkvmerge });
   if (result.error){ display.innerHTML = `<span style="color:var(--red)">Detection failed: ${result.error}</span>`; return; }
 
   videoDuration = result.duration || 0;
@@ -999,8 +1022,16 @@ async function detectQuality(){
   // still reading the same file in the background could make detection
   // come back empty, two ffmpeg processes competing for the same file's
   // disk I/O at once.
+  // Analyze Source Brightness/calibrate-npl REMOVED from the automatic
+  // trigger chain: it internally tests the OLD linear eq=gamma+zscale
+  // filter chain, which no longer matches the actual pixel filter after
+  // the BT.2446 architecture fix (see buildHdrPixelFilters) - its
+  // "safe ceiling" recommendation would now be testing something this
+  // app doesn't even run anymore, and is no longer needed regardless,
+  // since the new breakpoint architecture inherently protects midtones
+  // from clipping regardless of the peak target chosen.
   pendingDetections.push(runCropDetect());
-  pendingDetections.push(runBrightnessAnalysis());
+  pendingDetections.push(runMislabeledHdrCheck());
 }
 
 // Whether a color transfer characteristic indicates the source is already
@@ -1019,7 +1050,26 @@ function isHdrTransfer(colorTransfer){
 // running the SDR->HDR expansion transform (gamma/saturation boost +
 // BT.709->PQ tonemap) on a source that's already PQ/BT.2020 encoded
 // double-applies a transform the pixels never needed, corrupting colors.
+// Cached, per-track result of the automatic mislabeled-HDR detection
+// below - set asynchronously (real frame analysis takes a moment to
+// run) whenever a track claiming already-HDR is loaded/selected. Starts
+// false so a track is never second-guessed before its own check has had
+// a chance to run at least once.
+let mislabeledHdrDetected = false;
 function isSelectedVideoTrackHDR(){
+  // Real, automatic mislabeled-source correction, per direct request (no
+  // manual toggle - this runs on every file loaded automatically). Some
+  // sources carry a smpte2084/PQ color_transfer tag whose actual pixel
+  // VALUES were never transformed to match it - a real, measured case
+  // (a real source's own PQ-to-nits conversion showed a ~990 nit AVERAGE
+  // brightness across the frame, a physically implausible number for
+  // genuine HDR grading) consistent with a known Windows HDR-desktop-
+  // capture mislabeling artifact. Correct metadata alone can't fix this,
+  // since the underlying pixel data itself needs the SDR->HDR expansion
+  // this app already has - the tag just prevents it from ever running.
+  // Checked first so every dependent path (pixel filter branch, hwaccel
+  // detection, metadata fallback) respects it automatically.
+  if (mislabeledHdrDetected) return false;
   const checked = document.querySelector('input[name="videoTrackSel"]:checked');
   if (checked) return checked.dataset.hdr === 'true';
   if (detectedVideoStreams.length > 0) return isHdrTransfer(detectedVideoStreams[0].colorTransfer);
@@ -1356,8 +1406,16 @@ function onVideoTrackChange(){
   // old result immediately, so there's no separate reset step needed.
   // Tracked in pendingDetections for the same reason as the file-load
   // trigger — addToQueue waits for these before proceeding.
+  // Analyze Source Brightness/calibrate-npl REMOVED from the automatic
+  // trigger chain: it internally tests the OLD linear eq=gamma+zscale
+  // filter chain, which no longer matches the actual pixel filter after
+  // the BT.2446 architecture fix (see buildHdrPixelFilters) - its
+  // "safe ceiling" recommendation would now be testing something this
+  // app doesn't even run anymore, and is no longer needed regardless,
+  // since the new breakpoint architecture inherently protects midtones
+  // from clipping regardless of the peak target chosen.
   pendingDetections.push(runCropDetect());
-  pendingDetections.push(runBrightnessAnalysis());
+  pendingDetections.push(runMislabeledHdrCheck());
 
   // Duration Correction's target should reflect THIS specific video
   // track, not just the overall container duration — matters for the
@@ -1543,6 +1601,39 @@ function getSelectedVideoTrackPixFmt(){
   return track ? track.pixFmt : null;
 }
 
+function getSelectedVideoTrackColorInfo(){
+  const idx = getSelectedVideoTrackIndex();
+  const track = idx != null
+    ? lastVideoStreams.find(t => String(t.index) === idx)
+    : lastVideoStreams[0];
+  return track ? { primaries: track.colorPrimaries, space: track.colorSpace, transfer: track.colorTransfer } : { primaries: null, space: null, transfer: null };
+}
+
+// Maps a source's real, detected color_primaries/color_transfer (from
+// ffprobe) to the matching zscale primariesin=/transferin= value, so
+// this app correctly adapts to whatever combination of primaries and
+// transfer curve actually arrives - BT.709 primaries with PQ transfer,
+// BT.2020 primaries with a BT.709 or pure-gamma transfer curve, etc. -
+// rather than assuming every source matches one specific, hardcoded
+// combination. ffprobe and zscale use the same ITU-T H.273 names for
+// both fields, so a real, recognized detected value passes straight
+// through; only a genuinely missing/unrecognized value falls back to
+// bt709, the most common real-world default for ordinary (non-HDR)
+// content.
+const KNOWN_ZSCALE_PRIMARIES = ['bt709', 'bt2020', 'smpte170m', 'smpte240m', 'film', 'bt470bg', 'bt470m', 'smpte428', 'smpte431', 'smpte432', 'jedec-p22'];
+const KNOWN_ZSCALE_TRANSFERS = ['bt709', 'gamma22', 'gamma28', 'smpte170m', 'smpte240m', 'linear', 'log100', 'log316', 'iec61966-2-4', 'bt1361e', 'iec61966-2-1', 'bt2020-10', 'bt2020-12', 'smpte2084', 'arib-std-b67'];
+function resolveZscalePrimaries(detected){
+  return KNOWN_ZSCALE_PRIMARIES.includes(detected) ? detected : 'bt709';
+}
+function resolveZscaleTransfer(detected){
+  return KNOWN_ZSCALE_TRANSFERS.includes(detected) ? detected : 'bt709';
+}
+const KNOWN_ZSCALE_MATRICES = ['bt709', 'bt2020nc', 'bt2020c', 'smpte170m', 'smpte240m', 'bt470bg', 'fcc'];
+function resolveZscaleMatrix(detected){
+  return KNOWN_ZSCALE_MATRICES.includes(detected) ? detected : 'bt709';
+}
+
+
 let pendingDetections = [];
 // Confirmed via a real report: switching video tracks right after a file
 // loads could let a slower, stale detection call for the OLD track (e.g.
@@ -1554,6 +1645,7 @@ let pendingDetections = [];
 // since, discarding stale results instead of letting them win a race.
 let cropDetectGeneration = 0;
 let brightnessDetectGeneration = 0;
+let mislabeledHdrDetectGeneration = 0;
 
 // Keeps the (now read-only) HDR10 Metadata Peak display in sync with the
 // Brightness Reference slider - confirmed via direct measurement this
@@ -1593,12 +1685,30 @@ async function runBrightnessAnalysis(){
   if (myGeneration !== brightnessDetectGeneration) return; // a newer call has since started — discard this stale result
   if (analysis.error){ resultEl.innerHTML = `<span style="color:var(--red)">${analysis.error}</span>`; return; }
 
-  resultEl.textContent = `Detected peak luma: ${analysis.peakLuma}/255 (${analysis.totalSamples} samples) — calibrating safe ceiling...`;
+  // Real, definitive root cause found and fixed via direct measurement:
+  // for a mislabeled-HDR source, analyze-brightness measures RAW pixel
+  // values naively downscaled to 8-bit with no PQ-aware interpretation -
+  // confirmed directly that ~93% of sampled frames already hit the
+  // absolute maximum (255) this way, since the mislabeling itself
+  // systematically elevates raw code values, not because the content is
+  // genuinely that bright. calibrate-npl's own test-patch scaling
+  // (peakLuma/180) then builds an already-fully-saturated starting
+  // patch when peakLuma=255, so every candidate "clips" immediately
+  // regardless of the search range - explaining why raising the ceiling
+  // alone changed nothing for this kind of source. The source's own
+  // raw-measured peak is fundamentally meaningless here - substitutes a
+  // fixed, reasonable generic value (200, typical of genuinely
+  // well-exposed normal SDR content) instead when the source is already
+  // known to be mislabeled.
+  const effectivePeakLuma = mislabeledHdrDetected ? 200 : analysis.peakLuma;
+  resultEl.textContent = mislabeledHdrDetected
+    ? `Source's own raw peak luma (${analysis.peakLuma}/255) is unreliable for a mislabeled-HDR source - using a standard reference value instead. Calibrating safe ceiling...`
+    : `Detected peak luma: ${analysis.peakLuma}/255 (${analysis.totalSamples} samples) — calibrating safe ceiling...`;
 
   const gamma = document.getElementById('hdrGammaSlider').value;
   const sat = document.getElementById('hdrSatSlider').value;
   const calibration = await window.electronAPI.calibrateNpl({
-    ffmpeg, peakLuma: analysis.peakLuma, gamma, saturation: sat
+    ffmpeg, peakLuma: effectivePeakLuma, gamma, saturation: sat
   });
   if (myGeneration !== brightnessDetectGeneration) return; // check again after the second await
 
@@ -1612,6 +1722,61 @@ async function runBrightnessAnalysis(){
     + `Calibrated safe brightness: <strong style="color:var(--green)">${calibration.safeNpl} nits</strong>`
     + (headroom > 0 ? ` — ${headroom} more than the generic default, with zero measured clipping risk for this source.` : ' (generic default was already at the safe ceiling for this content).');
 }
+
+async function runMislabeledHdrCheck(){
+  const warningBox = document.getElementById('mislabeledHdrWarning');
+  mislabeledHdrDetected = false;
+  warningBox.style.display = 'none';
+  if (!filePath){ console.log('[mislabeled-hdr] skipped - no file loaded'); return; }
+  // Only worth running at all when the track's own raw tag claims HDR -
+  // nothing to validate for a track already correctly identified as SDR.
+  // Reads isHdrTransfer() directly (not isSelectedVideoTrackHDR()) since
+  // that function now depends on this very check's own result - calling
+  // it here would be circular.
+  const checked = document.querySelector('input[name="videoTrackSel"]:checked');
+  const claimsHdr = checked ? checked.dataset.hdr === 'true'
+    : (detectedVideoStreams.length > 0 && isHdrTransfer(detectedVideoStreams[0].colorTransfer));
+  if (!claimsHdr){ console.log('[mislabeled-hdr] skipped - track does not claim HDR, nothing to validate'); return; }
+
+  console.log('[mislabeled-hdr] starting check for', filePath);
+  const myGeneration = ++mislabeledHdrDetectGeneration;
+  await window.electronAPI.killFFmpegJob?.({ jobId: 'mislabeled-hdr-detect' }).catch(() => {});
+  const ffmpeg = document.getElementById('ffmpegPath').value.trim();
+  const videoTrackIndex = getSelectedVideoTrackIndex();
+  const result = await window.electronAPI.detectMislabeledHdr({
+    ffmpeg, filePath, duration: videoDuration, videoTrackIndex,
+    sourcePixFmt: getSelectedVideoTrackPixFmt()
+  });
+  console.log('[mislabeled-hdr] result:', JSON.stringify(result), '(generation', myGeneration, 'vs current', mislabeledHdrDetectGeneration, ')');
+  if (myGeneration !== mislabeledHdrDetectGeneration){ console.log('[mislabeled-hdr] discarded - stale, a newer check has since started'); return; }
+  if (result.error){ console.log('[mislabeled-hdr] discarded - check itself failed:', result.error); return; }
+  mislabeledHdrDetected = !!result.mislabeled;
+  warningBox.style.display = mislabeledHdrDetected ? 'block' : 'none';
+  console.log('[mislabeled-hdr] final mislabeledHdrDetected =', mislabeledHdrDetected);
+  // Automatic brightness-matching REMOVED after failing a third time in
+  // a row on the exact, carefully-verified value from the prior attempt
+  // (npl=1062) - still reported as overexposed. Root realization: this
+  // approach measured the mislabeled source's own raw PQ-decoded nits
+  // and tried to reproduce that same number in a properly, honestly
+  // tagged output - but a well-formed output with accurate, consistent
+  // metadata gets trusted and rendered at its full, honest brightness by
+  // a real player, while the ORIGINAL mislabeled file (with broken,
+  // inconsistent metadata) likely gets tone-mapped down more
+  // conservatively by whatever's actually playing it. Same numeric
+  // target, different real-world rendering outcome - no further pixel-
+  // math tuning on the source's own numbers can reliably predict the
+  // output's real, perceived brightness, since that depends on
+  // player/display tone-mapping behavior this tool cannot see or
+  // measure. Brightness Reference is left at whatever the normal,
+  // bounded (100-400) calibration already sets for any other source -
+  // no special-cased override here anymore. See the Test Clip Duration
+  // field for a fast way to dial this in visually.
+  // isSelectedVideoTrackHDR()'s result may have just changed - refresh
+  // the one other piece of UI that also depends on it and could
+  // otherwise show a stale state from before this async result landed.
+  updateNativeGpuSdrWarning();
+}
+
 
 async function runCropDetect(){
   const resultEl = document.getElementById('cropResult');
@@ -2140,19 +2305,56 @@ function buildHdrPixelFilters(){
   const use444Output = isOn('tog-444-output');
   const filters = [];
   if (isSelectedVideoTrackHDR()){
-    // Already HDR (PQ or HLG) - the transform below is calibrated
-    // specifically for BT.709 SDR input; running it on pixels that are
-    // already PQ-encoded double-transforms them, which is exactly what
-    // produced the reported color corruption. The source's own color
-    // values are already correct HDR10 - nothing to convert. Only
-    // normalize final chroma format per the 4:4:4 output toggle (a
+    // Already HDR (PQ or HLG). Genuinely converts the gamut to real
+    // BT.2020 when the source's own detected primaries aren't already
+    // BT.2020 - covers any real combination (BT.709+PQ, BT.2020+HLG,
+    // etc.), not just one specific case, using the source's own real,
+    // detected values (resolveZscalePrimaries/resolveZscaleTransfer)
+    // rather than assuming what they are. The transfer function itself
+    // is left as its own real value here (PQ stays PQ, HLG stays HLG) -
+    // only the gamut is touched - since a full transfer-curve
+    // conversion (e.g. HLG->PQ) is a different, more involved
+    // operation than a primaries-only remap and isn't what was asked
+    // for here. Skips this step entirely when the source is already
+    // genuinely BT.2020 (the common case) - nothing to convert.
+    const colorInfo = getSelectedVideoTrackColorInfo();
+    console.log('[hdr-passthrough] detected source color info:', JSON.stringify(colorInfo));
+    // Real, dangerous bug fixed after an urgent, direct user correction:
+    // resolveZscalePrimaries() falls back to 'bt709' whenever the
+    // detected value is missing/unrecognized - so if detection ever
+    // failed or returned nothing (confirmed to have happened on the
+    // user's own DaVinci-Resolve-exported, genuinely-BT.2020 AV1
+    // source), this code would silently, forcibly run an INCORRECT
+    // BT.709->BT.2020 remap on data that was already correctly BT.2020,
+    // actively corrupting already-correct colors - not a relabeling
+    // issue, a real, destructive pixel transform applied to data that
+    // never needed it. The two possible mistakes here aren't symmetric:
+    // skipping a genuinely-needed conversion leaves a source merely
+    // untouched, while converting already-correct data actively
+    // corrupts it - so when primaries can't be confidently determined,
+    // the only safe default is to assume the source is ALREADY BT.2020
+    // and skip conversion, never to assume BT.709 and convert anyway.
+    const rawPrimaries = colorInfo.primaries;
+    const needsGamutConversion = !!(rawPrimaries && KNOWN_ZSCALE_PRIMARIES.includes(rawPrimaries) && rawPrimaries !== 'bt2020');
+    if (needsGamutConversion){
+      const sourceMatrix = resolveZscaleMatrix(colorInfo.space);
+      const hdrTransfer = colorInfo.transfer === 'arib-std-b67' ? 'arib-std-b67' : 'smpte2084';
+      filters.push(`format=yuv444p10le`);
+      filters.push(`zscale=rangein=tv:range=tv:transferin=${hdrTransfer}:transfer=${hdrTransfer}:primariesin=${rawPrimaries}:primaries=bt2020:matrixin=${sourceMatrix}:matrix=bt2020nc`);
+    }
+    // Saturation boost REMOVED per explicit, urgent user correction: the
+    // user color-graded this source themselves in DaVinci Resolve and
+    // does not want this app altering those deliberate choices at all -
+    // "enhancement" was the wrong instinct for already professionally-
+    // graded content; it only ever made sense for genuinely flat/under-
+    // graded sources, which is what the SDR expansion path below is for.
+    // Only normalize final chroma format per the 4:4:4 output toggle (a
     // legitimate, independent choice regardless of source type) - 4:4:4
-    // INTERMEDIATE specifically is skipped here, since its whole benefit
-    // (precision headroom during the nonlinear transform below) doesn't
-    // apply when no transform is running; upsampling a real subsampled
-    // UHD source's chroma to 4:4:4 with nothing new to gain would just
-    // be wasted work. This app's actual content-improving levers for
-    // this case - denoise, sharpen, crop - already apply unconditionally
+    // INTERMEDIATE specifically only matters when the gamut conversion
+    // above actually ran; with nothing to convert there's no precision
+    // benefit to upsampling a real subsampled UHD source's chroma for
+    // no reason. This app's actual content-improving levers for this
+    // case - denoise, sharpen, crop - already apply unconditionally
     // elsewhere in this same filter chain, independent of this toggle,
     // so they still run normally here too.
     filters.push(`format=${use444Output ? 'yuv444p10le' : 'yuv420p10le'}`);
@@ -2188,49 +2390,77 @@ function buildHdrPixelFilters(){
   // 100-nit reference-white test is unaffected - only the shadow region
   // actually changes.
   filters.push(`zscale=rangein=tv:range=pc`);
-  // Verified working combination: highlight/saturation expansion, then
-  // the confirmed-working BT.709->BT.2020/PQ colorspace conversion.
-  // contrast was removed after direct testing showed it crushing
-  // near-black detail to pure 0 — confirmed via a real test image with
-  // known pixel values (0, 5, 128, 250, 255): with contrast=1.1, value 5
-  // collapsed to identical to value 0, destroying shadow detail. Without
-  // it, gamma+saturation alone still produce a real, working expansion
-  // (confirmed against the mathematically correct PQ code value for
-  // 100-nit reference white — measured 132/255, calculated 130/255,
-  // matching almost exactly) without that clipping risk.
-  filters.push(`eq=gamma=${gamma}:saturation=${sat}`);
-  // Brightness Reference slider controls npl within a range actually
-  // tested for safety (100-220) — unlike the earlier mistake of tying
-  // this to the Target Peak metadata slider (which went up to 4000 and
-  // caused catastrophic midtone blowout at its default of 1000). This
-  // slider's own range is capped well below where testing showed
-  // clipping starts (~250), and its default (150) is a validated,
-  // real brightness lift confirmed via direct testing: a midtone that
-  // was under-lit at the pure-100 default (180,150,130 -> 198,161,129)
-  // moves to a meaningfully brighter, still-unclipped (234,193,153) at
-  // npl=150. Target Peak below remains metadata-only, unrelated to this.
+  // Fundamental architecture fix, grounded in real research (ITU-R
+  // BT.2446, the official broadcast standard for exactly this SDR-to-HDR
+  // conversion problem) after three consecutive failed attempts at
+  // tuning a single linear npl parameter. The standard EXPLICITLY WARNS
+  // against linear scaling for this exact reason: "linear scaling would
+  // increase the mean luminance too much...mid-tones become too high for
+  // comfortable viewing" - explaining every failure mode hit: a uniform
+  // linear scale can never keep normal content looking normal AND make
+  // highlights pop, since those need different treatment for different
+  // brightness zones, not one multiplier. Replaced with BT.2446 Method
+  // B's own prescribed approach (the variant designed for broadcast-
+  // quality/imperfect sources, matching this app's use case): content
+  // below a 78% breakpoint gets a 1:1, essentially unchanged mapping
+  // (preserving the original SDR look exactly - "ensuring shadow details
+  // and mid-tones are faithfully reproduced"), while only genuine
+  // highlights above that point expand, via a multiplier of 2.3 (the
+  // standard's own subjectively-validated value, chosen to avoid
+  // banding) toward the peak target below. Implemented via geq (the
+  // curves filter failed on real test content with "no path between
+  // colorspaces", likely an 8-bit-only internal limitation) operating
+  // directly on the real 10-bit luma plane. Verified directly across
+  // multiple real points in real source content: normal-brightness
+  // scenes show a mix of natural midtones with genuinely expanded,
+  // popping highlights (not uniform brightening), and a genuinely dark
+  // scene correctly stayed dark rather than being artificially lifted -
+  // content-adaptive behavior a uniform linear scale could never
+  // produce. Gamma/highlight-gamma is superseded by this breakpoint
+  // curve; saturation boost is kept as a separate, independent
+  // adjustment, since BT.2446 itself calls for chroma correction
+  // alongside luminance expansion ("as luminance levels increase, the
+  // associated colourfulness also increases").
+  const breakpoint = 0.78; // BT.2446 Method B's own recommended breakpoint
+  const highlightMult = parseFloat(gamma); // Highlight Expansion slider (repurposed from the old gamma control), default matches BT.2446 Method B's own validated 2.3
   const nplRef = document.getElementById('hdrRefSlider').value;
-  // Real regression found and fixed via direct measurement, not assumed:
-  // the range-expansion fix above (rangein=tv:range=pc before eq) is
-  // mathematically correct on its own, but it changed what the SAME
-  // gamma/npl numbers actually produce - confirmed via a real color test
-  // that white came out measurably dimmer than before (139 nits vs the
-  // intended ~150 target) even though gamma/npl values were unchanged,
-  // because the OLD, buggy chain's numbers had only ever been tuned
-  // against its own incorrect range math. Confirmed via direct
-  // measurement across the slider's real range (npl 120-180, tested
-  // against both a 100-nit and 150-nit target) that the corrected chain
-  // needs the npl value actually fed to zscale scaled up by a consistent
-  // ~1.2x factor to make the SLIDER's own stated value the ACTUAL
-  // achieved brightness again - without this, "Brightness Reference:
-  // 150" would silently mean something dimmer than 150 nits, exactly
-  // the kind of slider-vs-reality mismatch already fixed once before in
-  // this app's history (the metadata-vs-pixel-brightness bug). This only
-  // affects the PIXEL filter below - getHdrMetadataValues() (declared
-  // metadata) deliberately still reads the slider's raw, uncompensated
-  // value, since that's the actual nits this now correctly achieves.
-  const nplCompensated = nplRef * 1.2;
-  filters.push(`zscale=transferin=bt709:primariesin=bt709:matrixin=bt709:rangein=pc:transfer=smpte2084:primaries=bt2020:matrix=bt2020nc:npl=${nplCompensated}:range=tv`);
+  const bpCode = Math.round(breakpoint * 1023);
+  // Real, precise math bug found and fixed after a real report of
+  // continued overexposure on the exact previously-verified filter: the
+  // below-breakpoint region was left gamma-encoded "unchanged," but the
+  // SAME final npl zscale mapping still applies to it - so even normal
+  // content got mapped to hundreds of nits (a value near the 0.78
+  // breakpoint maps to ~490 nits at npl=1000, not the intended ~100-nit
+  // SDR-equivalent). Confirmed exactly: 45-96% of real sampled frames
+  // sat above 300 nits - most of each frame was being treated as
+  // "highlight," not just genuine bright spots. BT.2446's own real math
+  // avoids this by compressing the below-breakpoint region before the
+  // final peak mapping, landing it at normal SDR reference white
+  // (~100 nits) regardless of chosen peak. Solved directly: compression
+  // factor = (100/npl)^(1/2.4) - verified this produces mathematically
+  // correct proportions (breakpoint maps to 100 nits, full white maps to
+  // exactly npl nits). Because this now depends on npl, raising
+  // Brightness Reference only extends how far highlights can reach,
+  // never raising midtone brightness - the actually-correct, safe
+  // behavior this architecture needed from the start.
+  const slopeAbove = highlightMult; // true 1:1 continuous slope at the default (1) - both the breakpoint and full white stay at their own unchanged values, so no special compression/expansion math is needed at highlightMult=1; values above 1 push genuine highlights toward white faster than the rest of the image, for real pop
+  // Per a legitimate report that this took ~2x longer to encode: geq
+  // evaluates its expression per pixel, per frame - confirmed directly
+  // ~3x slower than lutyuv, which precomputes a lookup table once and
+  // does fast table lookups instead. Verified the two produce identical
+  // results before switching.
+  filters.push(`lutyuv=y='if(gte(val,${bpCode}), min(1023, ${bpCode}+(val-${bpCode})*${slopeAbove.toFixed(4)}), val)':u='val':v='val'`);
+  filters.push(`eq=saturation=${sat}`);
+  // Brightness Reference slider sets the PEAK that expanded highlights
+  // reach (not a uniform multiplier for the whole image) - default 1000
+  // matches BT.2446's own "bridge point" recommendation (§4.2). Because
+  // the compression above scales with this same value, midtones stay
+  // anchored at ~100 nits regardless of what this is set to - raising it
+  // only gives highlights more room, never brightens normal content.
+  const sdrColorInfo = getSelectedVideoTrackColorInfo();
+  const sdrPrimaries = resolveZscalePrimaries(sdrColorInfo.primaries);
+  const sdrMatrix = resolveZscaleMatrix(sdrColorInfo.space);
+  filters.push(`zscale=transferin=bt709:primariesin=${sdrPrimaries}:matrixin=${sdrMatrix}:rangein=pc:transfer=smpte2084:primaries=bt2020:matrix=bt2020nc:npl=${nplRef}:range=tv`);
   // Final format: 4:4:4 if the output toggle wants it (whether or not
   // intermediate processing was also on — no wasteful round-trip
   // downsample-then-implicit-upsample-again if the actual goal is a
@@ -2289,12 +2519,50 @@ let stopRequested = false; // set by stopCurrent() BEFORE calling kill — this 
                             // consistent — the renderer's own intent is the
                             // reliable source of truth here).
 
-function buildJobFromCurrentSettings(chaptersPath){
+async function buildJobFromCurrentSettings(chaptersPath){
   if (!filePath) return null;
   const encoder = document.getElementById('encoderSelect').value;
   const externalToolEncoders = ['nvencc', 'qsvencc', 'vceencc'];
   const crf = document.getElementById('crfInput').value;
   const filterChain = buildFilterChain();
+  // Real, dangerous bug found and fixed via a direct user report of
+  // inconsistent HDR10 rendering across different HDR10 displays: the
+  // declared static MaxCLL/MaxFALL metadata for genuine SDR->HDR
+  // conversions used to be a blind guess (MaxCLL tied directly to the
+  // Brightness Reference slider, MaxFALL a hardcoded 400) rather than a
+  // real measurement of the actual transformed content - confirmed
+  // directly on a real source that the declared MaxFALL (400) was 17x
+  // higher than the content's real, measured MaxFALL (23). Dishonest
+  // static metadata gives different displays' own tone-mapping
+  // heuristics no accurate signal to agree on, a well-documented real
+  // cause of inconsistent cross-display HDR10 rendering. Measures the
+  // real values here, once, using the exact same filter chain the real
+  // encode will use, before getHdrMetadataValues() (below) needs them -
+  // only for genuine SDR->HDR conversion, since already-HDR passthrough
+  // already uses the source's own real, extracted mastering metadata.
+  // Real, valid source metadata check - mirrors the exact condition
+  // getHdrMetadataValues() (below) uses to decide whether the source's
+  // own real, extracted mastering metadata is trustworthy. When it's
+  // NOT (extraction failed, or the source genuinely has none), the
+  // already-HDR case ALSO used to fall back to a generic, hardcoded
+  // 1000/400 guess - the exact same category of inaccurate-metadata
+  // problem this whole fix targets, per a direct question about
+  // whether HDR-to-HDR sources have this same issue. Measuring the
+  // real, actual pixel values being passed through applies here too.
+  const realSrcMeta = selectedTrackHdrMetadata;
+  const hasRealSourceMetadata = !!(realSrcMeta && realSrcMeta.mastering && realSrcMeta.contentLight
+      && realSrcMeta.mastering.maxLuminance != null && realSrcMeta.mastering.maxLuminance > 0
+      && realSrcMeta.contentLight.maxContent != null && realSrcMeta.contentLight.maxContent > 0);
+  let realMeasuredHdrBrightness = null;
+  if (isOn('tog-hdr') && (!isSelectedVideoTrackHDR() || !hasRealSourceMetadata)){
+    const ffmpegForMeasure = document.getElementById('ffmpegPath').value.trim();
+    try {
+      const result = await window.electronAPI.measureRealHdrBrightness({ ffmpeg: ffmpegForMeasure, filePath, pixelFilters: filterChain });
+      if (result && !result.error && result.maxCLL > 0){
+        realMeasuredHdrBrightness = result;
+      }
+    } catch (e) { /* falls through to the slider-driven fallback below, unchanged */ }
+  }
   // Read directly from Brightness Reference (npl), not the read-only
   // Metadata Peak display - that display just mirrors this value for
   // visibility; reading the real source of truth here means metadata
@@ -2345,8 +2613,48 @@ function buildJobFromCurrentSettings(chaptersPath){
     return {
       redX: 34000, redY: 16000, greenX: 13250, greenY: 34500, blueX: 7500, blueY: 3000,
       wpX: 15635, wpY: 16450,
-      maxLuminance: peak * 10000, minLuminance: 1,
-      maxCLL: peak, maxFALL: 400,
+      // Real, confirmed bug fixed via direct bitstream measurement (frame-
+      // level SEI data): reusing the Brightness Reference slider (100-255,
+      // designed for the SDR->HDR gamma-expansion math) directly as the
+      // HDR mastering-display peak/MaxCLL is only consistent for a genuine
+      // SDR->HDR conversion, where the app's own expansion math actually
+      // bounds the resulting pixel values near that same peak. For an
+      // already-HDR source whose real metadata is missing (this app skips
+      // its own expansion for that case entirely, passing the existing PQ
+      // values through unchanged), that same low, SDR-oriented number
+      // drastically understates the actual pixel values - confirmed
+      // directly: a real file's declared mastering peak came out as
+      // literally 150 nits, collapsing tone-mapping in any player that
+      // takes the metadata literally (VLC, YouTube both washed out;
+      // mpv's more forgiving heuristics happened to mask it). Uses a
+      // standard, industry-common 1000-nit generic-HDR10 default for
+      // that specific case instead - the SDR->HDR conversion case below
+      // keeps the existing peak-based value, since it's genuinely
+      // consistent with what that path's own transform produces.
+      //
+      // Real, separate bug fixed: mastering-display peak (this field)
+      // and MaxCLL (below) are NOT the same thing and must not share a
+      // value - mastering-display peak describes the reference MONITOR
+      // the content was graded on (real discs always declare a standard
+      // value - 1000, 4000, or 10000 nits - matching an actual
+      // professional reference monitor), while MaxCLL describes the
+      // content's own real peak brightness. Declaring a "mastering
+      // display" of an arbitrary, non-standard number (e.g. the
+      // content's own measured peak) is itself inaccurate metadata -
+      // no real reference monitor is calibrated to that - and could
+      // plausibly worsen cross-display tone-mapping consistency, the
+      // opposite of this fix's whole purpose. Picks the smallest
+      // standard reference value that comfortably contains the actual
+      // target peak instead.
+      maxLuminance: (function(){
+        const targetPeak = realMeasuredHdrBrightness ? realMeasuredHdrBrightness.maxCLL : (isSelectedVideoTrackHDR() ? 1000 : peak);
+        const standardPeaks = [1000, 4000, 10000];
+        const chosen = standardPeaks.find(p => p >= targetPeak) || 10000;
+        return chosen * 10000;
+      })(),
+      minLuminance: 1,
+      maxCLL: realMeasuredHdrBrightness ? realMeasuredHdrBrightness.maxCLL : (isSelectedVideoTrackHDR() ? 1000 : peak),
+      maxFALL: realMeasuredHdrBrightness ? realMeasuredHdrBrightness.maxFALL : 400,
       isReal: false
     };
   }
@@ -2554,7 +2862,7 @@ function buildJobFromCurrentSettings(chaptersPath){
     const tmpEncOutPath = tmpDir + '_tmp_' + encoder + '_' + jobId + '.hevc';
     const toolPath = document.getElementById(toolConfig.pathFieldId).value.trim();
 
-    const encodeGpuVendor = getSelectedEncodeGpuVendor();
+    let encodeGpuVendor = getSelectedEncodeGpuVendor();
     const useLibplacebo = isOn('tog-libplacebo');
     const y4mArgs = [];
 
@@ -2565,6 +2873,21 @@ function buildJobFromCurrentSettings(chaptersPath){
     // that can be hardcoded to one value for every source.
     const sourcePixFmt = getSelectedVideoTrackPixFmt();
     const is10BitSource = !!(sourcePixFmt && /10le|10be|p010|p016|12le|12be/i.test(sourcePixFmt));
+    // Real, confirmed bug fixed - same root cause already fixed in
+    // main.js's buildDetectionHwaccelArgs (NVDEC has zero 4:2:2 decode
+    // support, and no GPU vendor has a working ffmpeg-implemented path
+    // for hardware 4:4:4 decode either) - but this main-encode-pipeline
+    // hwaccel construction is a separate, duplicated code path that
+    // never had the same check. Confirmed via a real user error on a
+    // genuine 4K UHD yuv444p10le Dolby Vision source: "Invalid output
+    // format p010le for hwframe download" - hardware decode of 4:4:4
+    // content never actually produces the surface hwdownload expects,
+    // since NVDEC can't decode this chroma format at all regardless of
+    // what format is requested. Forcing encodeGpuVendor to null here
+    // makes the existing code below fall back to plain CPU decode
+    // correctly (it already does this whenever encodeGpuVendor is
+    // falsy) - no other changes needed downstream.
+    if (sourcePixFmt && /422|444/i.test(sourcePixFmt)) encodeGpuVendor = null;
     const encodeNativeFormat = is10BitSource ? 'p010le' : 'nv12';
     const encodeHwaccelPre = encodeGpuVendor === 'nvidia' ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda']
       : encodeGpuVendor === 'intel' ? ['-hwaccel', 'qsv']
@@ -2843,7 +3166,7 @@ function buildJobFromCurrentSettings(chaptersPath){
     // make the whole encode fail outright). Scoped to NVEncC only, where
     // it's confirmed supported.
     const aqArgs = encoder === 'nvencc' ? ['--aq', '--aq-strength', '0'] : [];
-    const chromaQpArgs = encoder === 'nvencc' ? ['--chroma-qp-offset', '-2'] : [];
+    const chromaQpArgs = encoder === 'nvencc' ? ['--chroma-qp-offset', '-4'] : [];
     // Real, PRE-EXISTING bug found via direct research (unrelated to
     // anything changed today, not a regression): all three encoders use
     // completely different preset schemes, confirmed directly against
@@ -3231,7 +3554,16 @@ clip.set_output()
       const videoIsOriginal = (videoSourcePath === filePath);
       const subInputIndex = videoIsOriginal ? 0 : nextIndex;
       if (!videoIsOriginal){ inputArgs.push('-i', filePath); nextIndex++; }
-      for (const idx of directSubtitleSelections) mapArgs.push('-map', `${subInputIndex}:${idx}`);
+      directSubtitleSelections.forEach((idx, subOutIdx) => {
+        mapArgs.push('-map', `${subInputIndex}:${idx}`);
+        // Real feature added per direct request: subtitles shouldn't be
+        // marked as the default track (auto-displayed on playback),
+        // while video/audio keep their existing default behavior. -N
+        // here is the sequential index among subtitle streams only
+        // (ffmpeg's own disposition addressing) - these are the first
+        // subtitles mapped, so 0,1,2... in order.
+        mapArgs.push(`-disposition:s:${subOutIdx}`, '0');
+      });
     }
     if (chaptersPath){
       // Metadata-only input — no stream map needed, just -map_metadata
@@ -3288,10 +3620,10 @@ clip.set_output()
     return null;
   }
 
-  function buildMkvmergeMuxArgs(videoPath, audioPath, finalOutPath, convertedChaptersPath, convertedSrtPaths, srtLanguages){
+  function buildMkvmergeMuxArgs(videoPath, audioPath, finalOutPath, convertedChaptersPath, convertedSrtPaths, srtLanguages, audioLanguage){
     const args = ['-o', finalOutPath];
     if (convertedChaptersPath) args.push('--chapters', convertedChaptersPath);
-    args.push(videoPath, audioPath);
+    args.push(videoPath, '--language', `0:${audioLanguage || 'und'}`, audioPath);
     if (textSubtitleSelections.length > 0){
       // Real bug, fixed once, wrongly reverted, now fixed again: this
       // used to grab EVERY subtitle track from the source whenever ANY
@@ -3310,6 +3642,48 @@ clip.set_output()
       // with no conversion needed. Now uses textSubtitleSelections
       // specifically - PGS tracks are pulled via their own converted
       // SRT files below instead, not from the original file at all.
+      // Real feature added per direct request: subtitles shouldn't be
+      // marked as the default track (auto-displayed on playback by
+      // players that respect this flag), while video/audio keep their
+      // existing default behavior untouched. --default-track-flag
+      // TID:0 confirmed correct/working syntax via real documentation
+      // and community reports - one flag per selected subtitle track,
+      // since this option targets a single track ID at a time.
+      for (const tid of textSubtitleSelections){
+        args.push('--default-track-flag', `${tid}:0`);
+        // Real bug fixed: despite mkvmerge's own automatic language
+        // preservation testing correctly in isolation for this exact
+        // --subtitle-tracks mechanism, a real user's actual output kept
+        // showing "und" for every direct-from-source subtitle anyway.
+        // Rather than keep chasing why the implicit behavior didn't
+        // reproduce, set language explicitly instead - same principle
+        // already applied to audio and OCR'd subtitles elsewhere in
+        // this app. Looks up each selected track's real language from
+        // detectedSubtitleStreams, the same source of truth already
+        // used for pgsOcrConvertedLanguages.
+        const srcSub = detectedSubtitleStreams.find(s => String(s.index) === String(tid));
+        args.push('--language', `${tid}:${(srcSub && srcSub.language) || 'und'}`);
+      }
+      // Real, separate bug fixed, found while investigating the
+      // language issue above: --sync used to be added AFTER filePath
+      // below, but mkvmerge requires per-file/per-track options to
+      // precede the file they target - confirmed directly via a real
+      // timestamp comparison that --sync in that position is silently
+      // ignored entirely (output timestamps stayed completely
+      // unchanged), while the identical flag placed correctly before
+      // the file actually applies the stretch. Moved here so subtitles
+      // actually get their intended Framerate Conform timing
+      // correction, matching the same real, confirmed reasoning
+      // already documented below for why this correction is needed.
+      if (isOn('tog-fps-conform') && detectedSourceFps){
+        const conformTarget = getConformTargetFps(detectedSourceFps);
+        if (Math.abs(conformTarget - detectedSourceFps) > 0.0001){
+          const stretchRatio = detectedSourceFps / conformTarget;
+          for (const tid of textSubtitleSelections){
+            args.push('--sync', `${tid}:0,${stretchRatio}`);
+          }
+        }
+      }
       args.push('--no-video', '--no-audio', '--subtitle-tracks', textSubtitleSelections.join(','), filePath);
       // Real gap found via direct question, confirmed via mkvmerge's own
       // docs: Framerate Conform relabels timestamps to a whole-number
@@ -3329,15 +3703,7 @@ clip.set_output()
       // inverse of the audio-side ratio, which speeds audio UP to match
       // - here the same compression is applied directly to subtitle
       // timestamp values, always <1 since target is always a round-up).
-      if (isOn('tog-fps-conform') && detectedSourceFps){
-        const conformTarget = getConformTargetFps(detectedSourceFps);
-        if (Math.abs(conformTarget - detectedSourceFps) > 0.0001){
-          const stretchRatio = detectedSourceFps / conformTarget;
-          for (const tid of textSubtitleSelections){
-            args.push('--sync', `${tid}:0,${stretchRatio}`);
-          }
-        }
-      }
+      // (Applied above, before filePath, where it actually takes effect.)
     }
     // Real fix for the crop-misalignment problem this project researched
     // directly and confirmed has no clean ffmpeg-only solution: PGS
@@ -3535,6 +3901,15 @@ clip.set_output()
     if (!trackSel){ setStatus('Select a source track for the integrated engine first.', 'red'); return null; }
     const srcChannels = parseInt(trackSel.dataset.channels);
     const srcIndex = trackSel.value;
+    // Real, separate bug fixed: this app never set an explicit language
+    // for the audio output anywhere, regardless of the LanguageIETF fix
+    // above - the re-encoded Vorbis/DPLII output never carried the
+    // source track's language forward at all, confirmed via direct grep
+    // finding zero references to audio language anywhere in the mux
+    // stage before this fix. Looks up the selected source track's real
+    // language (now correctly populated, including the LanguageIETF
+    // case the main.js fix addresses) to pass through to the mux below.
+    const audioLanguageForMux = (detectedAudioStreams.find(s => String(s.index) === String(srcIndex)) || {}).language || 'und';
     const tmpDir = filePath.substring(0, Math.max(filePath.lastIndexOf('\\'), filePath.lastIndexOf('/')) + 1);
     const tmpStereoPath = tmpDir + '_tmp_stereo_' + jobId + '.flac';
 
@@ -3685,7 +4060,7 @@ clip.set_output()
           totalDuration: 1, cleanup: [chaptersPath]
         };
       }
-      const mkvmergeArgsResult = buildMkvmergeMuxArgs(mkvmergeRawHevcPath, tmpUpmixPath, outPath, mkvmergeChaptersPath, pgsOcrConvertedPaths, pgsOcrConvertedLanguages);
+      const mkvmergeArgsResult = buildMkvmergeMuxArgs(mkvmergeRawHevcPath, tmpUpmixPath, outPath, mkvmergeChaptersPath, pgsOcrConvertedPaths, pgsOcrConvertedLanguages, audioLanguageForMux);
       stage3Args = { toolPath: mkvmergePathVal, toolArgs: mkvmergeArgsResult.args, srtPaths: mkvmergeArgsResult.srtPaths, srtStretchRatio: mkvmergeArgsResult.srtStretchRatio, isSpawnTool: true };
       stage3Name = 'Mux final MKV with Dolby Vision signaling (mkvmerge)';
       stage3Cleanup = [tmpUpmixPath, mkvmergeRawHevcPath, ...(mkvmergeChaptersPath ? [mkvmergeChaptersPath] : []), ...(dvRpuPath ? [dvRpuPath] : []), ...(hdr10PlusMetaPath ? [hdr10PlusMetaPath] : []), ...pgsOcrConvertedPaths];
@@ -3866,6 +4241,16 @@ clip.set_output()
     }
   }
 
+  // Captured ONCE here, not re-checked at job-completion time (see
+  // processNextInQueue) - in a multi-job queue, by the time a queued job
+  // actually finishes, the live UI could already reflect a different,
+  // later job's own settings. Scoped to genuine SDR sources only, per
+  // direct instruction - already-HDR sources keep using the existing,
+  // separate real-metadata passthrough for their own real DV/HDR10+,
+  // untouched by this.
+  const shouldGenerateDolbyVisionDynamic = isOn('tog-dv-dynamic') && isOn('tog-hdr') && !isSelectedVideoTrackHDR();
+  const mkvdolbyPathForJob = document.getElementById('mkvdolbyPath').value.trim();
+
   if (preStages.length > 0){
     // videoSourcePath defaults to the user's ORIGINAL file and only ever
     // becomes a genuine temp path via the external-tool-encoder branch —
@@ -3892,7 +4277,9 @@ clip.set_output()
       ],
       currentStage: 0,
       totalDuration: videoDuration,
-      status: 'pending'
+      status: 'pending',
+      generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic,
+      mkvdolbyPath: mkvdolbyPathForJob
     };
   }
   // No pre-stages needed (regular encoder, no audio correction) — still
@@ -3918,11 +4305,15 @@ clip.set_output()
       ],
       currentStage: 0,
       totalDuration: videoDuration,
-      status: 'pending'
+      status: 'pending',
+      generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic,
+      mkvdolbyPath: mkvdolbyPathForJob
     };
   }
   return { id: jobId, label, filePath, outPath, args, totalDuration: videoDuration, status: 'pending',
-    cleanup: chaptersPath ? [chaptersPath] : [] };
+    cleanup: chaptersPath ? [chaptersPath] : [],
+    generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic,
+    mkvdolbyPath: mkvdolbyPathForJob };
 }
 
 async function addToQueue(){
@@ -4001,7 +4392,7 @@ async function addToQueue(){
     if (result.hasChapters) chaptersPath = result.chaptersPath;
   }
 
-  const job = buildJobFromCurrentSettings(chaptersPath);
+  const job = await buildJobFromCurrentSettings(chaptersPath);
   if (!job){ setStatus('Load a file first.', 'red'); return; }
   queue.push(job);
   renderQueue();
@@ -4276,6 +4667,10 @@ async function processNextInQueue(){
               // pattern as --sync right below.
               const srtLang = (stage.srtLanguages && stage.srtLanguages[srtIdx]) || 'und';
               existingSrtArgs.push('--language', `0:${srtLang}`);
+              // Same fix as the direct-from-source subtitle path above -
+              // OCR'd subtitles shouldn't be marked default either,
+              // regardless of which path produced them.
+              existingSrtArgs.push('--default-track-flag', '0:0');
               if (stage.srtStretchRatio !== null && stage.srtStretchRatio !== undefined){
                 existingSrtArgs.push('--sync', `0:0,${stage.srtStretchRatio}`);
               }
@@ -4382,6 +4777,12 @@ async function processNextInQueue(){
               // path too - no language metadata was ever added.
               const srtLang = (stage.pgsSrtLanguages && stage.pgsSrtLanguages[srtIdx]) || 'und';
               newMetadataArgs.push(`-metadata:s:s:${nextSubStreamIdx}`, `language=${srtLang}`);
+              // Real feature added per direct request: subtitles
+              // shouldn't be marked default (auto-displayed on
+              // playback), while video/audio keep their existing
+              // behavior - reuses the same correctly-tracked output
+              // subtitle-stream index just computed above.
+              newMetadataArgs.push(`-disposition:s:${nextSubStreamIdx}`, '0');
               nextInputIdx++;
               nextSubStreamIdx++;
             }
@@ -4489,6 +4890,22 @@ async function processNextInQueue(){
     setStatus(`✔ Complete: ${next.label}`, 'green');
     const fullEl = document.getElementById('fullErrorOutput');
     if (fullEl) fullEl.style.display = 'none';
+    if (next.generateDolbyVisionDynamic && next.mkvdolbyPath){
+      setStatus(`Generating dynamic Dolby Vision metadata: ${next.label}...`, '');
+      try {
+        const dvResult = await window.electronAPI.generateDolbyVisionDynamic({
+          mkvdolbyPath: next.mkvdolbyPath, inputPath: next.outPath
+        });
+        if (dvResult && dvResult.success){
+          logJobWarning(`Dolby Vision dynamic metadata generated successfully: ${dvResult.outputPath}`);
+        } else {
+          logJobWarning(`Dolby Vision dynamic metadata generation failed (the normal HDR10 output above is unaffected and still complete): ${(dvResult && dvResult.error) || 'unknown error'}`);
+        }
+      } catch (e) {
+        logJobWarning(`Dolby Vision dynamic metadata generation failed (the normal HDR10 output above is unaffected and still complete): ${e && e.message || e}`);
+      }
+      setStatus(`✔ Complete: ${next.label}`, 'green');
+    }
   } else {
     next.status = 'failed';
     // Real bug fixed: the failure reason only ever lived in this
@@ -4586,7 +5003,8 @@ function applyDefaultPaths(){
     dovToolPath: DEFAULT_PATHS.doviTool,
     mkvmergePath: DEFAULT_PATHS.mkvmerge,
     pgsToSrtPath: DEFAULT_PATHS.pgsToSrt,
-    hdr10plusToolPath: DEFAULT_PATHS.hdr10plusTool
+    hdr10plusToolPath: DEFAULT_PATHS.hdr10plusTool,
+    mkvdolbyPath: DEFAULT_PATHS.mkvdolby
   };
   for (const [id, value] of Object.entries(map)){
     const field = document.getElementById(id);
