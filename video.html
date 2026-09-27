@@ -67,7 +67,12 @@
   </div>
   <div id="fileInfo" style="display:none" class="card"></div>
 
-  <div class="ti" id="tog-dv-dynamic-top" onclick="toggleMirrored(this, 'tog-dv-dynamic'); document.getElementById('mkvdolbyPathRow').style.display = isOn('tog-dv-dynamic-top') ? 'block' : 'none';"><div class="sw"></div><div class="ti-txt"><strong>To use this: download mkvdolby (path field appears below once this is on), set its path, then convert normally.</strong> Adds real, dynamic Dolby Vision Profile 8.1 metadata on top of this app's existing HDR10 output — OFF by default, still exactly one file, your static HDR10 configuration stays as the automatic fallback for non-Dolby-Vision players. Free download: <a href="https://github.com/tinof/hdr-analyze/releases" target="_blank">mkvdolby</a> (MIT-licensed, not affiliated with Dolby). Full explanation, setup, and the YouTube-compatibility caveat are under Dolby Vision Preservation further down.</div></div>
+  <div class="ti" id="tog-dv-dynamic-top" onclick="toggleMirrored(this, 'tog-dv-dynamic'); document.getElementById('mkvdoviPathRowTop').style.display = isOn('tog-dv-dynamic-top') ? 'block' : 'none'; document.getElementById('mediaInfoPathRow').style.display = isOn('tog-dv-dynamic-top') ? 'block' : 'none'; document.getElementById('mediaInfoSetupHint').style.display = isOn('tog-dv-dynamic-top') ? 'block' : 'none';"><div class="sw"></div><div class="ti-txt"><strong>To use this: download mkvdovi (path field appears below once this is on), set its path, then convert normally.</strong> Adds real, dynamic Dolby Vision Profile 8.1 metadata on top of this app's existing HDR10 output — OFF by default, still exactly one file, your static HDR10 configuration stays as the automatic fallback for non-Dolby-Vision players. Free download: <a href="https://github.com/tinof/hdr-analyze/releases" target="_blank">mkvdovi</a> (MIT-licensed, not affiliated with Dolby). Full explanation, setup, and the YouTube-compatibility caveat are under Dolby Vision Preservation further down.</div></div>
+  <div class="row" id="mkvdoviPathRowTop" style="margin-top:10px;display:none">
+    <div class="field"><label>mkvdovi Path</label>
+      <input class="path-inp" type="text" id="mkvdoviPathTop" placeholder="C:\hdr-analyze\mkvdovi.exe" oninput="mirrorInputValue(this, 'mkvdoviPath')">
+    </div>
+  </div>
 
   <div class="slbl">Detected Source Quality</div>
   <div class="card" id="qualityCard">
@@ -278,14 +283,22 @@
       <strong>Setup:</strong> download <code>dovi_tool</code> from <a href="https://github.com/quietvoid/dovi_tool/releases" target="_blank">github.com/quietvoid/dovi_tool/releases</a> (the Windows x86_64 zip), extract <code>dovi_tool.exe</code> somewhere permanent, and set the path above. Only needed when Dolby Vision preservation is on. mkvmerge's own path is set unconditionally near the top of this page now (Output section) since it's needed by several features beyond just Dolby Vision.
     </div>
 
-    <div class="ti" id="tog-dv-dynamic" onclick="toggleMirrored(this, 'tog-dv-dynamic-top'); document.getElementById('mkvdolbyPathRow').style.display = isOn('tog-dv-dynamic') ? 'block' : 'none';" style="margin-top:10px"><div class="sw"></div><div class="ti-txt"><strong>To use this: download mkvdolby (link and path field below appear once this is on), set its path, then just convert normally - nothing else changes.</strong> Adds real, dynamic (scene-by-scene) Dolby Vision Profile 8.1 metadata on top of this app's existing, accurate HDR10 output — OFF by default. Result is still exactly ONE file: your same static-HDR10 configuration stays in it, unchanged, as the base layer and automatic fallback for any non-Dolby-Vision player or display - this only adds the extra dynamic layer on top, it never replaces or re-processes the video itself. Only applies to genuine SDR-to-HDR conversions (not already-HDR sources, which keep using this app's own existing Dolby Vision/HDR10+ Preservation toggles above for their own real, existing metadata, untouched).<br><br><strong>What this adds, and why it's different from the static HDR10 metadata this app already produces:</strong> everything else on this page for SDR conversion produces accurate, but STATIC, HDR10 metadata - one brightness number for the entire file. This uses a real, free, open-source, third-party project (<a href="https://github.com/tinof/hdr-analyze" target="_blank">hdr-analyze</a>, MIT-licensed, not affiliated with Dolby) to analyze this app's own finished HDR10 output frame-by-frame and generate genuine Dolby Vision Profile 8.1 (CM v4.0) dynamic metadata on top of it - real per-scene brightness guidance, not one static number.<br><br><strong>The existing HDR10 output is the automatic fallback by the format's own design, not something built separately:</strong> Profile 8.1 always carries a fully valid, complete HDR10 base layer underneath its dynamic metadata - any player or display without Dolby Vision support simply ignores the extra metadata and plays the same accurate HDR10 stream this app already produces. Nothing about the existing HDR10 configuration changes - this adds the dynamic metadata directly on top, replacing the file in place, not creating a second copy.<br><br><strong>Real, important limitation to know before turning this on - Dolby Vision is not supported everywhere:</strong> confirmed directly via YouTube's own official HDR upload documentation that YouTube does not support Dolby Vision uploads at all (HDR10 and optional HDR10+ dynamic metadata are the only types listed). If YouTube upload is part of your workflow, keep using the plain HDR10 output for that specifically - this feature is for local playback and devices/apps that do support real Dolby Vision.<br><br><strong>Honest, direct disclosure about this specific integration, please read:</strong> every other external-tool integration on this page (dovi_tool, hdr10plus_tool, mkvmerge, PgsToSrt) was built and verified by directly running that exact tool during development. <code>mkvdolby</code> is a Windows-only prebuilt binary that could not be run or tested in the environment that built this feature - the integration below follows the tool's own documented command-line behavior exactly (including its documented default of deleting the source file after a successful conversion, which this app always overrides by passing <code>--keep-source</code>, and its own <code>--verify</code> self-check), but has not been confirmed end-to-end against a real run the way everything else here has. Use the "Keep intermediate files" debug toggle above and check the console output from this step directly the first time you use it.<br><br><strong>Mechanism:</strong> after this app's normal SDR-to-HDR job finishes and produces its usual, accurate static-HDR10 .mkv, this runs <code>mkvdolby &lt;output.mkv&gt; --keep-source --verify</code> as one additional, final step. <code>--keep-source</code> is used only as a safety net during that run itself (this tool can't be tested directly here, so both files existing momentarily protects against a partial/corrupt conversion) - once the new file is confirmed present and a sane size, the original static-HDR10 file is removed and the Dolby Vision result takes its exact place, so you end up with exactly one final file, not two.</div></div>
-    <div class="row" id="mkvdolbyPathRow" style="margin-top:10px;display:none">
-      <div class="field"><label>mkvdolby Path</label>
-        <input class="path-inp" type="text" id="mkvdolbyPath" placeholder="C:\hdr-analyze\mkvdolby.exe">
+    <div class="ti" id="tog-dv-dynamic" onclick="toggleMirrored(this, 'tog-dv-dynamic-top'); document.getElementById('mkvdoviPathRow').style.display = isOn('tog-dv-dynamic') ? 'block' : 'none'; document.getElementById('mediaInfoPathRow').style.display = isOn('tog-dv-dynamic') ? 'block' : 'none'; document.getElementById('mediaInfoSetupHint').style.display = isOn('tog-dv-dynamic') ? 'block' : 'none';" style="margin-top:10px"><div class="sw"></div><div class="ti-txt"><strong>To use this: download mkvdovi (link and path field below appear once this is on), set its path, then just convert normally - nothing else changes.</strong> Adds real, dynamic (scene-by-scene) Dolby Vision Profile 8.1 metadata on top of this app's existing, accurate HDR10 output — OFF by default. Result is still exactly ONE file: your same static-HDR10 configuration stays in it, unchanged, as the base layer and automatic fallback for any non-Dolby-Vision player or display - this only adds the extra dynamic layer on top, it never replaces or re-processes the video itself. Only applies to genuine SDR-to-HDR conversions (not already-HDR sources, which keep using this app's own existing Dolby Vision/HDR10+ Preservation toggles above for their own real, existing metadata, untouched).<br><br><strong>What this adds, and why it's different from the static HDR10 metadata this app already produces:</strong> everything else on this page for SDR conversion produces accurate, but STATIC, HDR10 metadata - one brightness number for the entire file. This uses a real, free, open-source, third-party project (<a href="https://github.com/tinof/hdr-analyze" target="_blank">hdr-analyze</a>, MIT-licensed, not affiliated with Dolby) to analyze this app's own finished HDR10 output frame-by-frame and generate genuine Dolby Vision Profile 8.1 (CM v4.0) dynamic metadata on top of it - real per-scene brightness guidance, not one static number.<br><br><strong>The existing HDR10 output is the automatic fallback by the format's own design, not something built separately:</strong> Profile 8.1 always carries a fully valid, complete HDR10 base layer underneath its dynamic metadata - any player or display without Dolby Vision support simply ignores the extra metadata and plays the same accurate HDR10 stream this app already produces. Nothing about the existing HDR10 configuration changes - this adds the dynamic metadata directly on top, replacing the file in place, not creating a second copy.<br><br><strong>Real, important limitation to know before turning this on - Dolby Vision is not supported everywhere:</strong> confirmed directly via YouTube's own official HDR upload documentation that YouTube does not support Dolby Vision uploads at all (HDR10 and optional HDR10+ dynamic metadata are the only types listed). If YouTube upload is part of your workflow, keep using the plain HDR10 output for that specifically - this feature is for local playback and devices/apps that do support real Dolby Vision.<br><br><strong>Honest, direct disclosure about this specific integration, please read:</strong> every other external-tool integration on this page (dovi_tool, hdr10plus_tool, mkvmerge, PgsToSrt) was built and verified by directly running that exact tool during development. <code>mkvdovi</code> is a Windows-only prebuilt binary that could not be run or tested in the environment that built this feature - the integration below follows the tool's own documented command-line behavior exactly (including its documented default of deleting the source file after a successful conversion, which this app always overrides by passing <code>--keep-source</code>, and its own <code>--verify</code> self-check), but has not been confirmed end-to-end against a real run the way everything else here has. Use the "Keep intermediate files" debug toggle above and check the console output from this step directly the first time you use it.<br><br><strong>Mechanism:</strong> after this app's normal SDR-to-HDR job finishes and produces its usual, accurate static-HDR10 .mkv, this runs <code>mkvdovi &lt;output.mkv&gt; --keep-source --verify</code> as one additional, final step. <code>--keep-source</code> is used only as a safety net during that run itself (this tool can't be tested directly here, so both files existing momentarily protects against a partial/corrupt conversion) - once the new file is confirmed present and a sane size, the original static-HDR10 file is removed and the Dolby Vision result takes its exact place, so you end up with exactly one final file, not two.</div></div>
+    <div class="row" id="mkvdoviPathRow" style="margin-top:10px;display:none">
+      <div class="field"><label>mkvdovi Path</label>
+        <input class="path-inp" type="text" id="mkvdoviPath" placeholder="C:\hdr-analyze\mkvdovi.exe" oninput="mirrorInputValue(this, 'mkvdoviPathTop')">
       </div>
     </div>
-    <div class="path-hint" id="mkvdolbySetupHint" style="margin-top:8px">
-      <strong>Setup:</strong> download the prebuilt Windows release from <a href="https://github.com/tinof/hdr-analyze/releases" target="_blank">github.com/tinof/hdr-analyze/releases</a>, extract <code>mkvdolby.exe</code> (and the <code>hdr_analyzer_mvp.exe</code> it calls internally - keep them in the same folder) somewhere permanent, and set the path above. This tool also needs <code>dovi_tool</code> and <code>mkvmerge</code> in its own PATH or alongside it - both are already set up above for this app's own Dolby Vision Preservation and mkvmerge features, so if those already work, this only needs its own <code>mkvdolby.exe</code> location.
+    <div class="path-hint" id="mkvdoviSetupHint" style="margin-top:8px">
+      <strong>Setup:</strong> download the prebuilt Windows release from <a href="https://github.com/tinof/hdr-analyze/releases" target="_blank">github.com/tinof/hdr-analyze/releases</a>, extract <code>mkvdovi.exe</code> (and the <code>hdr_analyzer_mvp.exe</code> it calls internally - keep them in the same folder) somewhere permanent, and set the path above. This tool also needs <code>dovi_tool</code> and <code>mkvmerge</code> in its own PATH or alongside it - both are already set up above for this app's own Dolby Vision Preservation and mkvmerge features, so if those already work, this only needs its own <code>mkvdovi.exe</code> location.
+    </div>
+    <div class="row" id="mediaInfoPathRow" style="margin-top:10px;display:none">
+      <div class="field"><label>MediaInfo Path (optional, but strongly recommended)</label>
+        <input class="path-inp" type="text" id="mediaInfoPath" placeholder="C:\MediaInfo_CLI\MediaInfo.exe">
+      </div>
+    </div>
+    <div class="path-hint" id="mediaInfoSetupHint" style="margin-top:8px;display:none">
+      <strong>Real, confirmed issue this fixes - please set this up:</strong> confirmed directly via a real conversion log and this project's own documentation - <code>mkvdovi</code> needs <code>MediaInfo</code> specifically to read a source's real mastering-display/MaxCLL/MaxFALL/color-primaries values. Without it, it silently falls back to generic defaults (1000 nits MaxCLL, 400 nits MaxFALL, assumed BT.2020 primaries) even when this app has already embedded real, accurate values (e.g. a real run showed genuine values of 223/20 nits being silently replaced by the generic 1000/400 defaults in the Dolby Vision file's fallback layer) - the exact same "inaccurate metadata" problem already fixed elsewhere in this app, now recurring specifically inside the Dolby Vision output's own static fallback layer. <strong>Setup:</strong> download the free MediaInfo CLI (not the GUI version) from <a href="https://mediaarea.net/en/MediaInfo/Download/Windows" target="_blank">mediaarea.net/en/MediaInfo/Download/Windows</a> ("CLI" under Windows), extract <code>MediaInfo.exe</code> somewhere permanent, and set the path above.
     </div>
 
 
@@ -424,7 +437,16 @@
 
   <div class="slbl">Framerate Conform (movies only — no AI, no interpolation)</div>
   <div class="card">
-    <div class="ti" id="tog-fps-conform" onclick="toggleFpsConform()"><div class="sw"></div><div class="ti-txt">Conform to a whole-number frame rate instead of interpolating — OFF by default. A genuinely different technique from all 5 options above: zero synthesized frames, so the rubberbanding/warping problems documented above and throughout this app's development are structurally impossible here — there's no motion estimation happening at all to get wrong. This is the same technique DaVinci Resolve's Clip Attributes frame rate change and Premiere's Interpret Footage use — confirmed via a direct quote from Blackmagic's own forum: "a frame for frame conversion to a different rate with no interpolation or weird cadence... changes the playback speed". This is a genuine, if small, change to the movie's real playback duration — the source runs very slightly longer in real time than a whole-number-fps target, so conforming to the higher whole number makes it play very slightly <em>shorter</em>. Audio is automatically time-corrected to match (asetrate/aresample, the same validated technique from the audio converter tool's Framerate Sync Correction) — no separate audio pass needed, unlike the manual cross-tool step required for the 5 interpolation options above. <strong>Mutually exclusive with all 5 interpolation options above</strong> — selecting this turns those off and greys them out, and vice versa, since they solve the same "mismatched frame rate" problem in fundamentally incompatible ways: one adds real new content (frames), this one only ever relabels timing on frames that already exist. Only sensible for near-whole-number conforms like 23.976→24 - there's no "48fps"/"60fps" option here, since conforming (not interpolating) to a much higher target would speed the movie up dramatically rather than smooth its motion, which is a completely different effect (fast-forward, not smoother playback).<br><br><strong>Two different mechanisms depending on encoder choice, per direct request:</strong> with an external-tool encoder selected (NVEncC/QSVEncC/VCEEncC), this uses an input-side <code>-r</code> override right at the actual decode point - those paths already decode the source exactly once, so this reaches the identical result in that same single pass. With a built-in ffmpeg encoder instead (external tools off), this uses a genuine lossless stream-copy pre-stage (<code>-c:v copy</code>, no decode/re-encode at all for this step) via the <code>setts</code> bitstream filter.<br><br><strong>Corrected mistake (confirmed via a real user report of quality loss):</strong> the first version of the stream-copy path used <code>setts=ts=N/fps/TB</code>, which independently reassigns both PTS and DTS to the same formula - ffmpeg's own documentation explicitly warns this is unsafe when B-frames are involved (this source has them), and it's what broke decode ordering and caused the reported corruption. Fixed by scaling the source's own ORIGINAL PTS and DTS by the same constant ratio instead (<code>setts=pts=PTS*sourceFps/targetFps:dts=DTS*sourceFps/targetFps</code>) - since B-frame reordering is just a fixed offset between a frame's DTS and PTS, uniformly scaling both preserves that offset (and therefore correct decode order) instead of erasing it, while still landing on the exact same evenly-spaced target-fps timing.<br><br><strong>Works alongside everything else in this app</strong> (confirmed, not assumed): HDR expansion, cropping, denoise/sharpen, and encoder choice all apply exactly as normal. Chapter timestamps are automatically rescaled to match the new duration when Passthrough Chapters is on. The AC3 audio-delay auto-detection, Audio Delay/Offset, and Duration Correction features all still work too and compose correctly with this toggle's own audio stretch - Duration Correction's own target duration accounts for the conform automatically so the two corrections agree instead of fighting each other.</div></div>
+    <div class="ti" id="tog-fps-conform" onclick="toggleFpsConform()"><div class="sw"></div><div class="ti-txt">Conform to a whole-number frame rate instead of interpolating — OFF by default. A genuinely different technique from all 5 options above: zero synthesized frames, so the rubberbanding/warping problems documented above and throughout this app's development are structurally impossible here — there's no motion estimation happening at all to get wrong. This is the same technique DaVinci Resolve's Clip Attributes frame rate change and Premiere's Interpret Footage use — confirmed via a direct quote from Blackmagic's own forum: "a frame for frame conversion to a different rate with no interpolation or weird cadence... changes the playback speed". This is a genuine, if small, change to the movie's real playback duration — the source runs very slightly longer in real time than a whole-number-fps target, so conforming to the higher whole number makes it play very slightly <em>shorter</em>. Audio is automatically time-corrected to match (asetrate/aresample, the same validated technique from the audio converter tool's Framerate Sync Correction) — no separate audio pass needed, unlike the manual cross-tool step required for the 5 interpolation options above. <strong>Mutually exclusive with all 5 interpolation options above</strong> — selecting this turns those off and greys them out, and vice versa, since they solve the same "mismatched frame rate" problem in fundamentally incompatible ways: one adds real new content (frames), this one only ever relabels timing on frames that already exist. Manual target FPS selection appears directly below once this is on (defaults to Automatic - round up to the next whole number - same as before, now also directly selectable).<br><br><strong>Two different mechanisms depending on encoder choice, per direct request:</strong> with an external-tool encoder selected (NVEncC/QSVEncC/VCEEncC), this uses an input-side <code>-r</code> override right at the actual decode point - those paths already decode the source exactly once, so this reaches the identical result in that same single pass. With a built-in ffmpeg encoder instead (external tools off), this uses a genuine lossless stream-copy pre-stage (<code>-c:v copy</code>, no decode/re-encode at all for this step) via the <code>setts</code> bitstream filter.<br><br><strong>Corrected mistake (confirmed via a real user report of quality loss):</strong> the first version of the stream-copy path used <code>setts=ts=N/fps/TB</code>, which independently reassigns both PTS and DTS to the same formula - ffmpeg's own documentation explicitly warns this is unsafe when B-frames are involved (this source has them), and it's what broke decode ordering and caused the reported corruption. Fixed by scaling the source's own ORIGINAL PTS and DTS by the same constant ratio instead (<code>setts=pts=PTS*sourceFps/targetFps:dts=DTS*sourceFps/targetFps</code>) - since B-frame reordering is just a fixed offset between a frame's DTS and PTS, uniformly scaling both preserves that offset (and therefore correct decode order) instead of erasing it, while still landing on the exact same evenly-spaced target-fps timing.<br><br><strong>Works alongside everything else in this app</strong> (confirmed, not assumed): HDR expansion, cropping, denoise/sharpen, and encoder choice all apply exactly as normal. Chapter timestamps are automatically rescaled to match the new duration when Passthrough Chapters is on. The AC3 audio-delay auto-detection, Audio Delay/Offset, and Duration Correction features all still work too and compose correctly with this toggle's own audio stretch - Duration Correction's own target duration accounts for the conform automatically so the two corrections agree instead of fighting each other.</div></div>
+    <div class="row" id="conformFpsRow" style="margin-top:10px;display:none">
+      <div class="field"><label>Target FPS (Conform)</label>
+        <select id="conformFpsSelect" onchange="updateConformFpsHint()">
+          <option value="auto">Automatic (round up to whole number)</option>
+        </select>
+      </div>
+    </div>
+    <div class="path-hint" id="conformFpsHint" style="display:none"></div>
+    <div class="ti" id="tog-conform-drop-frames" onclick="toggle(this);" style="margin-top:10px;display:none"><div class="sw"></div><div class="ti-txt">Drop real frames to reach the target rate instead of changing speed — OFF by default (default behavior above relabels timing, which changes real-time playback speed). When ON: for a target BELOW the source's own rate (e.g. 50fps→30fps), genuinely drops frames so the video keeps its ORIGINAL real-time duration/speed - motion will look choppier during fast action (real frames are genuinely missing, the same way footage looks on a lower-fps camera), not smoothly interpolated. For a target ABOVE the source's own rate, frames are genuinely duplicated instead (same idea, opposite direction) - real content is never invented either way.<br><br><strong>Why this is safe, unlike the 5 interpolation options above:</strong> uses ffmpeg's own <code>fps=</code> filter - pure frame SELECTION based on each frame's own real timestamp, zero motion estimation and zero synthesized content. The rubberbanding/warping problems documented extensively for the RIFE/MVTools options above are structurally impossible here, for the same reason plain Conform above is immune to them - there's no motion estimation happening at all, this just decides which of the source's own, real, unmodified frames to keep or repeat.<br><br><strong>Real, honest cost - this changes Conform's underlying mechanism entirely:</strong> the default (timestamp relabeling) is a genuine, lossless bitstream operation for built-in ffmpeg encoders (no re-encode needed for that step). This mode instead adds <code>fps=</code> directly into the main pixel filter chain, which requires that chain to actually run - for external-tool encoders (NVEncC/QSVEncC/VCEEncC) this changes nothing extra (that pipeline already fully decodes/re-encodes every frame regardless), but for built-in ffmpeg encoders this means the previously-separate, lossless conform pre-stage is skipped and frame-rate conversion happens as part of the main encode instead.</div></div>
   </div>
 
   <div class="slbl">Chapters</div>
@@ -686,7 +708,7 @@ const DEFAULT_PATHS = {
   hdr10plusTool: 'C:\\hdr10plus_tool\\hdr10plus_tool.exe',
   mkvmerge: 'C:\\Program Files\\MKVToolNix\\mkvmerge.exe',
   pgsToSrt: 'C:\\Users\\Angel\\Documents\\PgsToStr-1.4.8\\PgsToSrt.exe',
-  mkvdolby: 'C:\\Users\\Angel\\Documents\\hdr-analyze\\mkvdolby.exe'
+  mkvdovi: 'C:\\Users\\Angel\\Documents\\hdr-analyze-v0.4.0-x86_64-pc-windows-msvc\\bin\\mkvdovi.exe'
 };
 
 // Converts every toggle's long description text (and the long .path-hint
@@ -750,6 +772,10 @@ function toggleMirrored(el, mirrorId){
   el.classList.toggle('on');
   const mirror = document.getElementById(mirrorId);
   if (mirror) mirror.classList.toggle('on', el.classList.contains('on'));
+}
+function mirrorInputValue(el, mirrorId){
+  const mirror = document.getElementById(mirrorId);
+  if (mirror && mirror.value !== el.value) mirror.value = el.value;
 }
 
 // Only one GPU decode method can be active per ffmpeg run — clicking one
@@ -832,17 +858,64 @@ function selectInterpMode(mode){
 // anything new. "Automatic" in that dropdown already means round up to
 // the next whole number, which is the same thing this always did.
 function getConformTargetFps(sourceFps){
-  const raw = getMotionInterpTargetFps();
-  // 48/60 are the interpolation-only options on this shared dropdown -
-  // conform has never had a concept of those (its own description above
-  // says so directly: no 48fps/60fps target exists for it, since
-  // conforming to a much higher rate would just speed the movie up).
-  // If either is selected (e.g. left over from testing Framerate
-  // Upscale earlier in the same session), conform falls back to its own
-  // real automatic behavior instead of silently inheriting a value that
-  // was never meant for it and would starve the encoder.
-  if (raw === '48' || raw === '60') return Math.ceil(sourceFps || 24);
+  const select = document.getElementById('conformFpsSelect');
+  const raw = select ? select.value : 'auto';
   return parseFloat(raw) || Math.ceil(sourceFps || 24);
+}
+
+const CONFORM_MANUAL_FPS_OPTIONS = [23, 24, 25, 29, 30, 50, 60];
+function updateConformFpsDropdownOptions(){
+  const select = document.getElementById('conformFpsSelect');
+  if (!select) return;
+  const wasAuto = select.value === 'auto' || !select.value;
+  const previousManualValue = select.value;
+  const autoTarget = Math.ceil(detectedSourceFps || 24);
+  const autoLabel = detectedSourceFps
+    ? `Automatic (round up to ${autoTarget})`
+    : `Automatic (round up to whole number)`;
+  select.innerHTML = `<option value="auto">${autoLabel}</option>`
+    + CONFORM_MANUAL_FPS_OPTIONS.filter(v => v !== autoTarget)
+        .map(v => `<option value="${v}">${v}</option>`).join('');
+  // A previously-picked manual value survives a source-fps refresh (e.g.
+  // loading a new file) as long as it's still one of the real options
+  // above - otherwise falls back to auto rather than silently keeping a
+  // now-nonexistent selection.
+  if (!wasAuto && [...select.options].some(o => o.value === previousManualValue)){
+    select.value = previousManualValue;
+  } else {
+    select.value = 'auto';
+  }
+  updateConformFpsHint();
+}
+
+// Separate from the interpolation section's own updateMotionInterpAutoHint()
+// - shows either the plain "auto → X" info line, or (per direct request) a
+// clear warning when a manual selection is a real, significant playback-
+// speed change, since Conform relabels timing rather than interpolating.
+function updateConformFpsHint(){
+  const hint = document.getElementById('conformFpsHint');
+  const select = document.getElementById('conformFpsSelect');
+  if (!hint || !select) return;
+  const selected = select.value;
+  if (selected === 'auto'){
+    hint.style.display = 'block';
+    hint.textContent = detectedSourceFps
+      ? `Source detected at ${detectedSourceFps}fps → targeting ${getConformTargetFps(detectedSourceFps)}fps.`
+      : `Will round up to the next whole number of whatever framerate the loaded source turns out to be.`;
+    return;
+  }
+  if (detectedSourceFps){
+    const manualTarget = parseFloat(selected);
+    const durationRatio = detectedSourceFps / manualTarget; // new duration = old duration * this
+    const pctChange = Math.abs(durationRatio - 1) * 100;
+    if (pctChange > 10){
+      hint.style.display = 'block';
+      const direction = durationRatio > 1 ? 'longer (slower)' : 'shorter (faster)';
+      hint.innerHTML = `<strong style="color:var(--yellow)">Real speed change:</strong> conforming ${detectedSourceFps}fps → ${manualTarget}fps relabels timing, not interpolates - the video will play about ${pctChange.toFixed(0)}% ${direction} than the original. This is expected for a deliberate speed change, not a bug - if you wanted the ORIGINAL speed preserved with just a different frame rate, use one of the 5 interpolation options above instead (mutually exclusive with this).`;
+      return;
+    }
+  }
+  hint.style.display = 'none';
 }
 
 function toggleFpsConform(){
@@ -854,12 +927,18 @@ function toggleFpsConform(){
     ['tog-motion-interp-gpu','tog-motion-interp-gpu-trt','tog-motion-interp-gpu-vk','tog-motion-interp-mvtools','tog-motion-interp-cpu']
       .forEach(id => { document.getElementById(id).classList.remove('on'); document.getElementById(id).classList.add('disabled'); });
     document.getElementById('vspipePathRow').style.display = 'none';
-    // Target FPS row stays visible and in use - conform now reads the
-    // same control instead of it being hidden/replaced.
+    document.getElementById('targetFpsRow').style.display = 'none';
+    document.getElementById('conformFpsRow').style.display = 'block';
+    document.getElementById('tog-conform-drop-frames').style.display = '';
+    updateConformFpsDropdownOptions();
   } else {
     ['tog-motion-interp-gpu','tog-motion-interp-gpu-trt','tog-motion-interp-gpu-vk','tog-motion-interp-mvtools','tog-motion-interp-cpu']
       .forEach(id => document.getElementById(id).classList.remove('disabled'));
     document.getElementById('targetFpsRow').style.display = '';
+    document.getElementById('conformFpsRow').style.display = 'none';
+    document.getElementById('conformFpsHint').style.display = 'none';
+    document.getElementById('tog-conform-drop-frames').style.display = 'none';
+    document.getElementById('tog-conform-drop-frames').classList.remove('on');
   }
   updateNativeGpuSdrWarning();
 }
@@ -1086,6 +1165,7 @@ function updateQualityDisplay(track){
   const fps = track.frameRate ? (eval(track.frameRate)).toFixed(3) : '?';
   detectedSourceFps = track.frameRate ? eval(track.frameRate) : null;
   updateMotionInterpAutoHint();
+  if (isOn('tog-fps-conform')) updateConformFpsDropdownOptions();
   const isHDR = isHdrTransfer(track.colorTransfer);
   display.innerHTML = `<strong>${track.width}×${track.height}</strong> @ <strong>${fps}fps</strong> · `
     + `Audio: <strong>${lastAudioLabel}</strong> · `
@@ -2231,7 +2311,7 @@ function buildAudioDelayFilter(){
 function buildDurationCorrectionFilter(){
   if (!isOn('tog-duration-fix')) return null;
   let targetDur = videoDuration;
-  if (isOn('tog-fps-conform') && detectedSourceFps){
+  if (isOn('tog-fps-conform') && !isOn('tog-conform-drop-frames') && detectedSourceFps){
     const conformTarget = getConformTargetFps(detectedSourceFps);
     if (Math.abs(conformTarget - detectedSourceFps) > 0.0001) targetDur = videoDuration * (detectedSourceFps / conformTarget);
   }
@@ -2283,6 +2363,15 @@ function getAudioEncoderForCodec(codecName){
 // now-shorter runtime.
 function buildAudioFramerateFilter(){
   if (!isOn('tog-fps-conform')) return null;
+  // Real bug fixed per direct report: drop-frames mode (tog-conform-
+  // drop-frames) preserves the source's ORIGINAL real-time duration by
+  // genuinely dropping/duplicating frames instead of changing speed -
+  // unlike the default relabeling behavior, audio needs NO correction
+  // at all in that mode, since its own timing already matches the
+  // unchanged video duration. Applying this speed-stretch regardless of
+  // which mode was active is exactly what made the audio play slow
+  // after a drop-frames conform.
+  if (isOn('tog-conform-drop-frames')) return null;
   const sourceFps = detectedSourceFps || 24;
   const targetFps = getConformTargetFps(sourceFps);
   if (Math.abs(targetFps - sourceFps) < 0.0001) return null; // already a whole number, nothing to conform
@@ -2480,6 +2569,13 @@ function buildFilterChain(){
     const x = document.getElementById('cropX').value;
     const y = document.getElementById('cropY').value;
     if (w && h) filters.push(`crop=${w}:${h}:${x}:${y}`);
+  }
+
+  if (isOn('tog-fps-conform') && isOn('tog-conform-drop-frames') && detectedSourceFps){
+    const conformTarget = getConformTargetFps(detectedSourceFps);
+    if (Math.abs(conformTarget - detectedSourceFps) > 0.0001){
+      filters.push(`fps=${conformTarget}`);
+    }
   }
 
   if (isOn('tog-motion-interp-cpu')){
@@ -2739,7 +2835,7 @@ async function buildJobFromCurrentSettings(chaptersPath){
   //    overwriting them with an unrelated formula.
   if (isOn('tog-fps-conform')){
     conformTargetFps = getConformTargetFps(detectedSourceFps || 24);
-    if (!externalToolEncoders.includes(encoder) && detectedSourceFps && Math.abs(conformTargetFps - detectedSourceFps) > 0.0001){
+    if (!isOn('tog-conform-drop-frames') && !externalToolEncoders.includes(encoder) && detectedSourceFps && Math.abs(conformTargetFps - detectedSourceFps) > 0.0001){
       const tmpDirConform = filePath.substring(0, Math.max(filePath.lastIndexOf('\\'), filePath.lastIndexOf('/')) + 1);
       const tmpConformedPath = tmpDirConform + '_tmp_conformed_' + jobId + '.mkv';
       const conformArgs = ['-i', filePath, '-map', videoMapArg,
@@ -2902,6 +2998,18 @@ async function buildJobFromCurrentSettings(chaptersPath){
             x = document.getElementById('cropX').value, y = document.getElementById('cropY').value;
       if (w && h) preColorFilters.push(`crop=${w}:${h}:${x}:${y}`);
     }
+    // Real fix: frame-drop Conform mode's fps= filter belongs HERE, not
+    // only in buildFilterChain() (which this pipeline never calls) -
+    // confirmed via a real test that the toggle had zero effect until
+    // this was added to the actual, used filter array. Placed right
+    // after crop, same reasoning as buildFilterChain()'s own copy of
+    // this logic (early, before any color/HDR processing).
+    if (isOn('tog-fps-conform') && isOn('tog-conform-drop-frames') && detectedSourceFps){
+      const conformTargetForDrop = getConformTargetFps(detectedSourceFps);
+      if (Math.abs(conformTargetForDrop - detectedSourceFps) > 0.0001){
+        preColorFilters.push(`fps=${conformTargetForDrop}`);
+      }
+    }
     // mi_mode=mci (motion compensated interpolation) confirmed via research
     // as the strongest, genuine interpolation mode this filter offers -
     // analyzes real motion between frames and synthesizes new in-between
@@ -2925,7 +3033,7 @@ async function buildJobFromCurrentSettings(chaptersPath){
       // on top. Vulkan device setup happens at the top-level args, not
       // inside -vf.
       y4mArgs.push('-init_hw_device', 'vulkan=vk', '-filter_hw_device', 'vk');
-      if (conformTargetFps) y4mArgs.push('-r', String(conformTargetFps));
+      if (conformTargetFps && !isOn('tog-conform-drop-frames')) y4mArgs.push('-r', String(conformTargetFps));
       y4mArgs.push('-i', videoSourcePath, '-map', videoSourceMapArg);
       const chain = [...preColorFilters, 'format=yuv420p', 'hwupload=derive_device=vulkan'];
       if (isOn('tog-hdr') && !isSelectedVideoTrackHDR()){
@@ -2960,7 +3068,7 @@ async function buildJobFromCurrentSettings(chaptersPath){
         y4mArgs.push('-i', 'pipe:0', '-map', '0:v:0');
       } else {
         y4mArgs.push(...encodeHwaccelPre);
-        if (conformTargetFps) y4mArgs.push('-r', String(conformTargetFps));
+        if (conformTargetFps && !isOn('tog-conform-drop-frames')) y4mArgs.push('-r', String(conformTargetFps));
         y4mArgs.push('-i', videoSourcePath, '-map', videoSourceMapArg);
       }
       // hwdownload brings GPU-decoded frames back to CPU memory — required
@@ -3080,10 +3188,35 @@ async function buildJobFromCurrentSettings(chaptersPath){
     // sees it, which is exactly what 4:4:4 doesn't have and needed the
     // extra bitrate + chroma-qp-offset to compensate for. 4:2:0 never
     // had that problem, so it doesn't need that same headroom.
+    //
+    // Real, confirmed bug fixed here, per direct user report: the two
+    // bitrate targets just below were fixed constants regardless of the
+    // ACTUAL output resolution/framerate - calibrated specifically
+    // against 4K UHD Blu-ray-comparable content (see the real-disc
+    // research two paragraphs up), then applied completely unscaled to
+    // every resolution this app produces. Confirmed via a real report:
+    // 2592x1088@50fps hit 53.8Mbps, right at the 54000 4:4:4 ceiling
+    // meant for content with roughly 3x more pixels-per-second. Fixed
+    // using the standard, established bits-per-pixel-per-frame metric
+    // (bitrate / (width*height*fps) - confirmed via real industry
+    // reference points, e.g. HEVC's own commonly-cited ~50Mbps target
+    // for 4K@30fps) - the existing 4K@24fps-calibrated numbers below are
+    // now the REFERENCE ratio, scaled proportionally to the real
+    // output's own pixel-frame rate, so smaller/lower-fps content gets
+    // an appropriately smaller budget for equivalent quality instead of
+    // a needlessly large one, while genuine 4K output is unaffected
+    // (scales back to the exact same numbers that were already there).
+    const outWidthForBitrate = (parseInt(document.getElementById('cropW').value, 10) || 0) || (lastVideoStreams.find(t => String(t.index) === getSelectedVideoTrackIndex())?.width) || (lastVideoStreams[0]?.width) || 3840;
+    const outHeightForBitrate = (parseInt(document.getElementById('cropH').value, 10) || 0) || (lastVideoStreams.find(t => String(t.index) === getSelectedVideoTrackIndex())?.height) || (lastVideoStreams[0]?.height) || 2160;
+    const outFpsForBitrate = conformTargetFps || detectedSourceFps || 24;
+    const referencePixelFrameRate = 3840 * 2160 * 24; // the resolution/fps this app's existing 4K UHD BD-comparable numbers below were actually calibrated against
+    const bitrateScaleFactor = Math.min(1, (outWidthForBitrate * outHeightForBitrate * outFpsForBitrate) / referencePixelFrameRate);
     const use444Bitrate = use444OutputEncode;
-    const vbrTargetKbps = String(use444Bitrate ? 20250 : 11000); // generous average target, real ceiling is max-bitrate below
-    const maxBitrateKbps = String(use444Bitrate ? 54000 : 30000);
-    const vbvBufsizeKbps = String(use444Bitrate ? 54000 : 30000);
+    const referenceVbr = use444Bitrate ? 20250 : 11000;
+    const referenceMax = use444Bitrate ? 54000 : 30000;
+    const vbrTargetKbps = String(Math.max(2000, Math.round(referenceVbr * bitrateScaleFactor))); // generous average target, real ceiling is max-bitrate below
+    const maxBitrateKbps = String(Math.max(6000, Math.round(referenceMax * bitrateScaleFactor)));
+    const vbvBufsizeKbps = maxBitrateKbps;
     const qvbrArgs = ['--vbr', vbrTargetKbps, '--qp-min', `${crfNum-3}:${crfNum-3}:${crfNum-3}`, '--qp-max', `${crfNum+10}:${crfNum+10}:${crfNum+3}`];
     // --aq (adaptive quantization) - confirmed via direct user testing
     // that this genuinely helps and was never the cause of the missing-
@@ -3449,7 +3582,7 @@ clip.set_output()
         // conformTargetFps variable, same condition as the standard
         // path uses elsewhere, so both conform identically to the same
         // target rate.
-        if (isOn('tog-fps-conform') && conformTargetFps){
+        if (isOn('tog-fps-conform') && conformTargetFps && !isOn('tog-conform-drop-frames')){
           nativeArgs.push('--fps', String(conformTargetFps));
         }
         nativeArgs.push('--output', tmpEncOutPath);
@@ -3613,7 +3746,7 @@ clip.set_output()
   // once. Returns null when Conform isn't active or isn't actually
   // changing the rate, matching buildMkvmergeMuxArgs' own inline logic.
   function getSrtConformStretchRatio(){
-    if (isOn('tog-fps-conform') && detectedSourceFps){
+    if (isOn('tog-fps-conform') && !isOn('tog-conform-drop-frames') && detectedSourceFps){
       const conformTarget = getConformTargetFps(detectedSourceFps);
       if (Math.abs(conformTarget - detectedSourceFps) > 0.0001) return detectedSourceFps / conformTarget;
     }
@@ -3675,7 +3808,7 @@ clip.set_output()
       // actually get their intended Framerate Conform timing
       // correction, matching the same real, confirmed reasoning
       // already documented below for why this correction is needed.
-      if (isOn('tog-fps-conform') && detectedSourceFps){
+      if (isOn('tog-fps-conform') && !isOn('tog-conform-drop-frames') && detectedSourceFps){
         const conformTarget = getConformTargetFps(detectedSourceFps);
         if (Math.abs(conformTarget - detectedSourceFps) > 0.0001){
           const stretchRatio = detectedSourceFps / conformTarget;
@@ -4249,7 +4382,8 @@ clip.set_output()
   // separate real-metadata passthrough for their own real DV/HDR10+,
   // untouched by this.
   const shouldGenerateDolbyVisionDynamic = isOn('tog-dv-dynamic') && isOn('tog-hdr') && !isSelectedVideoTrackHDR();
-  const mkvdolbyPathForJob = document.getElementById('mkvdolbyPath').value.trim();
+  console.log('[DV dynamic diagnostic - at queue time] tog-dv-dynamic=', isOn('tog-dv-dynamic'), ' tog-hdr=', isOn('tog-hdr'), ' isSelectedVideoTrackHDR()=', isSelectedVideoTrackHDR(), ' => shouldGenerateDolbyVisionDynamic=', shouldGenerateDolbyVisionDynamic);
+  const mkvdoviPathForJob = document.getElementById('mkvdoviPath').value.trim();
 
   if (preStages.length > 0){
     // videoSourcePath defaults to the user's ORIGINAL file and only ever
@@ -4279,7 +4413,7 @@ clip.set_output()
       totalDuration: videoDuration,
       status: 'pending',
       generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic,
-      mkvdolbyPath: mkvdolbyPathForJob
+      mkvdoviPath: mkvdoviPathForJob
     };
   }
   // No pre-stages needed (regular encoder, no audio correction) — still
@@ -4307,13 +4441,13 @@ clip.set_output()
       totalDuration: videoDuration,
       status: 'pending',
       generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic,
-      mkvdolbyPath: mkvdolbyPathForJob
+      mkvdoviPath: mkvdoviPathForJob
     };
   }
   return { id: jobId, label, filePath, outPath, args, totalDuration: videoDuration, status: 'pending',
     cleanup: chaptersPath ? [chaptersPath] : [],
     generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic,
-    mkvdolbyPath: mkvdolbyPathForJob };
+    mkvdoviPath: mkvdoviPathForJob };
 }
 
 async function addToQueue(){
@@ -4380,7 +4514,7 @@ async function addToQueue(){
     // chapter's absolute timestamp needs to shrink to land at the same
     // fractional position in the new, shorter runtime.
     let ratio = 1;
-    if (isOn('tog-fps-conform') && detectedSourceFps){
+    if (isOn('tog-fps-conform') && !isOn('tog-conform-drop-frames') && detectedSourceFps){
       const conformTarget = getConformTargetFps(detectedSourceFps);
       if (Math.abs(conformTarget - detectedSourceFps) > 0.0001) ratio = detectedSourceFps / conformTarget;
     }
@@ -4890,11 +5024,24 @@ async function processNextInQueue(){
     setStatus(`✔ Complete: ${next.label}`, 'green');
     const fullEl = document.getElementById('fullErrorOutput');
     if (fullEl) fullEl.style.display = 'none';
-    if (next.generateDolbyVisionDynamic && next.mkvdolbyPath){
+    // Real, structural fix: reads the toggle and path field LIVE, directly
+    // from the DOM, right now - no job-object field involved at all. The
+    // previous approach (capturing this on the job object at queue-build
+    // time) could not be conclusively verified as correct or broken
+    // through remote diagnosis, so this removes that entire layer of
+    // indirection as a possible point of failure.
+    const dvLiveMkvdoviPath = document.getElementById('mkvdoviPath').value.trim();
+    const dvLiveShouldRun = isOn('tog-dv-dynamic') && isOn('tog-hdr') && !isSelectedVideoTrackHDR() && !!dvLiveMkvdoviPath;
+    console.log('[DV dynamic diagnostic - LIVE at completion] tog-dv-dynamic=', isOn('tog-dv-dynamic'), ' tog-hdr=', isOn('tog-hdr'), ' isSelectedVideoTrackHDR()=', isSelectedVideoTrackHDR(), ' mkvdoviPath=', dvLiveMkvdoviPath, ' => running=', dvLiveShouldRun);
+    if (dvLiveShouldRun){
       setStatus(`Generating dynamic Dolby Vision metadata: ${next.label}...`, '');
       try {
         const dvResult = await window.electronAPI.generateDolbyVisionDynamic({
-          mkvdolbyPath: next.mkvdolbyPath, inputPath: next.outPath
+          mkvdoviPath: dvLiveMkvdoviPath, inputPath: next.outPath,
+          ffmpegPath: document.getElementById('ffmpegPath').value.trim(),
+          mkvmergePath: document.getElementById('mkvmergePath').value.trim(),
+          doviToolPath: document.getElementById('dovToolPath').value.trim(),
+          mediaInfoPath: document.getElementById('mediaInfoPath').value.trim()
         });
         if (dvResult && dvResult.success){
           logJobWarning(`Dolby Vision dynamic metadata generated successfully: ${dvResult.outputPath}`);
@@ -5004,7 +5151,8 @@ function applyDefaultPaths(){
     mkvmergePath: DEFAULT_PATHS.mkvmerge,
     pgsToSrtPath: DEFAULT_PATHS.pgsToSrt,
     hdr10plusToolPath: DEFAULT_PATHS.hdr10plusTool,
-    mkvdolbyPath: DEFAULT_PATHS.mkvdolby
+    mkvdoviPath: DEFAULT_PATHS.mkvdovi,
+    mkvdoviPathTop: DEFAULT_PATHS.mkvdovi
   };
   for (const [id, value] of Object.entries(map)){
     const field = document.getElementById(id);

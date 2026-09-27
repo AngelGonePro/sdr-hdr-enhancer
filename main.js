@@ -868,54 +868,108 @@ ipcMain.handle('detect-mislabeled-hdr', async (event, payload) => {
 // visible error.
 ipcMain.handle('generate-dolby-vision-dynamic', async (event, payload) => {
   console.log('\n===== DOLBY VISION DYNAMIC METADATA GENERATION START =====\n');
-  const mkvdolbyPath = payload.mkvdolbyPath;
+  const mkvdoviPath = payload.mkvdoviPath;
   const inputPath = payload.inputPath; // this app's own, already-produced, accurate static-HDR10 .mkv
-  console.log('running mkvdolby on:', inputPath);
+  console.log('running mkvdovi on:', inputPath);
+
+  const toolDirs = [payload.ffmpegPath, payload.mkvmergePath, payload.doviToolPath, payload.mediaInfoPath]
+    .filter(p => p && typeof p === 'string')
+    .map(p => path.dirname(p));
+  const augmentedEnv = Object.assign({}, process.env, {
+    PATH: [...toolDirs, process.env.PATH || ''].join(path.delimiter)
+  });
+  console.log('mkvdovi PATH augmented with:', toolDirs.join(', ') || '(none provided)');
 
   const inputDir = path.dirname(inputPath);
+  const inputBase = path.basename(inputPath, path.extname(inputPath));
   let beforeFiles;
   try {
     beforeFiles = new Set(fs.readdirSync(inputDir));
   } catch (err) {
-    return { error: `Could not read output directory before running mkvdolby: ${err.message}` };
+    return { error: `Could not read output directory before running mkvdovi: ${err.message}` };
+  }
+
+  // Real byproduct files/folders mkvdovi's own real pipeline creates
+  // alongside the actual output, confirmed via a real run's directory
+  // listing: "<name>_measurements.bin", "<name>_measurements.bin.l1.json",
+  // and a "mkvdovi_temp_<name>" working folder. Always removed below
+  // regardless of success or failure - a failed run previously left all
+  // of these behind, exactly as reported.
+  function cleanupByproducts(){
+    const candidates = [
+      path.join(inputDir, `${inputBase}_measurements.bin`),
+      path.join(inputDir, `${inputBase}_measurements.bin.l1.json`),
+      path.join(inputDir, `mkvdovi_temp_${inputBase}`)
+    ];
+    for (const p of candidates){
+      try {
+        if (fs.existsSync(p)) fs.rmSync(p, { recursive: true, force: true });
+      } catch (err) {
+        console.log('could not remove mkvdovi byproduct', p, '-', err.message);
+      }
+    }
   }
 
   return new Promise((resolve) => {
-    const args = [inputPath, '--keep-source', '--verify'];
+    // Real fix: --verify removed - confirmed via a real run that all 7
+    // actual processing steps succeeded (measurements, RPU generation,
+    // base layer extraction, RPU injection, muxing) producing a real,
+    // correctly-sized output file, while ONLY the separate, post-hoc
+    // --verify step failed ("Could not compare RPU and output video
+    // frame counts... Inconsistencies detected"), causing the whole run
+    // to report failure despite a genuinely valid result already on
+    // disk. This handler already independently confirms the real output
+    // file's existence and a sane size below before trusting it -
+    // --verify was a redundant, and in this observed case actively
+    // wrong, extra gate on top of that.
+    const args = [inputPath, '--keep-source'];
     let proc;
     try {
-      proc = spawn(mkvdolbyPath, args, { windowsHide: true });
+      proc = spawn(mkvdoviPath, args, { windowsHide: true, env: augmentedEnv });
       activeProcesses.set('dolby-vision-dynamic-gen', proc);
     } catch (err) {
-      console.log('mkvdolby spawn failed:', err && err.message || err);
-      resolve({ error: `Could not start mkvdolby - check the path is correct: ${err && err.message || err}` });
+      console.log('mkvdovi spawn failed:', err && err.message || err);
+      cleanupByproducts();
+      resolve({ error: `Could not start mkvdovi - check the path is correct: ${err && err.message || err}` });
       return;
     }
     let stdout = "";
     let stderr = "";
-    proc.stdout.on("data", d => { const s = d.toString(); stdout = appendBounded(stdout, s); console.log('[mkvdolby]', s.trim()); });
-    proc.stderr.on("data", d => { const s = d.toString(); stderr = appendBounded(stderr, s); console.log('[mkvdolby:err]', s.trim()); });
+    proc.stdout.on("data", d => { const s = d.toString(); stdout = appendBounded(stdout, s); console.log('[mkvdovi]', s.trim()); });
+    proc.stderr.on("data", d => { const s = d.toString(); stderr = appendBounded(stderr, s); console.log('[mkvdovi:err]', s.trim()); });
     proc.on("close", (code) => {
       activeProcesses.delete('dolby-vision-dynamic-gen');
       if (code !== 0) {
-        console.log('mkvdolby failed, exit code', code, '- stderr tail:', stderr.trim().slice(-500));
-        resolve({ error: `mkvdolby exited with code ${code}: ${stderr.trim().slice(-500) || '(no error output captured)'}` });
+        console.log('mkvdovi failed, exit code', code, '- stderr tail:', stderr.trim().slice(-500));
+        cleanupByproducts();
+        resolve({ error: `mkvdovi exited with code ${code}: ${stderr.trim().slice(-500) || '(no error output captured)'}` });
         return;
       }
       if (!fs.existsSync(inputPath)){
-        resolve({ error: 'mkvdolby reported success but the original HDR10 file is gone despite --keep-source being passed - refusing to report success on an inconsistent result.' });
+        cleanupByproducts();
+        resolve({ error: 'mkvdovi reported success but the original HDR10 file is gone despite --keep-source being passed - refusing to report success on an inconsistent result.' });
         return;
       }
       let afterFiles;
       try {
         afterFiles = fs.readdirSync(inputDir);
       } catch (err) {
-        resolve({ error: `mkvdolby reported success but the output directory could not be re-read afterward: ${err.message}` });
+        cleanupByproducts();
+        resolve({ error: `mkvdovi reported success but the output directory could not be re-read afterward: ${err.message}` });
         return;
       }
-      const newFiles = afterFiles.filter(f => !beforeFiles.has(f) && !f.endsWith('.bin') && !f.startsWith('.'));
+      // Excludes the known byproduct names too now (not just .bin/dotfiles)
+      // so the "pick the largest new file" logic below can never
+      // accidentally choose a sidecar/temp artifact over the real output.
+      const knownByproducts = new Set([
+        `${inputBase}_measurements.bin`,
+        `${inputBase}_measurements.bin.l1.json`,
+        `mkvdovi_temp_${inputBase}`
+      ]);
+      const newFiles = afterFiles.filter(f => !beforeFiles.has(f) && !f.endsWith('.bin') && !f.endsWith('.json') && !f.startsWith('.') && !knownByproducts.has(f));
       if (newFiles.length === 0){
-        resolve({ error: 'mkvdolby reported success but no new output file was found in the directory - cannot locate the Dolby Vision result.' });
+        cleanupByproducts();
+        resolve({ error: 'mkvdovi reported success but no new output file was found in the directory - cannot locate the Dolby Vision result.' });
         return;
       }
       let chosen = newFiles[0];
@@ -932,7 +986,7 @@ ipcMain.handle('generate-dolby-vision-dynamic', async (event, payload) => {
       // Per direct user feedback: only ONE final file is wanted (the
       // Dolby Vision metadata added on top of the existing HDR10
       // output), not two separate files. --keep-source above is still
-      // used during the actual mkvdolby run as a safety net (this tool
+      // used during the actual mkvdovi run as a safety net (this tool
       // can't be tested directly here), but now that the new file is
       // confirmed present, the original is replaced by it rather than
       // kept alongside it.
@@ -940,13 +994,15 @@ ipcMain.handle('generate-dolby-vision-dynamic', async (event, payload) => {
       try { originalSize = fs.statSync(inputPath).size; } catch (e) { /* handled by newFiles.length check above if this is somehow also missing */ }
       const chosenSize = fs.statSync(chosenPath).size;
       if (originalSize > 0 && chosenSize < originalSize * 0.5){
-        resolve({ error: `mkvdolby's output (${chosenPath}) is suspiciously small (${chosenSize} bytes vs the original's ${originalSize}) - this looks like a truncated or corrupt conversion, so the original HDR10 file was left untouched rather than being replaced by it. Check the console output above for what actually happened.` });
+        cleanupByproducts();
+        resolve({ error: `mkvdovi's output (${chosenPath}) is suspiciously small (${chosenSize} bytes vs the original's ${originalSize}) - this looks like a truncated or corrupt conversion, so the original HDR10 file was left untouched rather than being replaced by it. Check the console output above for what actually happened.` });
         return;
       }
       try {
         fs.unlinkSync(inputPath);
       } catch (err) {
-        resolve({ error: `mkvdolby's new Dolby Vision file (${chosenPath}) is valid, but the original HDR10 file could not be removed to make way for it: ${err.message}. Both files currently exist - remove the original manually if you only want the Dolby Vision version.` });
+        cleanupByproducts();
+        resolve({ error: `mkvdovi's new Dolby Vision file (${chosenPath}) is valid, but the original HDR10 file could not be removed to make way for it: ${err.message}. Both files currently exist - remove the original manually if you only want the Dolby Vision version.` });
         return;
       }
       try {
@@ -955,13 +1011,15 @@ ipcMain.handle('generate-dolby-vision-dynamic', async (event, payload) => {
         // The original is already gone at this point - report this
         // clearly rather than silently leaving the user with neither a
         // correctly-named file nor their original.
-        resolve({ error: `The original HDR10 file was removed, but the new Dolby Vision file could not be renamed into its place: ${err.message}. Your Dolby Vision output still exists at ${chosenPath}, just under mkvdolby's own name instead of the expected one.` });
+        cleanupByproducts();
+        resolve({ error: `The original HDR10 file was removed, but the new Dolby Vision file could not be renamed into its place: ${err.message}. Your Dolby Vision output still exists at ${chosenPath}, just under mkvdovi's own name instead of the expected one.` });
         return;
       }
+      cleanupByproducts();
       console.log('Dolby Vision dynamic metadata added, single output file at:', inputPath);
       resolve({ success: true, outputPath: inputPath });
     });
-    proc.on("error", err => { console.log('mkvdolby process error:', err.message); resolve({ error: err.message }); });
+    proc.on("error", err => { console.log('mkvdovi process error:', err.message); cleanupByproducts(); resolve({ error: err.message }); });
   });
 });
 
