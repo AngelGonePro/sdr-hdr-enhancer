@@ -922,7 +922,25 @@ ipcMain.handle('generate-dolby-vision-dynamic', async (event, payload) => {
     // file's existence and a sane size below before trusting it -
     // --verify was a redundant, and in this observed case actively
     // wrong, extra gate on top of that.
-    const args = [inputPath, '--keep-source'];
+    //
+    // --peak-estimator robust added per a direct, specific question:
+    // could a scene's true brightness be misjudged, causing the same
+    // family of over/under-exposure-style issues already fixed for
+    // plain static HDR10 metadata, but inside the dynamic per-scene
+    // layer instead? Confirmed via hdr-analyze's own README this is a
+    // real, documented, named limitation of the DEFAULT estimator
+    // specifically: "sensitive to film grain... two grainy real-content
+    // assets read +74 and +93 codes hot against the reference" - a
+    // scene's peak reading too high for content it's true peak, telling
+    // a real Dolby Vision display that scene is brighter than it
+    // actually is. The project's own opt-in fix for exactly this,
+    // confirmed via a real usage example in its own documentation.
+    // Their own docs are explicit this narrows, not fully closes, the
+    // gap - a real, honest improvement, not a guarantee. No added cost
+    // on hardware without CUDA analysis support (confirmed: this
+    // estimator's only documented cost is needing the same CPU
+    // analysis path already in use there regardless).
+    const args = [inputPath, '--keep-source', '--peak-estimator', 'robust'];
     let proc;
     try {
       proc = spawn(mkvdoviPath, args, { windowsHide: true, env: augmentedEnv });
