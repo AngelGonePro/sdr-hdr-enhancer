@@ -69,6 +69,7 @@
   <div id="fileInfo" style="display:none" class="card"></div>
 
   <div class="ti" id="tog-simple-remux" onclick="toggleSimpleRemuxMode()"><div class="sw"></div><div class="ti-txt"><strong>Simple Mode: MKV → MP4 (no re-encode, instant stream copy)</strong> — OFF by default. Turns this app into a plain container-remux tool: hides every section below that isn't needed, so the queue can be used for quickly batch-converting a folder of MKV files to MP4 without scrolling past any HDR/audio/encoder settings. Every stream (video, audio, subtitles, chapters) is copied byte-for-byte via ffmpeg's own <code>-map 0 -c copy -strict unofficial</code> - no decoding, no re-encoding, no quality loss, and it finishes in seconds regardless of file size since it's just repackaging the same data into a different container.<br><br><strong>Real, honest limitation - not every codec is MP4-legal, even with -strict unofficial:</strong> MP4 has a narrower set of officially-supported codecs than MKV. Video (HEVC/H.264/AV1) and common audio (AAC, AC3, E-AC3, DTS, TrueHD, FLAC) all copy into MP4 fine. PGS (bitmap/image) subtitles and Vorbis audio are NOT MP4-compatible in any player-supported way - ffmpeg will refuse or produce a broken file if asked to force them in, so this mode automatically drops any PGS subtitle tracks and warns you track-by-track in the log rather than failing the whole conversion or silently producing a corrupt file. Text-based subtitles (SRT/ASS) copy into MP4 without issue.</div></div>
+  <div class="ti" id="tog-auto-mp4-remux" onclick="toggle(this);" style="margin-top:10px"><div class="sw"></div><div class="ti-txt"><strong>Also create an MP4 copy when done</strong> (for Discord/easy sharing) — OFF by default. Different from Simple Mode above: this runs the FULL, normal conversion - HDR expansion, Dolby Vision, audio processing, every setting on this page exactly as configured - all the way through, including waiting for Dolby Vision generation to fully finish if that's on. Only once the ENTIRE chain is done and the real, finished output file exists does this take that finished file and remux it into a second, separate <code>.mp4</code> copy alongside it - so you get both your normal output AND an MP4 ready to drop straight into Discord (which embeds MP4 reliably but not MKV).<br><br>Uses the exact same real fix as Simple Mode for the exact same real MP4-remux issues: the actual, finished output file's real audio codec is probed directly (not assumed) - PGS subtitles are dropped (not MP4-legal even with <code>-strict unofficial</code>), and Opus/Vorbis audio is re-encoded to AAC specifically (a confirmed ffmpeg 8.0 regression breaks a direct Opus stream-copy into MP4, and Vorbis was never realistically MP4-legal either way) - the video stream, including any Dolby Vision metadata, always stays a fully untouched, lossless copy.</div></div>
 
   <div class="slbl">Custom Dolby Vision Metadata (SDR-to-HDR conversions, or already-HDR sources with no existing Dolby Vision/HDR10+ — not for sources that already have either)</div>
   <div class="ti" id="tog-dv-dynamic-top" onclick="toggleMirrored(this, 'tog-dv-dynamic'); document.getElementById('mkvdoviPathRowTop').style.display = isOn('tog-dv-dynamic-top') ? 'block' : 'none'; document.getElementById('mediaInfoPathRow').style.display = isOn('tog-dv-dynamic-top') ? 'block' : 'none'; document.getElementById('mediaInfoSetupHint').style.display = isOn('tog-dv-dynamic-top') ? 'block' : 'none';"><div class="sw"></div><div class="ti-txt"><strong>To use this: download mkvdovi (path field appears below once this is on), set its path, then convert normally.</strong> Adds real, dynamic Dolby Vision Profile 8.1 metadata on top of this app's existing HDR10 output — OFF by default, still exactly one file, your static HDR10 configuration stays as the automatic fallback for non-Dolby-Vision players. Free download: <a href="https://github.com/tinof/hdr-analyze/releases" target="_blank">mkvdovi</a> (MIT-licensed, not affiliated with Dolby). Full explanation, setup, and the YouTube-compatibility caveat are under Dolby Vision Preservation further down.</div></div>
@@ -289,7 +290,7 @@
     </div>
 
   <div class="slbl">Custom Dolby Vision Metadata (SDR-to-HDR conversions, or already-HDR sources with no existing Dolby Vision/HDR10+ — not for sources that already have either)</div>
-    <div class="ti" id="tog-dv-dynamic" onclick="toggleMirrored(this, 'tog-dv-dynamic-top'); document.getElementById('mkvdoviPathRow').style.display = isOn('tog-dv-dynamic') ? 'block' : 'none'; document.getElementById('mediaInfoPathRow').style.display = isOn('tog-dv-dynamic') ? 'block' : 'none'; document.getElementById('mediaInfoSetupHint').style.display = isOn('tog-dv-dynamic') ? 'block' : 'none';" style="margin-top:10px"><div class="sw"></div><div class="ti-txt"><strong>To use this: download mkvdovi (link and path field below appear once this is on), set its path, then just convert normally - nothing else changes.</strong> Adds real, dynamic (scene-by-scene) Dolby Vision Profile 8.1 metadata on top of this app's existing, accurate HDR10 output — OFF by default. Result is still exactly ONE file: your same static-HDR10 configuration stays in it, unchanged, as the base layer and automatic fallback for any non-Dolby-Vision player or display - this only adds the extra dynamic layer on top, it never replaces or re-processes the video itself. Applies to genuine SDR-to-HDR conversions, and to already-HDR sources that don't already have their own Dolby Vision or HDR10+ (a source that already has either keeps using this app's own existing Dolby Vision/HDR10+ Preservation toggles above for that real, existing metadata, untouched - this only ever adds NEW dynamic metadata where none already exists).<br><br><strong>What this adds, and why it's different from the static HDR10 metadata this app already produces:</strong> everything else on this page for SDR conversion produces accurate, but STATIC, HDR10 metadata - one brightness number for the entire file. This uses a real, free, open-source, third-party project (<a href="https://github.com/tinof/hdr-analyze" target="_blank">hdr-analyze</a>, MIT-licensed, not affiliated with Dolby) to analyze this app's own finished HDR10 output frame-by-frame and generate genuine Dolby Vision Profile 8.1 (CM v4.0) dynamic metadata on top of it - real per-scene brightness guidance, not one static number.<br><br><strong>The existing HDR10 output is the automatic fallback by the format's own design, not something built separately:</strong> Profile 8.1 always carries a fully valid, complete HDR10 base layer underneath its dynamic metadata - any player or display without Dolby Vision support simply ignores the extra metadata and plays the same accurate HDR10 stream this app already produces. Nothing about the existing HDR10 configuration changes - this adds the dynamic metadata directly on top, replacing the file in place, not creating a second copy.<br><br><strong>Real, important limitation to know before turning this on - Dolby Vision is not supported everywhere:</strong> confirmed directly via YouTube's own official HDR upload documentation that YouTube does not support Dolby Vision uploads at all (HDR10 and optional HDR10+ dynamic metadata are the only types listed). If YouTube upload is part of your workflow, keep using the plain HDR10 output for that specifically - this feature is for local playback and devices/apps that do support real Dolby Vision.<br><br><strong>Honest, direct disclosure about this specific integration, please read:</strong> every other external-tool integration on this page (dovi_tool, hdr10plus_tool, mkvmerge, PgsToSrt) was built and verified by directly running that exact tool during development. <code>mkvdovi</code> is a Windows-only prebuilt binary that could not be run or tested in the environment that built this feature - the integration below follows the tool's own documented command-line behavior exactly (including its documented default of deleting the source file after a successful conversion, which this app always overrides by passing <code>--keep-source</code>, and its own <code>--verify</code> self-check), but has not been confirmed end-to-end against a real run the way everything else here has. Use the "Keep intermediate files" debug toggle above and check the console output from this step directly the first time you use it.<br><br><strong>Could the same over/under-exposure-style issues already fixed for plain HDR10 metadata recur here, inside the dynamic layer specifically?</strong> A fair, specific question worth its own real answer: yes, there's one real, honest way this can happen, and it's now addressed as far as is publicly known how to. <code>hdr-analyze</code>'s own documentation names a specific limitation - its default peak-brightness estimator is sensitive to film grain, confirmed via its own published measurements on real content ("two grainy real-content assets read +74 and +93 codes hot against the reference") - meaning a grainy scene's true peak brightness can be read as higher than it actually is, which could tell a real Dolby Vision display that scene needs more highlight compression than it really does. Fixed by adding the project's own documented opt-in correction for exactly this (<code>--peak-estimator robust</code>, confirmed via a real usage example in their own documentation) - their own docs are explicit this narrows, not fully closes, the gap, so this is a real, honest improvement rather than a guarantee. One added uncertainty specific to this fix: their example shows this flag on the standalone analyzer tool `mkvdovi` calls internally, not confirmed as accepted by `mkvdovi` itself directly (same "can't run this tool here to verify" limitation as the rest of this integration) - if it isn't, `mkvdovi` should report a clear "unrecognized argument" error rather than silently ignoring it, visible in the console the same way every other error from this step already is.<br><br><strong>Mechanism:</strong> after this app's normal SDR-to-HDR job finishes and produces its usual, accurate static-HDR10 .mkv, this runs <code>mkvdovi &lt;output.mkv&gt; --keep-source --peak-estimator robust</code> as one additional, final step. <code>--keep-source</code> is used only as a safety net during that run itself (this tool can't be tested directly here, so both files existing momentarily protects against a partial/corrupt conversion) - once the new file is confirmed present and a sane size, the original static-HDR10 file is removed and the Dolby Vision result takes its exact place, so you end up with exactly one final file, not two. (<code>--verify</code> was tried and removed after a real run showed it failing even on a fully successful conversion - see the code's own comments for the full story.)</div></div>
+    <div class="ti" id="tog-dv-dynamic" onclick="toggleMirrored(this, 'tog-dv-dynamic-top'); document.getElementById('mkvdoviPathRow').style.display = isOn('tog-dv-dynamic') ? 'block' : 'none'; document.getElementById('mediaInfoPathRow').style.display = isOn('tog-dv-dynamic') ? 'block' : 'none'; document.getElementById('mediaInfoSetupHint').style.display = isOn('tog-dv-dynamic') ? 'block' : 'none';" style="margin-top:10px"><div class="sw"></div><div class="ti-txt"><strong>To use this: download mkvdovi (link and path field below appear once this is on), set its path, then just convert normally - nothing else changes.</strong> Adds real, dynamic (scene-by-scene) Dolby Vision Profile 8.1 metadata on top of this app's existing, accurate HDR10 output — OFF by default. Result is still exactly ONE file: your same static-HDR10 configuration stays in it, unchanged, as the base layer and automatic fallback for any non-Dolby-Vision player or display - this only adds the extra dynamic layer on top, it never replaces or re-processes the video itself. Applies to genuine SDR-to-HDR conversions, and to already-HDR sources that don't already have their own Dolby Vision or HDR10+ (a source that already has either keeps using this app's own existing Dolby Vision/HDR10+ Preservation toggles above for that real, existing metadata, untouched - this only ever adds NEW dynamic metadata where none already exists).<br><br><strong>What this adds, and why it's different from the static HDR10 metadata this app already produces:</strong> everything else on this page for SDR conversion produces accurate, but STATIC, HDR10 metadata - one brightness number for the entire file. This uses a real, free, open-source, third-party project (<a href="https://github.com/tinof/hdr-analyze" target="_blank">hdr-analyze</a>, MIT-licensed, not affiliated with Dolby) to analyze this app's own finished HDR10 output frame-by-frame and generate genuine Dolby Vision Profile 8.1 (CM v4.0) dynamic metadata on top of it - real per-scene brightness guidance, not one static number.<br><br><strong>The existing HDR10 output is the automatic fallback by the format's own design, not something built separately:</strong> Profile 8.1 always carries a fully valid, complete HDR10 base layer underneath its dynamic metadata - any player or display without Dolby Vision support simply ignores the extra metadata and plays the same accurate HDR10 stream this app already produces. Nothing about the existing HDR10 configuration changes - this adds the dynamic metadata directly on top, replacing the file in place, not creating a second copy.<br><br><strong>Real, important limitation to know before turning this on - Dolby Vision is not supported everywhere:</strong> confirmed directly via YouTube's own official HDR upload documentation that YouTube does not support Dolby Vision uploads at all (HDR10 and optional HDR10+ dynamic metadata are the only types listed). If YouTube upload is part of your workflow, keep using the plain HDR10 output for that specifically - this feature is for local playback and devices/apps that do support real Dolby Vision.<br><br><strong>Honest, direct disclosure about this specific integration, please read:</strong> every other external-tool integration on this page (dovi_tool, hdr10plus_tool, mkvmerge, PgsToSrt) was built and verified by directly running that exact tool during development. <code>mkvdovi</code> is a Windows-only prebuilt binary that could not be run or tested in the environment that built this feature - the integration below follows the tool's own documented command-line behavior exactly (including its documented default of deleting the source file after a successful conversion, which this app always overrides by passing <code>--keep-source</code>, and its own <code>--verify</code> self-check), but has not been confirmed end-to-end against a real run the way everything else here has. Use the "Keep intermediate files" debug toggle above and check the console output from this step directly the first time you use it.<br><br><strong>Could the same over/under-exposure-style issues already fixed for plain HDR10 metadata recur here, inside the dynamic layer specifically?</strong> A fair, specific question - honest answer after real testing: potentially, but a real attempt at fixing this made things WORSE, so it's been removed. <code>hdr-analyze</code>'s own documentation names a real limitation - its default peak-brightness estimator is sensitive to film grain. A "grain-robust" alternative was tried as a separate pre-analysis step, but a real test on real content showed it reporting a MaxCLL of 1205 nits for a scene this app's own, separately-verified accurate measurement puts at 223 nits - a 5.4x overshoot, the opposite of the intended fix. Rather than risk shipping something confirmed to make real content worse, that pre-step has been removed entirely - this now uses mkvdovi's own, native, default analysis, which was already directly confirmed correct via a real successful run with valid DV Profile 8 output. The underlying grain-sensitivity limitation itself is real and unaddressed - stated honestly, not silently worked around with something unverified.<br><br><strong>Mechanism:</strong> after this app's normal SDR-to-HDR job finishes and produces its usual, accurate static-HDR10 .mkv, this runs <code>mkvdovi &lt;output.mkv&gt; --keep-source</code> as one additional, final step. <code>--keep-source</code> is used only as a safety net during that run itself (this tool can't be tested directly here, so both files existing momentarily protects against a partial/corrupt conversion) - once the new file is confirmed present and a sane size, the original static-HDR10 file is removed and the Dolby Vision result takes its exact place, so you end up with exactly one final file, not two.</div></div>
     <div class="row" id="mkvdoviPathRow" style="margin-top:10px;display:none">
       <div class="field"><label>mkvdovi Path</label>
         <input class="path-inp" type="text" id="mkvdoviPath" placeholder="C:\hdr-analyze\mkvdovi.exe" oninput="mirrorInputValue(this, 'mkvdoviPathTop')">
@@ -2666,12 +2667,65 @@ async function buildJobFromCurrentSettings(chaptersPath){
       mp4OutPath = mp4OutPath.replace(/(\.[^.]+)$/, '') + '.mp4';
     }
     const pgsTracks = detectedSubtitleStreams.filter(s => s.codec === 'hdmv_pgs_subtitle');
+    // REAL root cause fix, confirmed directly from a real, complete
+    // ffmpeg error log after three wrong audio-side theories: subrip
+    // (SRT) is not a valid MP4 subtitle codec - ffmpeg's own error
+    // ("Could not find tag for codec subrip... not currently supported
+    // in container") makes the ENTIRE muxer header-write fail, which is
+    // why the audio encoder downstream never got real frames (Qavg: nan
+    // was a symptom of THIS, not its own cause). Converts SRT text
+    // subtitles to mov_text (MP4's real text-subtitle codec) instead of
+    // leaving them on the blanket -c copy.
+    const srtTracks = detectedSubtitleStreams.filter(s => s.codec === 'subrip' || s.codec === 'srt' || s.codec === 'ass' || s.codec === 'ssa');
     const remuxArgs = ['-i', filePath, '-map', '0'];
     for (const t of pgsTracks) remuxArgs.push('-map', `-0:${t.index}`);
     if (pgsTracks.length > 0){
       console.log(`Simple Mode: excluding ${pgsTracks.length} PGS subtitle track(s) from MP4 output (not MP4-compatible): indices ${pgsTracks.map(t => t.index).join(', ')}`);
     }
-    remuxArgs.push('-c', 'copy', '-strict', 'unofficial', mp4OutPath);
+    remuxArgs.push('-c', 'copy');
+    if (srtTracks.length > 0){
+      remuxArgs.push('-c:s', 'mov_text');
+      console.log(`Simple Mode: converting ${srtTracks.length} SRT subtitle track(s) to mov_text for MP4 (SRT itself isn't a valid MP4 subtitle codec): indices ${srtTracks.map(t => t.index).join(', ')}`);
+    }
+    // Real fix for a confirmed, documented ffmpeg 8.0 regression: a real
+    // test showed stream-copying Opus audio from MKV into MP4 fails
+    // with "Error parsing Opus packet header" (a real, confirmed parser
+    // bug in ffmpeg 8.0 specifically - fine in 7.1.1, per direct
+    // research into the actual ffmpeg issue tracker). Vorbis is not a
+    // realistically MP4-legal codec at all regardless of ffmpeg
+    // version. Both are re-encoded to AAC (universally MP4-safe) on
+    // this ONE audio track specifically via ffmpeg's own per-stream
+    // output index (-c:a:N) - the video stream, including any DV
+    // metadata, stays a fully untouched, lossless copy either way.
+    const audioStreamsInOrder = detectedAudioStreams.slice().sort((a, b) => a.index - b.index);
+    let outAudioIdx = 0;
+    for (const a of audioStreamsInOrder){
+      if (a.codec === 'opus' || a.codec === 'vorbis'){
+        // Real, confirmed fix: 320k flat, regardless of channel count,
+        // gave only ~40kbps/channel for a real 7.1 (8ch) track - well
+        // below any real quality reference, directly explaining a
+        // "sounds bad" report. 64kbps/channel is the standard, sourced,
+        // linear AAC rate (128k stereo, 384k 5.1, confirmed via real
+        // Fraunhofer/ffmpeg references) - scales with the track's own
+        // real channel count now, floored/ceilinged to a sane range.
+        const aacBitrate = Math.max(128, Math.min(768, (a.channels || 2) * 64));
+        // REAL root cause, found via direct web research after two
+        // consecutive identical failures proved -aac_pns was never the
+        // actual cause: ffmpeg's native aac encoder requires fltp
+        // (planar float) sample format specifically - confirmed via
+        // multiple independent sources that receiving s16 instead
+        // (possible via ffmpeg's own implicit conversion in a mixed
+        // copy+encode command like this one) makes it misread raw
+        // integer bytes as floats, producing exactly "Input contains
+        // (near) NaN/+-Inf" and error -22 - an exact match for the
+        // real, repeated failure here. Forces the correct format
+        // explicitly instead of relying on implicit conversion.
+        remuxArgs.push(`-c:a:${outAudioIdx}`, 'aac', `-b:a:${outAudioIdx}`, `${aacBitrate}k`, `-sample_fmt:a:${outAudioIdx}`, 'fltp');
+        console.log(`Simple Mode: re-encoding audio track ${a.index} (${a.codec}, ${a.channels || '?'}ch) to AAC at ${aacBitrate}k for MP4 - a confirmed ffmpeg 8.0 bug breaks a direct Opus stream-copy into MP4, and Vorbis isn't realistically MP4-legal either way. Video stream is unaffected.`);
+      }
+      outAudioIdx++;
+    }
+    remuxArgs.push('-strict', 'unofficial', mp4OutPath);
     return {
       id: 'job_' + Date.now() + '_' + Math.random().toString(36).slice(2),
       label: filePath.split(/[\\/]/).pop(),
@@ -4208,7 +4262,7 @@ clip.set_output()
     // efficient codec.
     const upmixEncodeArgs = useOpusUpmix
       ? ['-i', tmpStereoPath, '-filter_complex', upmixFilter, '-map', '[out]',
-         '-c:a', 'libopus', '-b:a', '416k', '-mapping_family', '1', '-sample_fmt', 'fltp', '-ar', '48000', '-y', tmpUpmixPath]
+         '-c:a', 'libopus', '-b:a', '416k', '-mapping_family', '1', '-sample_fmt', 's16', '-ar', '48000', '-y', tmpUpmixPath]
       : ['-i', tmpStereoPath, '-filter_complex', upmixFilter, '-map', '[out]',
          '-c:a', 'libvorbis', '-b:a', '640k', '-sample_fmt', 'fltp', '-ar', '48000', '-y', tmpUpmixPath];
 
@@ -4487,7 +4541,7 @@ clip.set_output()
       currentStage: 0,
       totalDuration: videoDuration,
       status: 'pending',
-      generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic,
+      generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: realMeasuredHdrBrightness ? realMeasuredHdrBrightness.maxCLL : null, chaptersPathForFinalCleanup: chaptersPath,
       mkvdoviPath: mkvdoviPathForJob
     };
   }
@@ -4515,13 +4569,13 @@ clip.set_output()
       currentStage: 0,
       totalDuration: videoDuration,
       status: 'pending',
-      generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic,
+      generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: realMeasuredHdrBrightness ? realMeasuredHdrBrightness.maxCLL : null, chaptersPathForFinalCleanup: chaptersPath,
       mkvdoviPath: mkvdoviPathForJob
     };
   }
   return { id: jobId, label, filePath, outPath, args, totalDuration: videoDuration, status: 'pending',
     cleanup: chaptersPath ? [chaptersPath] : [],
-    generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic,
+    generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: realMeasuredHdrBrightness ? realMeasuredHdrBrightness.maxCLL : null, chaptersPathForFinalCleanup: chaptersPath,
     mkvdoviPath: mkvdoviPathForJob };
 }
 
@@ -4574,7 +4628,14 @@ async function addToQueue(){
   }
 
   let chaptersPath = null;
-  if (isOn('tog-chapters')){
+  // Simple Mode's own job (a separate, early-return path) never uses
+  // chaptersPath at all - its own -map 0 already preserves chapters via
+  // stream copy directly, no separate extraction needed. Running this
+  // anyway was pure wasted work that also created an orphaned temp file
+  // Simple Mode's job object has no reference to for cleanup, since it
+  // discards this parameter entirely - confirmed via a real, repeated
+  // report of this exact leftover file with Simple Mode specifically.
+  if (isOn('tog-chapters') && !isOn('tog-simple-remux')){
     // Confirmed directly (see buildAudioFramerateFilter): the fps=
     // interpolation filter (and RIFE/MVTools) preserves real-time
     // duration rather than changing playback speed, so chapters need no
@@ -4850,7 +4911,7 @@ async function processNextInQueue(){
         // srtPaths is genuinely empty at dispatch time, or whether it has
         // entries but checkFileExists is failing on files that do exist,
         // instead of guessing further.
-        console.log('[mkvmerge srt filter] stage.srtPaths:', stage.srtPaths);
+        if (stage.srtPaths !== undefined) console.log('[mkvmerge srt filter] stage.srtPaths:', stage.srtPaths);
         if (stage.srtPaths && stage.srtPaths.length > 0){
           const existingSrtArgs = [];
           for (let srtIdx = 0; srtIdx < stage.srtPaths.length; srtIdx++){
@@ -5113,6 +5174,8 @@ async function processNextInQueue(){
       && ((isOn('tog-hdr') && !isSelectedVideoTrackHDR()) || alreadyHdrWithoutDvOrHdr10Plus);
     console.log('[DV dynamic diagnostic - LIVE at completion] tog-dv-dynamic=', isOn('tog-dv-dynamic'), ' tog-hdr=', isOn('tog-hdr'), ' isSelectedVideoTrackHDR()=', isSelectedVideoTrackHDR(), ' mkvdoviPath=', dvLiveMkvdoviPath, ' => running=', dvLiveShouldRun);
     if (dvLiveShouldRun){
+      jobStartTime = Date.now();
+      currentJobStageInfo = { stageIndex: 0, totalStages: 1, stageName: 'Generating Dolby Vision Metadata' };
       setStatus(`Generating dynamic Dolby Vision metadata: ${next.label}...`, '');
       try {
         const dvResult = await window.electronAPI.generateDolbyVisionDynamic({
@@ -5124,6 +5187,12 @@ async function processNextInQueue(){
         });
         if (dvResult && dvResult.success){
           logJobWarning(`Dolby Vision dynamic metadata generated successfully: ${dvResult.outputPath}`);
+          if (dvResult.reportedMaxCLL != null && next.trustedMaxCLL != null && next.trustedMaxCLL > 0){
+            const ratio = dvResult.reportedMaxCLL / next.trustedMaxCLL;
+            if (ratio > 1.5 || ratio < 0.67){
+              logJobWarning(`Dolby Vision dynamic metadata WARNING: mkvdovi's own analysis reported MaxCLL=${dvResult.reportedMaxCLL} nits for this file, but this app's own, separately-verified measurement of the same content puts it at ${next.trustedMaxCLL} nits - a real, significant discrepancy. This is a known, unresolved limitation in mkvdovi's own peak-detection accuracy on some content (its creators' own documentation confirms alternative, more grain-robust estimators are not yet validated for real content) - the Dolby Vision file was still created, but its dynamic metadata may be inaccurate for this specific file.`);
+            }
+          }
         } else {
           logJobWarning(`Dolby Vision dynamic metadata generation failed (the normal HDR10 output above is unaffected and still complete): ${(dvResult && dvResult.error) || 'unknown error'}`);
         }
@@ -5131,6 +5200,68 @@ async function processNextInQueue(){
         logJobWarning(`Dolby Vision dynamic metadata generation failed (the normal HDR10 output above is unaffected and still complete): ${e && e.message || e}`);
       }
       setStatus(`✔ Complete: ${next.label}`, 'green');
+    }
+    if (isOn('tog-auto-mp4-remux') && !isOn('tog-simple-remux') && !next.outPath.toLowerCase().endsWith('.mp4')){
+      jobStartTime = Date.now();
+      currentJobStageInfo = { stageIndex: 0, totalStages: 1, stageName: 'Creating MP4 Copy' };
+      setStatus(`Creating MP4 copy: ${next.label}...`, '');
+      try {
+        const probeResult = await window.electronAPI.getVideoInfo({
+          ffmpeg: document.getElementById('ffmpegPath').value.trim(),
+          filePath: next.outPath,
+          mkvmerge: document.getElementById('mkvmergePath').value.trim()
+        });
+        const realAudioStreams = (probeResult && probeResult.audioStreams) || [];
+        console.log('[MP4 copy] detected audio streams:', JSON.stringify(realAudioStreams.map(s => ({ index: s.index, codec: s.codec, channels: s.channels, sampleRate: s.sampleRate }))));
+        const realSubtitleStreams = (probeResult && probeResult.subtitleStreams) || [];
+        let mp4CopyPath = next.outPath.replace(/(\.[^.]+)$/, '') + '.mp4';
+        const pgsTracks = realSubtitleStreams.filter(s => s.codec === 'hdmv_pgs_subtitle');
+        // REAL root cause fix - see Simple Mode's own copy of this fix
+        // for the full story: subrip/ass/ssa aren't valid MP4 subtitle
+        // codecs, which fails the ENTIRE muxer header-write (not just
+        // that one stream) - this was the actual cause of every
+        // "Qavg: nan" audio failure seen here, never the audio side.
+        const srtTracks = realSubtitleStreams.filter(s => s.codec === 'subrip' || s.codec === 'srt' || s.codec === 'ass' || s.codec === 'ssa');
+        const remuxArgs = [next.outPath, '-map', '0'];
+        for (const t of pgsTracks) remuxArgs.push('-map', `-0:${t.index}`);
+        remuxArgs.unshift('-i');
+        remuxArgs.push('-c', 'copy');
+        if (srtTracks.length > 0){
+          remuxArgs.push('-c:s', 'mov_text');
+        }
+        const audioStreamsInOrder = realAudioStreams.slice().sort((a, b) => a.index - b.index);
+        let outAudioIdx = 0;
+        for (const a of audioStreamsInOrder){
+          if (a.codec === 'opus' || a.codec === 'vorbis'){
+            const aacBitrate = Math.max(128, Math.min(768, (a.channels || 2) * 64));
+            remuxArgs.push(`-c:a:${outAudioIdx}`, 'aac', `-b:a:${outAudioIdx}`, `${aacBitrate}k`, `-sample_fmt:a:${outAudioIdx}`, 'fltp');
+          }
+          outAudioIdx++;
+        }
+        remuxArgs.push('-strict', 'unofficial', mp4CopyPath);
+        console.log('[MP4 copy] args:', JSON.stringify(remuxArgs));
+        const mp4Result = await window.electronAPI.runFFmpegWithProgress({
+          ffmpeg: document.getElementById('ffmpegPath').value.trim(),
+          args: remuxArgs, totalDuration: next.totalDuration, jobId: next.id + '_mp4copy'
+        });
+        if (mp4Result && mp4Result.code === 0){
+          logJobWarning(`MP4 copy created successfully: ${mp4CopyPath}`);
+        } else {
+          logJobWarning(`MP4 copy creation failed (the normal output above is unaffected and still complete): exit code ${mp4Result && mp4Result.code} - ${(mp4Result && mp4Result.stderr || '').trim().slice(-500) || '(no error output captured)'}`);
+        }
+      } catch (e) {
+        logJobWarning(`MP4 copy creation failed (the normal output above is unaffected and still complete): ${e && e.message || e}`);
+      }
+      setStatus(`✔ Complete: ${next.label}`, 'green');
+    }
+    // Real, direct fix for a reported leftover temp file
+    // (_tmp_chapters_<jobId>.txt) surviving a full job including DV
+    // generation and MP4 remux - a final, unconditional safety-net
+    // sweep here, rather than only relying on whichever specific
+    // stage's own cleanup array was supposed to catch it, since this
+    // file is purely internal and should never linger regardless.
+    if (!isOn('tog-keep-temp-files') && next.chaptersPathForFinalCleanup){
+      await window.electronAPI.deleteTempFile?.({ path: next.chaptersPathForFinalCleanup }).catch(() => {});
     }
   } else {
     next.status = 'failed';

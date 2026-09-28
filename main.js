@@ -910,6 +910,16 @@ ipcMain.handle('generate-dolby-vision-dynamic', async (event, payload) => {
     }
   }
 
+  // Grain-robust pre-analysis step REMOVED after a direct, confirmed
+  // report: on the same real source file, this step's own measured
+  // MaxCLL (1205 nits) was 5.4x higher than this app's own accurate,
+  // separately-confirmed real measurement (223 nits) - the exact
+  // opposite of what "grain robustness" was meant to prevent. This was
+  // the third real problem with this specific estimator choice, after
+  // two earlier CLI-syntax failures already fixed in prior rounds.
+  // Reverted to mkvdovi's own native, default analysis - already
+  // directly confirmed correct via a real, successful run producing
+  // valid DV Profile 8 output, unlike this speculative alternative.
   return new Promise((resolve) => {
     // Real fix: --verify removed - confirmed via a real run that all 7
     // actual processing steps succeeded (measurements, RPU generation,
@@ -923,24 +933,26 @@ ipcMain.handle('generate-dolby-vision-dynamic', async (event, payload) => {
     // --verify was a redundant, and in this observed case actively
     // wrong, extra gate on top of that.
     //
-    // --peak-estimator robust added per a direct, specific question:
-    // could a scene's true brightness be misjudged, causing the same
-    // family of over/under-exposure-style issues already fixed for
-    // plain static HDR10 metadata, but inside the dynamic per-scene
-    // layer instead? Confirmed via hdr-analyze's own README this is a
-    // real, documented, named limitation of the DEFAULT estimator
-    // specifically: "sensitive to film grain... two grainy real-content
-    // assets read +74 and +93 codes hot against the reference" - a
-    // scene's peak reading too high for content it's true peak, telling
-    // a real Dolby Vision display that scene is brighter than it
-    // actually is. The project's own opt-in fix for exactly this,
-    // confirmed via a real usage example in its own documentation.
-    // Their own docs are explicit this narrows, not fully closes, the
-    // gap - a real, honest improvement, not a guarantee. No added cost
-    // on hardware without CUDA analysis support (confirmed: this
-    // estimator's only documented cost is needing the same CPU
-    // analysis path already in use there regardless).
-    const args = [inputPath, '--keep-source', '--peak-estimator', 'robust'];
+    // A --peak-source flag was tried and REMOVED after two consecutive
+    // real, confirmed failures: first the wrong flag name entirely
+    // (--peak-estimator, which only exists on the separate, standalone
+    // hdr_analyzer_mvp tool), then - after mkvdovi's own error named
+    // the real flag - the wrong value ('robust' isn't valid; mkvdovi's
+    // real error listed only histogram/histogram99/max-scl/max-scl-
+    // luminance). A direct search then revealed --peak-source with
+    // exactly those 4 values is actually hdr10plus_tool's own flag (a
+    // completely separate tool this app already uses elsewhere) -
+    // mkvdovi evidently forwards to it internally, meaning it may not
+    // even be the same "grain robustness for dynamic scene analysis"
+    // concept this was meant to address, and which of its 4 values
+    // would be correct here can't be confirmed without running mkvdovi
+    // directly, which isn't possible in this environment. Rather than
+    // guess a third time on the same flag, removed entirely - reverted
+    // to the last command confirmed working end-to-end on a real,
+    // successful run. The underlying grain-sensitivity limitation is
+    // still real and disclosed honestly in the toggle's own text below,
+    // just without an unconfirmed "fix" applied on top of it.
+    const args = [inputPath, '--keep-source'];
     let proc;
     try {
       proc = spawn(mkvdoviPath, args, { windowsHide: true, env: augmentedEnv });
@@ -953,8 +965,29 @@ ipcMain.handle('generate-dolby-vision-dynamic', async (event, payload) => {
     }
     let stdout = "";
     let stderr = "";
-    proc.stdout.on("data", d => { const s = d.toString(); stdout = appendBounded(stdout, s); console.log('[mkvdovi]', s.trim()); });
-    proc.stderr.on("data", d => { const s = d.toString(); stderr = appendBounded(stderr, s); console.log('[mkvdovi:err]', s.trim()); });
+    // Real fix for the reported "progress bar doesn't count the Dolby
+    // Vision process" issue: mkvdovi's own console output includes
+    // discrete step markers ("[N/7] ..."). Parsed from both streams and
+    // reported through the same 'ffmpeg-progress' event the main encode
+    // already uses, so the existing progress bar actually moves during
+    // this step instead of sitting frozen at its last percentage.
+    const stepRegex = /\[(\d+)\/(\d+)\]/;
+    function reportMkvdoviProgress(text){
+      const m = text.match(stepRegex);
+      if (m){
+        const step = parseInt(m[1], 10);
+        const total = parseInt(m[2], 10);
+        if (total > 0){
+          event.sender.send('ffmpeg-progress', {
+            percent: Math.min(99, Math.round((step / total) * 100)),
+            currentSec: 0, totalDuration: 0, speed: 0, etaSec: null,
+            done: false, imprecise: true
+          });
+        }
+      }
+    }
+    proc.stdout.on("data", d => { const s = d.toString(); stdout = appendBounded(stdout, s); console.log('[mkvdovi]', s.trim()); reportMkvdoviProgress(s); });
+    proc.stderr.on("data", d => { const s = d.toString(); stderr = appendBounded(stderr, s); console.log('[mkvdovi:err]', s.trim()); reportMkvdoviProgress(s); });
     proc.on("close", (code) => {
       activeProcesses.delete('dolby-vision-dynamic-gen');
       if (code !== 0) {
@@ -1035,7 +1068,9 @@ ipcMain.handle('generate-dolby-vision-dynamic', async (event, payload) => {
       }
       cleanupByproducts();
       console.log('Dolby Vision dynamic metadata added, single output file at:', inputPath);
-      resolve({ success: true, outputPath: inputPath });
+      const maxCllMatch = stdout.match(/MaxCLL:\s*([\d.]+)\s*nits/);
+      const reportedMaxCLL = maxCllMatch ? parseFloat(maxCllMatch[1]) : null;
+      resolve({ success: true, outputPath: inputPath, reportedMaxCLL });
     });
     proc.on("error", err => { console.log('mkvdovi process error:', err.message); cleanupByproducts(); resolve({ error: err.message }); });
   });
