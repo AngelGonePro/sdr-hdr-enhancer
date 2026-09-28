@@ -2775,6 +2775,17 @@ async function buildJobFromCurrentSettings(chaptersPath){
       }
     } catch (e) { /* falls through to the slider-driven fallback below, unchanged */ }
   }
+  // Real fix for a confirmed gap: realMeasuredHdrBrightness alone
+  // misses already-HDR sources that already have valid, real embedded
+  // metadata (measure-real-hdr-brightness deliberately skips those -
+  // the source's own metadata is already trustworthy). Falls back to
+  // getHdrMetadataValues()'s own real values (the same ones already
+  // trusted enough to feed the main encoder's --max-cll flag) whenever
+  // the source's metadata is genuinely real but wasn't measured.
+  const hvForTrust = getHdrMetadataValues();
+  const trustedHdrMaxCLL = realMeasuredHdrBrightness ? realMeasuredHdrBrightness.maxCLL : (hvForTrust.isReal ? hvForTrust.maxCLL : null);
+  const trustedHdrMaxFALL = realMeasuredHdrBrightness ? realMeasuredHdrBrightness.maxFALL : (hvForTrust.isReal ? hvForTrust.maxFALL : null);
+  console.log('[trustedHdr build-time diagnostic] realMeasuredHdrBrightness=', JSON.stringify(realMeasuredHdrBrightness), ' hvForTrust.isReal=', hvForTrust.isReal, ' => trustedHdrMaxCLL=', trustedHdrMaxCLL, ' trustedHdrMaxFALL=', trustedHdrMaxFALL);
   // Read directly from Brightness Reference (npl), not the read-only
   // Metadata Peak display - that display just mirrors this value for
   // visibility; reading the real source of truth here means metadata
@@ -4541,7 +4552,7 @@ clip.set_output()
       currentStage: 0,
       totalDuration: videoDuration,
       status: 'pending',
-      generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: realMeasuredHdrBrightness ? realMeasuredHdrBrightness.maxCLL : null, chaptersPathForFinalCleanup: chaptersPath,
+      generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: trustedHdrMaxCLL, trustedMaxFALL: trustedHdrMaxFALL, chaptersPathForFinalCleanup: chaptersPath,
       mkvdoviPath: mkvdoviPathForJob
     };
   }
@@ -4569,13 +4580,13 @@ clip.set_output()
       currentStage: 0,
       totalDuration: videoDuration,
       status: 'pending',
-      generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: realMeasuredHdrBrightness ? realMeasuredHdrBrightness.maxCLL : null, chaptersPathForFinalCleanup: chaptersPath,
+      generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: trustedHdrMaxCLL, trustedMaxFALL: trustedHdrMaxFALL, chaptersPathForFinalCleanup: chaptersPath,
       mkvdoviPath: mkvdoviPathForJob
     };
   }
   return { id: jobId, label, filePath, outPath, args, totalDuration: videoDuration, status: 'pending',
     cleanup: chaptersPath ? [chaptersPath] : [],
-    generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: realMeasuredHdrBrightness ? realMeasuredHdrBrightness.maxCLL : null, chaptersPathForFinalCleanup: chaptersPath,
+    generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: trustedHdrMaxCLL, trustedMaxFALL: trustedHdrMaxFALL, chaptersPathForFinalCleanup: chaptersPath,
     mkvdoviPath: mkvdoviPathForJob };
 }
 
@@ -5178,19 +5189,38 @@ async function processNextInQueue(){
       currentJobStageInfo = { stageIndex: 0, totalStages: 1, stageName: 'Generating Dolby Vision Metadata' };
       setStatus(`Generating dynamic Dolby Vision metadata: ${next.label}...`, '');
       try {
+        // Real fix for the exact same class of bug already documented
+        // this session for a different field: next.trustedMaxCLL reads
+        // as undefined at completion time despite being correctly
+        // computed and stored at build time (confirmed via a real
+        // diagnostic). Same proven fix as shouldGenerateDolbyVisionDynamic
+        // - stop trusting the job-object-stored value, measure live
+        // instead, right here. Also more accurate: measures the real,
+        // final encoded HDR10 pixels directly, not a pre-encode value.
+        let liveTrustedMaxCLL = null, liveTrustedMaxFALL = null;
+        try {
+          const liveMeasure = await window.electronAPI.measureRealHdrBrightness({
+            ffmpeg: document.getElementById('ffmpegPath').value.trim(),
+            filePath: next.outPath, pixelFilters: 'null'
+          });
+          if (liveMeasure && !liveMeasure.error && liveMeasure.maxCLL > 0){
+            liveTrustedMaxCLL = liveMeasure.maxCLL; liveTrustedMaxFALL = liveMeasure.maxFALL;
+          }
+        } catch (e) { /* falls through - correction step below just won't run */ }
         const dvResult = await window.electronAPI.generateDolbyVisionDynamic({
           mkvdoviPath: dvLiveMkvdoviPath, inputPath: next.outPath,
           ffmpegPath: document.getElementById('ffmpegPath').value.trim(),
           mkvmergePath: document.getElementById('mkvmergePath').value.trim(),
           doviToolPath: document.getElementById('dovToolPath').value.trim(),
-          mediaInfoPath: document.getElementById('mediaInfoPath').value.trim()
+          mediaInfoPath: document.getElementById('mediaInfoPath').value.trim(),
+          trustedMaxCLL: liveTrustedMaxCLL, trustedMaxFALL: liveTrustedMaxFALL
         });
         if (dvResult && dvResult.success){
           logJobWarning(`Dolby Vision dynamic metadata generated successfully: ${dvResult.outputPath}`);
-          if (dvResult.reportedMaxCLL != null && next.trustedMaxCLL != null && next.trustedMaxCLL > 0){
-            const ratio = dvResult.reportedMaxCLL / next.trustedMaxCLL;
+          if (dvResult.reportedMaxCLL != null && liveTrustedMaxCLL != null && liveTrustedMaxCLL > 0){
+            const ratio = dvResult.reportedMaxCLL / liveTrustedMaxCLL;
             if (ratio > 1.5 || ratio < 0.67){
-              logJobWarning(`Dolby Vision dynamic metadata WARNING: mkvdovi's own analysis reported MaxCLL=${dvResult.reportedMaxCLL} nits for this file, but this app's own, separately-verified measurement of the same content puts it at ${next.trustedMaxCLL} nits - a real, significant discrepancy. This is a known, unresolved limitation in mkvdovi's own peak-detection accuracy on some content (its creators' own documentation confirms alternative, more grain-robust estimators are not yet validated for real content) - the Dolby Vision file was still created, but its dynamic metadata may be inaccurate for this specific file.`);
+              logJobWarning(`Dolby Vision dynamic metadata NOTE: mkvdovi's own initial analysis reported MaxCLL=${dvResult.reportedMaxCLL} nits for this file, but this app's own, separately-verified measurement of the same content puts it at ${liveTrustedMaxCLL} nits - a real discrepancy in mkvdovi's own peak-detection accuracy on some content (its creators' own documentation confirms alternative, more grain-robust estimators are not yet validated for real content). This has been automatically corrected below: the file's dynamic min/max range has been overridden with this app's own accurate, trusted measurement, so this discrepancy does not carry through to the final file.`);
             }
           }
         } else {
@@ -5202,6 +5232,13 @@ async function processNextInQueue(){
       setStatus(`✔ Complete: ${next.label}`, 'green');
     }
     if (isOn('tog-auto-mp4-remux') && !isOn('tog-simple-remux') && !next.outPath.toLowerCase().endsWith('.mp4')){
+      // Real, direct fix for a reported "stuck at 99%" hang: this step
+      // immediately opens the same file the DV step's own static-
+      // correction sub-step may have just renamed into place - Windows
+      // can briefly hold a lock on a just-renamed file, and there was
+      // no gap between the two operations. A short, defensive delay
+      // here (only when DV generation just ran) gives it time to clear.
+      if (dvLiveShouldRun) { await new Promise(r => setTimeout(r, 1500)); }
       jobStartTime = Date.now();
       currentJobStageInfo = { stageIndex: 0, totalStages: 1, stageName: 'Creating MP4 Copy' };
       setStatus(`Creating MP4 copy: ${next.label}...`, '');

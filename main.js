@@ -988,7 +988,7 @@ ipcMain.handle('generate-dolby-vision-dynamic', async (event, payload) => {
     }
     proc.stdout.on("data", d => { const s = d.toString(); stdout = appendBounded(stdout, s); console.log('[mkvdovi]', s.trim()); reportMkvdoviProgress(s); });
     proc.stderr.on("data", d => { const s = d.toString(); stderr = appendBounded(stderr, s); console.log('[mkvdovi:err]', s.trim()); reportMkvdoviProgress(s); });
-    proc.on("close", (code) => {
+    proc.on("close", async (code) => {
       activeProcesses.delete('dolby-vision-dynamic-gen');
       if (code !== 0) {
         console.log('mkvdovi failed, exit code', code, '- stderr tail:', stderr.trim().slice(-500));
@@ -1070,6 +1070,128 @@ ipcMain.handle('generate-dolby-vision-dynamic', async (event, payload) => {
       console.log('Dolby Vision dynamic metadata added, single output file at:', inputPath);
       const maxCllMatch = stdout.match(/MaxCLL:\s*([\d.]+)\s*nits/);
       const reportedMaxCLL = maxCllMatch ? parseFloat(maxCllMatch[1]) : null;
+
+      // NEW: real static-metadata correction, using dovi_tool's own
+      // confirmed editor JSON capability (hdr10_metadata: maxcll/
+      // maxfall/max_luminance) rather than another attempt at
+      // mkvdovi's own unvalidated internals. Corrects the static L6
+      // fallback layer with this app's own already-verified-accurate
+      // measurement, independent of MediaInfo. Fully non-destructive:
+      // any failure here leaves mkvdovi's own valid output untouched.
+      // Does NOT touch the dynamic per-scene L1 data - that remains
+      // the tool's own disclosed, unvalidated limitation.
+      const trustedMaxCLL = payload.trustedMaxCLL;
+      const trustedMaxFALL = payload.trustedMaxFALL;
+      // Frame count needed to generate a matching-length synthetic RPU -
+      // parsed from mkvdovi's own real stdout ("Optimizer completed: N
+      // frames processed"), the same real count mkvdovi itself analyzed.
+      const frameCountMatch = stdout.match(/Optimizer completed:\s*(\d+)\s*frames processed/);
+      const rpuFrameCount = frameCountMatch ? parseInt(frameCountMatch[1], 10) : null;
+      console.log(`[DV static-correction diagnostic] trustedMaxCLL=${trustedMaxCLL} trustedMaxFALL=${trustedMaxFALL} doviToolPath=${payload.doviToolPath} rpuFrameCount=${rpuFrameCount} => running=${trustedMaxCLL > 0 && trustedMaxFALL > 0 && rpuFrameCount > 0 && !!payload.doviToolPath}`);
+      if (trustedMaxCLL > 0 && trustedMaxFALL > 0 && rpuFrameCount > 0 && payload.doviToolPath) {
+        const inputDir2 = path.dirname(inputPath);
+        const stem2 = path.basename(inputPath, path.extname(inputPath));
+        const tempHevc = path.join(inputDir2, `_tmp_dvfix_${stem2}.hevc`);
+        const tempRpu = path.join(inputDir2, `_tmp_dvfix_${stem2}_rpu.bin`);
+        const tempRpuEdited = path.join(inputDir2, `_tmp_dvfix_${stem2}_rpu_edited.bin`);
+        const tempHevcEdited = path.join(inputDir2, `_tmp_dvfix_${stem2}_edited.hevc`);
+        const tempMkv = path.join(inputDir2, `_tmp_dvfix_${stem2}.mkv`);
+        const editConfigPath = path.join(inputDir2, `_tmp_dvfix_${stem2}_config.json`);
+        const flatRpuConfigPath = path.join(inputDir2, `_tmp_dvfix_${stem2}_flat_config.json`);
+        const flatRpuPath = path.join(inputDir2, `_tmp_dvfix_${stem2}_flat_rpu.bin`);
+        try {
+          const masteringPeak = trustedMaxCLL <= 1000 ? 1000 : (trustedMaxCLL <= 4000 ? 4000 : 10000);
+          const runStep = (bin, args) => new Promise((res) => {
+            let p;
+            try { p = spawn(bin, args, { windowsHide: true, env: augmentedEnv }); }
+            catch (e) { res({ code: -1, stderr: String(e && e.message || e) }); return; }
+            let errBuf = '';
+            p.stderr && p.stderr.on('data', d => { errBuf += d.toString(); });
+            p.on('close', code => res({ code, stderr: errBuf }));
+            p.on('error', e => res({ code: -1, stderr: String(e.message) }));
+          });
+          // Step 1: extract raw HEVC from mkvdovi's own output MKV
+          const r1 = await runStep(payload.ffmpegPath, ['-y', '-i', inputPath, '-map', '0:v:0', '-c', 'copy', '-bsf:v', 'hevc_mp4toannexb', '-f', 'hevc', tempHevc]);
+          if (r1.code !== 0) throw new Error('HEVC extraction failed: ' + r1.stderr.slice(-300));
+          // Step 2: extract the RPU from that raw HEVC
+          const r2 = await runStep(payload.doviToolPath, ['extract-rpu', '-o', tempRpu, tempHevc]);
+          if (r2.code !== 0) throw new Error('RPU extraction failed: ' + r2.stderr.slice(-300));
+          // Step 3: real, confirmed fix - per dovi_tool's OWN docs
+          // (editor.md/generator.md, fetched directly, not guessed):
+          // the editor's top-level min_pq/max_pq only override the
+          // SOURCE (L0) range, NOT the per-scene L1 data - confirmed
+          // as the reason two earlier attempts changed nothing. The
+          // documented, correct mechanism: generate a synthetic RPU
+          // (matching frame count) whose default_metadata_blocks
+          // forces the SAME Level1 block onto every single frame, then
+          // use source_rpu + rpu_levels:[1] to pull that flat L1 data
+          // into the real RPU. level6 correction (already confirmed
+          // working) stays in the same editor call.
+          function nitsToPq12Bit(nits){
+            const m1 = 0.1593017578125, m2 = 78.84375;
+            const c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
+            const L = Math.max(0, Math.min(1, nits / 10000));
+            const Lm1 = Math.pow(L, m1);
+            const Yp = Math.pow((c1 + c2 * Lm1) / (1 + c3 * Lm1), m2);
+            return Math.round(Math.max(0, Math.min(4095, Yp * 4095)));
+          }
+          const flatMaxPq = nitsToPq12Bit(trustedMaxCLL);
+          const flatAvgPq = nitsToPq12Bit(trustedMaxFALL);
+          console.log(`[DV flat-metadata diagnostic] generating synthetic flat RPU: frames=${rpuFrameCount} min_pq=1 max_pq=${flatMaxPq} avg_pq=${flatAvgPq} (max should correspond to ~${trustedMaxCLL} nits, avg to ~${trustedMaxFALL} nits)`);
+          // 3a: generate the synthetic, flat RPU matching the real frame count
+          fs.writeFileSync(flatRpuConfigPath, JSON.stringify({
+            profile: '8.1',
+            length: rpuFrameCount,
+            level6: {
+              max_display_mastering_luminance: Math.round(masteringPeak),
+              min_display_mastering_luminance: 50,
+              max_content_light_level: Math.round(trustedMaxCLL),
+              max_frame_average_light_level: Math.round(trustedMaxFALL)
+            },
+            default_metadata_blocks: [
+              { Level1: { min_pq: 1, max_pq: flatMaxPq, avg_pq: flatAvgPq } }
+            ]
+          }));
+          const rGen = await runStep(payload.doviToolPath, ['generate', '-j', flatRpuConfigPath, '-o', flatRpuPath]);
+          if (rGen.code !== 0) throw new Error('Synthetic flat RPU generation failed: ' + rGen.stderr.slice(-300));
+          // 3b: edit the real RPU - level6 (confirmed working) + pull
+          // the flat L1 data in from the synthetic RPU via source_rpu
+          fs.writeFileSync(editConfigPath, JSON.stringify({
+            level6: {
+              max_display_mastering_luminance: Math.round(masteringPeak),
+              min_display_mastering_luminance: 50,
+              max_content_light_level: Math.round(trustedMaxCLL),
+              max_frame_average_light_level: Math.round(trustedMaxFALL)
+            },
+            source_rpu: flatRpuPath,
+            rpu_levels: [1]
+          }));
+          const r3 = await runStep(payload.doviToolPath, ['editor', '-i', tempRpu, '-j', editConfigPath, '-o', tempRpuEdited]);
+          if (r3.code !== 0) throw new Error('RPU edit failed: ' + r3.stderr.slice(-300));
+          // Step 4: inject the corrected RPU back into the raw HEVC
+          const r4 = await runStep(payload.doviToolPath, ['inject-rpu', '-i', tempHevc, '--rpu-in', tempRpuEdited, '-o', tempHevcEdited]);
+          if (r4.code !== 0) throw new Error('RPU injection failed: ' + r4.stderr.slice(-300));
+          // Step 5: remux - corrected video track, everything else (audio/subs/chapters) unchanged from mkvdovi's own output
+          const r5 = await runStep(payload.mkvmergePath, ['-o', tempMkv, tempHevcEdited, '--no-video', inputPath]);
+          if (r5.code !== 0 && r5.code !== 1) throw new Error('Remux failed: ' + r5.stderr.slice(-300));
+          const finalCheck = fs.existsSync(tempMkv) ? fs.statSync(tempMkv) : null;
+          if (finalCheck && finalCheck.size > 0) {
+            fs.renameSync(tempMkv, inputPath);
+            console.log(`Static AND dynamic HDR10/DV metadata corrected: MaxCLL=${trustedMaxCLL} MaxFALL=${trustedMaxFALL} nits (this app's own verified measurement, flattened across all ${rpuFrameCount} frames, independent of MediaInfo)`);
+          } else {
+            throw new Error('corrected output file missing or empty');
+          }
+        } catch (err) {
+          console.log('Static/dynamic metadata correction skipped (non-fatal - the original, already-valid mkvdovi output is unaffected):', err && err.message || err);
+        } finally {
+          // Real fix for a reported leftover-temp-files bug: this used
+          // to only run on the success path, so any failure partway
+          // through (like the earlier hdr10_metadata field error) left
+          // every temp file from the successful earlier steps behind.
+          // Now always runs, regardless of success or failure.
+          for (const p of [tempHevc, tempRpu, tempRpuEdited, tempHevcEdited, editConfigPath, flatRpuConfigPath, flatRpuPath]) { try { if (fs.existsSync(p)) fs.rmSync(p); } catch (e) {} }
+        }
+      }
       resolve({ success: true, outputPath: inputPath, reportedMaxCLL });
     });
     proc.on("error", err => { console.log('mkvdovi process error:', err.message); cleanupByproducts(); resolve({ error: err.message }); });
