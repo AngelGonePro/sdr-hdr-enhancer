@@ -164,7 +164,7 @@ ipcMain.handle('get-video-info', async (event, payload) => {
   return new Promise((resolve) => {
     const args = [
       '-v', 'error',
-      '-show_entries', 'stream=index,width,height,r_frame_rate,codec_type,channels,color_transfer,color_primaries,color_space,codec_name,pix_fmt,profile,start_time',
+      '-show_entries', 'stream=index,width,height,r_frame_rate,avg_frame_rate,nb_frames,codec_type,channels,color_transfer,color_primaries,color_space,codec_name,pix_fmt,profile,start_time',
       '-show_entries', 'stream_tags=language,title',
       '-show_entries', 'format=duration',
       '-of', 'json',
@@ -190,12 +190,43 @@ ipcMain.handle('get-video-info', async (event, payload) => {
         const parsed = JSON.parse(stdout);
         const streams = parsed.streams || [];
         const mkvmergeLanguages = await getMkvmergeLanguages();
+        // Real fix for a reported "fps changes without Conform on" bug:
+        // r_frame_rate alone (previously the only field read) is
+        // confirmed, from multiple independent real ffmpeg/ffprobe
+        // reports, to sometimes report a wrong value - doubled, halved,
+        // or otherwise incorrect - particularly for MKV and VFR-adjacent
+        // content. avg_frame_rate (total frames / duration) is
+        // consistently the more reliable field for real playback rate.
+        // Prefer it whenever it disagrees meaningfully with r_frame_rate;
+        // a normal CFR file where both already agree is unaffected.
+        function resolveFrameRate(s, formatDurationSec){
+          const rRaw = s.r_frame_rate;
+          const aRaw = s.avg_frame_rate;
+          const parseFrac = (v) => {
+            if (!v || v === '0/0') return null;
+            const parts = String(v).split('/');
+            const num = parseFloat(parts[0]);
+            const den = parts.length > 1 ? parseFloat(parts[1]) : 1;
+            if (!isFinite(num) || !isFinite(den) || den === 0) return null;
+            return num / den;
+          };
+          const rVal = parseFrac(rRaw);
+          const aVal = parseFrac(aRaw);
+          if (rVal == null) return aRaw || rRaw; // fall back to whatever exists
+          if (aVal == null) return rRaw;
+          const pctDiff = Math.abs(rVal - aVal) / Math.max(rVal, aVal);
+          if (pctDiff > 0.02) {
+            console.log(`Frame rate mismatch detected: r_frame_rate=${rRaw} (${rVal.toFixed(3)}) vs avg_frame_rate=${aRaw} (${aVal.toFixed(3)}) - using avg_frame_rate as the more reliable real-world rate.`);
+            return aRaw;
+          }
+          return rRaw;
+        }
         const videoStreams = streams.filter(s => s.codec_type === 'video').map(s => ({
           index: s.index,
           codec: s.codec_name,
           width: s.width,
           height: s.height,
-          frameRate: s.r_frame_rate,
+          frameRate: resolveFrameRate(s, parsed.format ? parseFloat(parsed.format.duration) : null),
           colorTransfer: s.color_transfer,
           colorPrimaries: s.color_primaries || null,
           colorSpace: s.color_space || null,

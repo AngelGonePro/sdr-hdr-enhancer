@@ -897,7 +897,7 @@ function getConformTargetFps(sourceFps){
   return parseFloat(raw) || Math.ceil(sourceFps || 24);
 }
 
-const CONFORM_MANUAL_FPS_OPTIONS = [23, 24, 25, 29, 30, 50, 60];
+const CONFORM_MANUAL_FPS_OPTIONS = [23, 24, 25, 29, 30, 47.952, 48, 50, 60, 119.88, 120];
 function updateConformFpsDropdownOptions(){
   const select = document.getElementById('conformFpsSelect');
   if (!select) return;
