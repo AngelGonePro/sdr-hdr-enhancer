@@ -148,12 +148,19 @@ ipcMain.handle('get-video-info', async (event, payload) => {
         try {
           const parsed = JSON.parse(stdout);
           const byIndex = {};
+          console.log('[getMkvmergeLanguages diagnostic] mkvmerge -J tracks:', JSON.stringify((parsed.tracks || []).map(t => ({
+            id: t.id, type: t.type,
+            language_ietf: t.properties && t.properties.language_ietf,
+            language: t.properties && t.properties.language
+          }))));
           for (const t of (parsed.tracks || [])){
             const lang = t.properties && (t.properties.language_ietf || t.properties.language);
             if (lang && lang !== 'und') byIndex[t.id] = lang;
           }
+          console.log('[getMkvmergeLanguages diagnostic] resolved byIndex map:', JSON.stringify(byIndex));
           resolveInner(byIndex);
         } catch (e) {
+          console.log('[getMkvmergeLanguages diagnostic] JSON parse failed:', e && e.message || e, 'raw stdout (first 500 chars):', stdout.slice(0, 500));
           resolveInner({});
         }
       });
@@ -257,7 +264,13 @@ ipcMain.handle('get-video-info', async (event, payload) => {
           startTime: s.start_time !== undefined ? parseFloat(s.start_time) : 0,
           title: (s.tags && s.tags.title) || null
         }));
-        const subtitleStreams = streams.filter(s => s.codec_type === 'subtitle').map(s => ({
+        const subtitleStreamsRaw = streams.filter(s => s.codec_type === 'subtitle');
+        console.log('[subtitle language diagnostic] ffprobe subtitle streams:', JSON.stringify(subtitleStreamsRaw.map(s => ({
+          index: s.index, codec: s.codec_name,
+          ffprobeLangTag: s.tags && s.tags.language,
+          resolvedLanguage: resolveLanguage(s)
+        }))));
+        const subtitleStreams = subtitleStreamsRaw.map(s => ({
           index: s.index,
           codec: s.codec_name,
           language: resolveLanguage(s),

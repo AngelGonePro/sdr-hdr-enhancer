@@ -4334,7 +4334,7 @@ clip.set_output()
         };
       }
       const mkvmergeArgsResult = buildMkvmergeMuxArgs(mkvmergeRawHevcPath, tmpUpmixPath, outPath, mkvmergeChaptersPath, pgsOcrConvertedPaths, pgsOcrConvertedLanguages, audioLanguageForMux);
-      stage3Args = { toolPath: mkvmergePathVal, toolArgs: mkvmergeArgsResult.args, srtPaths: mkvmergeArgsResult.srtPaths, srtStretchRatio: mkvmergeArgsResult.srtStretchRatio, isSpawnTool: true };
+      stage3Args = { toolPath: mkvmergePathVal, toolArgs: mkvmergeArgsResult.args, srtPaths: mkvmergeArgsResult.srtPaths, srtLanguages: mkvmergeArgsResult.srtLanguages, srtStretchRatio: mkvmergeArgsResult.srtStretchRatio, isSpawnTool: true };
       stage3Name = 'Mux final MKV with Dolby Vision signaling (mkvmerge)';
       stage3Cleanup = [tmpUpmixPath, mkvmergeRawHevcPath, ...(mkvmergeChaptersPath ? [mkvmergeChaptersPath] : []), ...(dvRpuPath ? [dvRpuPath] : []), ...(hdr10PlusMetaPath ? [hdr10PlusMetaPath] : []), ...pgsOcrConvertedPaths];
     } else {
