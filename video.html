@@ -2690,6 +2690,42 @@ let stopRequested = false; // set by stopCurrent() BEFORE calling kill — this 
                             // consistent — the renderer's own intent is the
                             // reliable source of truth here).
 
+const HDR_PH_CLL = 9990011, HDR_PH_FALL = 9990022, HDR_PH_LUM = 9990033;
+function replaceHdrPlaceholders(node, map){
+  if (typeof node === 'string'){
+    let s = node;
+    for (const k in map) s = s.split(k).join(String(map[k]));
+    return s;
+  }
+  if (typeof node === 'number'){ const k = String(node); return (k in map) ? Number(map[k]) : node; }
+  if (Array.isArray(node)){ for (let i = 0; i < node.length; i++) node[i] = replaceHdrPlaceholders(node[i], map); return node; }
+  if (node && typeof node === 'object'){
+    for (const key of Object.keys(node)) node[key] = replaceHdrPlaceholders(node[key], map);
+    return node;
+  }
+  return node;
+}
+// Runs when a queued job actually starts: does the slow real-brightness
+// measurement now and substitutes the real values into the job.
+async function resolveDeferredHdrMeasure(job){
+  const d = job.deferredHdrMeasure;
+  if (!d) return;
+  job.deferredHdrMeasure = null;
+  let cll = d.fallbackCLL, fall = d.fallbackFALL, lum = d.fallbackLum;
+  try {
+    setStatus(`Measuring real HDR brightness: ${job.label}...`, '');
+    const r = await window.electronAPI.measureRealHdrBrightness({ ffmpeg: d.ffmpeg, filePath: d.filePath, pixelFilters: d.pixelFilters });
+    if (r && !r.error && r.maxCLL > 0){
+      cll = r.maxCLL; fall = r.maxFALL;
+      lum = (([1000, 4000, 10000].find(p => p >= cll)) || 10000) * 10000;
+    }
+  } catch (e) { /* fallback values above, same as the old behavior */ }
+  const map = {}; map[HDR_PH_CLL] = cll; map[HDR_PH_FALL] = fall; map[HDR_PH_LUM] = lum;
+  replaceHdrPlaceholders(job.args, map);
+  replaceHdrPlaceholders(job.stages, map);
+  job.trustedMaxCLL = cll; job.trustedMaxFALL = fall;
+}
+
 async function buildJobFromCurrentSettings(chaptersPath){
   if (!filePath) return null;
   // Simple Mode: a completely separate, minimal job - bypasses every
@@ -2807,14 +2843,19 @@ async function buildJobFromCurrentSettings(chaptersPath){
       && realSrcMeta.mastering.maxLuminance != null && realSrcMeta.mastering.maxLuminance > 0
       && realSrcMeta.contentLight.maxContent != null && realSrcMeta.contentLight.maxContent > 0);
   let realMeasuredHdrBrightness = null;
+  // The measurement is slow (full-file scan), so it is NOT run here at
+  // add-to-queue time. Placeholder numbers are baked into the args now and
+  // swapped for the real measured values when the job starts running
+  // (see resolveDeferredHdrMeasure in the queue runner).
+  let deferredHdrMeasure = null;
   if (isOn('tog-hdr') && (!isSelectedVideoTrackHDR() || !hasRealSourceMetadata)){
-    const ffmpegForMeasure = document.getElementById('ffmpegPath').value.trim();
-    try {
-      const result = await window.electronAPI.measureRealHdrBrightness({ ffmpeg: ffmpegForMeasure, filePath, pixelFilters: filterChain });
-      if (result && !result.error && result.maxCLL > 0){
-        realMeasuredHdrBrightness = result;
-      }
-    } catch (e) { /* falls through to the slider-driven fallback below, unchanged */ }
+    const fallbackCLL = isSelectedVideoTrackHDR() ? 1000 : document.getElementById('hdrRefSlider').value;
+    const fallbackLum = (([1000, 4000, 10000].find(p => p >= fallbackCLL)) || 10000) * 10000;
+    deferredHdrMeasure = {
+      ffmpeg: document.getElementById('ffmpegPath').value.trim(), filePath, pixelFilters: filterChain,
+      fallbackCLL, fallbackFALL: 400, fallbackLum
+    };
+    realMeasuredHdrBrightness = { maxCLL: HDR_PH_CLL, maxFALL: HDR_PH_FALL, isPlaceholder: true };
   }
   // Real fix for a confirmed gap: realMeasuredHdrBrightness alone
   // misses already-HDR sources that already have valid, real embedded
@@ -2911,6 +2952,7 @@ async function buildJobFromCurrentSettings(chaptersPath){
       // standard reference value that comfortably contains the actual
       // target peak instead.
       maxLuminance: (function(){
+        if (realMeasuredHdrBrightness && realMeasuredHdrBrightness.isPlaceholder) return HDR_PH_LUM;
         const targetPeak = realMeasuredHdrBrightness ? realMeasuredHdrBrightness.maxCLL : (isSelectedVideoTrackHDR() ? 1000 : peak);
         const standardPeaks = [1000, 4000, 10000];
         const chosen = standardPeaks.find(p => p >= targetPeak) || 10000;
@@ -4411,7 +4453,8 @@ clip.set_output()
       ],
       currentStage: 0,
       totalDuration: videoDuration,
-      status: 'pending'
+      status: 'pending',
+      deferredHdrMeasure
     };
   }
 
@@ -4593,7 +4636,7 @@ clip.set_output()
       currentStage: 0,
       totalDuration: videoDuration,
       status: 'pending',
-      generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: trustedHdrMaxCLL, trustedMaxFALL: trustedHdrMaxFALL, chaptersPathForFinalCleanup: chaptersPath,
+      generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: trustedHdrMaxCLL, trustedMaxFALL: trustedHdrMaxFALL, deferredHdrMeasure, chaptersPathForFinalCleanup: chaptersPath,
       mkvdoviPath: mkvdoviPathForJob
     };
   }
@@ -4621,13 +4664,13 @@ clip.set_output()
       currentStage: 0,
       totalDuration: videoDuration,
       status: 'pending',
-      generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: trustedHdrMaxCLL, trustedMaxFALL: trustedHdrMaxFALL, chaptersPathForFinalCleanup: chaptersPath,
+      generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: trustedHdrMaxCLL, trustedMaxFALL: trustedHdrMaxFALL, deferredHdrMeasure, chaptersPathForFinalCleanup: chaptersPath,
       mkvdoviPath: mkvdoviPathForJob
     };
   }
   return { id: jobId, label, filePath, outPath, args, totalDuration: videoDuration, status: 'pending',
     cleanup: chaptersPath ? [chaptersPath] : [],
-    generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: trustedHdrMaxCLL, trustedMaxFALL: trustedHdrMaxFALL, chaptersPathForFinalCleanup: chaptersPath,
+    generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: trustedHdrMaxCLL, trustedMaxFALL: trustedHdrMaxFALL, deferredHdrMeasure, chaptersPathForFinalCleanup: chaptersPath,
     mkvdoviPath: mkvdoviPathForJob };
 }
 
@@ -4912,6 +4955,8 @@ async function processNextInQueue(){
   renderQueue();
   document.getElementById('progressWrap').style.display = 'block';
   document.getElementById('stopBtn').disabled = false;
+
+  await resolveDeferredHdrMeasure(next);
 
   const ffmpeg = document.getElementById('ffmpegPath').value.trim();
   let finalResult = { code: 0 };
