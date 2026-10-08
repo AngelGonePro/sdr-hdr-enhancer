@@ -1131,8 +1131,8 @@ ipcMain.handle('generate-dolby-vision-dynamic', async (event, payload) => {
       // frames processed"), the same real count mkvdovi itself analyzed.
       const frameCountMatch = stdout.match(/Optimizer completed:\s*(\d+)\s*frames processed/);
       const rpuFrameCount = frameCountMatch ? parseInt(frameCountMatch[1], 10) : null;
-      console.log(`[DV static-correction diagnostic] trustedMaxCLL=${trustedMaxCLL} trustedMaxFALL=${trustedMaxFALL} doviToolPath=${payload.doviToolPath} rpuFrameCount=${rpuFrameCount} => running=${trustedMaxCLL > 0 && trustedMaxFALL > 0 && rpuFrameCount > 0 && !!payload.doviToolPath}`);
-      if (trustedMaxCLL > 0 && trustedMaxFALL > 0 && rpuFrameCount > 0 && payload.doviToolPath) {
+      console.log(`[DV static-correction diagnostic] trustedMaxCLL=${trustedMaxCLL} trustedMaxFALL=${trustedMaxFALL} doviToolPath=${payload.doviToolPath} rpuFrameCount=${rpuFrameCount} => running=${trustedMaxCLL > 0 && typeof trustedMaxFALL === 'number' && trustedMaxFALL >= 0 && rpuFrameCount > 0 && !!payload.doviToolPath}`);
+      if (trustedMaxCLL > 0 && typeof trustedMaxFALL === 'number' && trustedMaxFALL >= 0 && rpuFrameCount > 0 && payload.doviToolPath) {
         const inputDir2 = path.dirname(inputPath);
         const stem2 = path.basename(inputPath, path.extname(inputPath));
         const tempHevc = path.join(inputDir2, `_tmp_dvfix_${stem2}.hevc`);
@@ -1180,7 +1180,7 @@ ipcMain.handle('generate-dolby-vision-dynamic', async (event, payload) => {
             return Math.round(Math.max(0, Math.min(4095, Yp * 4095)));
           }
           const flatMaxPq = nitsToPq12Bit(trustedMaxCLL);
-          const flatAvgPq = nitsToPq12Bit(trustedMaxFALL);
+          const flatAvgPq = nitsToPq12Bit(Math.max(1, trustedMaxFALL));
           console.log(`[DV flat-metadata diagnostic] generating synthetic flat RPU: frames=${rpuFrameCount} min_pq=1 max_pq=${flatMaxPq} avg_pq=${flatAvgPq} (max should correspond to ~${trustedMaxCLL} nits, avg to ~${trustedMaxFALL} nits)`);
           // 3a: generate the synthetic, flat RPU matching the real frame count
           fs.writeFileSync(flatRpuConfigPath, JSON.stringify({
@@ -1190,7 +1190,7 @@ ipcMain.handle('generate-dolby-vision-dynamic', async (event, payload) => {
               max_display_mastering_luminance: Math.round(masteringPeak),
               min_display_mastering_luminance: 50,
               max_content_light_level: Math.round(trustedMaxCLL),
-              max_frame_average_light_level: Math.round(trustedMaxFALL)
+              max_frame_average_light_level: Math.max(1, Math.round(trustedMaxFALL))
             },
             default_metadata_blocks: [
               { Level1: { min_pq: 1, max_pq: flatMaxPq, avg_pq: flatAvgPq } }
@@ -1205,7 +1205,7 @@ ipcMain.handle('generate-dolby-vision-dynamic', async (event, payload) => {
               max_display_mastering_luminance: Math.round(masteringPeak),
               min_display_mastering_luminance: 50,
               max_content_light_level: Math.round(trustedMaxCLL),
-              max_frame_average_light_level: Math.round(trustedMaxFALL)
+              max_frame_average_light_level: Math.max(1, Math.round(trustedMaxFALL))
             },
             source_rpu: flatRpuPath,
             rpu_levels: [1]
