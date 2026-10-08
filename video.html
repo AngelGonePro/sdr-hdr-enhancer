@@ -70,6 +70,14 @@
 
   <div class="ti" id="tog-simple-remux" onclick="toggleSimpleRemuxMode()"><div class="sw"></div><div class="ti-txt"><strong>Simple Mode: MKV → MP4 (no re-encode, instant stream copy)</strong> — OFF by default. Turns this app into a plain container-remux tool: hides every section below that isn't needed, so the queue can be used for quickly batch-converting a folder of MKV files to MP4 without scrolling past any HDR/audio/encoder settings. Every stream (video, audio, subtitles, chapters) is copied byte-for-byte via ffmpeg's own <code>-map 0 -c copy -strict unofficial</code> - no decoding, no re-encoding, no quality loss, and it finishes in seconds regardless of file size since it's just repackaging the same data into a different container.<br><br><strong>Real, honest limitation - not every codec is MP4-legal, even with -strict unofficial:</strong> MP4 has a narrower set of officially-supported codecs than MKV. Video (HEVC/H.264/AV1) and common audio (AAC, AC3, E-AC3, DTS, TrueHD, FLAC) all copy into MP4 fine. PGS (bitmap/image) subtitles and Vorbis audio are NOT MP4-compatible in any player-supported way - ffmpeg will refuse or produce a broken file if asked to force them in, so this mode automatically drops any PGS subtitle tracks and warns you track-by-track in the log rather than failing the whole conversion or silently producing a corrupt file. Text-based subtitles (SRT/ASS) copy into MP4 without issue.</div></div>
   <div class="ti" id="tog-auto-mp4-remux" onclick="toggle(this);" style="margin-top:10px"><div class="sw"></div><div class="ti-txt"><strong>Also create an MP4 copy when done</strong> (for Discord/easy sharing) — OFF by default. Different from Simple Mode above: this runs the FULL, normal conversion - HDR expansion, Dolby Vision, audio processing, every setting on this page exactly as configured - all the way through, including waiting for Dolby Vision generation to fully finish if that's on. Only once the ENTIRE chain is done and the real, finished output file exists does this take that finished file and remux it into a second, separate <code>.mp4</code> copy alongside it - so you get both your normal output AND an MP4 ready to drop straight into Discord (which embeds MP4 reliably but not MKV).<br><br>Uses the exact same real fix as Simple Mode for the exact same real MP4-remux issues: the actual, finished output file's real audio codec is probed directly (not assumed) - PGS subtitles are dropped (not MP4-legal even with <code>-strict unofficial</code>), and Opus/Vorbis audio is re-encoded to AAC specifically (a confirmed ffmpeg 8.0 regression breaks a direct Opus stream-copy into MP4, and Vorbis was never realistically MP4-legal either way) - the video stream, including any Dolby Vision metadata, always stays a fully untouched, lossless copy.</div></div>
+  <div class="field" style="margin-top:8px"><label>MP4 audio codec (used by Simple Mode and the MP4 copy, for tracks that can't be copied as-is)</label>
+    <select id="mp4AudioCodecSelect">
+      <option value="aac">AAC - same channels as the source (most compatible; the previous behavior)</option>
+      <option value="aac_stereo">AAC - stereo downmix (best for Discord / browsers / phones: the downmix is done here, not by the player)</option>
+      <option value="opus">Opus - same channels (clearly better quality than AAC at the same size; needs a modern player)</option>
+      <option value="flac">FLAC - same channels (lossless, no further quality loss; large; needs a modern player)</option>
+    </select>
+  </div>
 
   <div class="slbl">Custom Dolby Vision Metadata (SDR-to-HDR conversions, or already-HDR sources with no existing Dolby Vision/HDR10+ — not for sources that already have either)</div>
   <div class="ti" id="tog-dv-dynamic-top" onclick="toggleMirrored(this, 'tog-dv-dynamic'); document.getElementById('mkvdoviPathRowTop').style.display = isOn('tog-dv-dynamic-top') ? 'block' : 'none'; document.getElementById('mediaInfoPathRow').style.display = isOn('tog-dv-dynamic-top') ? 'block' : 'none'; document.getElementById('mediaInfoSetupHint').style.display = isOn('tog-dv-dynamic-top') ? 'block' : 'none';"><div class="sw"></div><div class="ti-txt"><strong>To use this: download mkvdovi (path field appears below once this is on), set its path, then convert normally.</strong> Adds real, dynamic Dolby Vision Profile 8.1 metadata on top of this app's existing HDR10 output — OFF by default, still exactly one file, your static HDR10 configuration stays as the automatic fallback for non-Dolby-Vision players. Free download: <a href="https://github.com/tinof/hdr-analyze/releases" target="_blank">mkvdovi</a> (MIT-licensed, not affiliated with Dolby). Full explanation, setup, and the YouTube-compatibility caveat are under Dolby Vision Preservation further down.</div></div>
@@ -770,6 +778,39 @@ collapseLongDescriptions('.path-hint');
 
 let filePath = '';
 let videoDuration = 0;
+// MP4 audio re-encode choice (Simple Mode + MP4 copy share this). AAC with the
+// source's own channel count is the default and is byte-for-byte what these
+// paths always did. Measured on a 7.1 test chain (Vorbis 640k -> target): the
+// native AAC encoder is the quality ceiling - no AAC flag (PNS, cutoff, bitrate)
+// moved it - while Opus at a LOWER bitrate scored clearly higher and FLAC adds no
+// further loss. aac_stereo does the downmix here instead of leaving it to a player.
+function getMp4AudioChoice(){
+  const el = document.getElementById('mp4AudioCodecSelect');
+  return el && el.value ? el.value : 'aac';
+}
+function getMp4StrictLevel(){
+  // 'unofficial' is what these paths always used; Opus/FLAC in MP4 need 'experimental' (a superset).
+  const c = getMp4AudioChoice();
+  return (c === 'opus' || c === 'flac') ? 'experimental' : 'unofficial';
+}
+function mp4AudioEncodeArgs(outIdx, channels){
+  const i = outIdx, ch = channels || 2, choice = getMp4AudioChoice();
+  if (choice === 'opus'){
+    const br = Math.max(96, Math.min(768, ch * 64));
+    const a = [`-c:a:${i}`, 'libopus', `-b:a:${i}`, `${br}k`];
+    if (ch > 2) a.push(`-mapping_family:a:${i}`, '1');
+    a.push(`-sample_fmt:a:${i}`, 'flt');
+    return a;
+  }
+  if (choice === 'flac'){
+    return [`-c:a:${i}`, 'flac', `-sample_fmt:a:${i}`, 's32', `-bits_per_raw_sample:a:${i}`, '24'];
+  }
+  if (choice === 'aac_stereo'){
+    return [`-c:a:${i}`, 'aac', `-b:a:${i}`, '192k', `-ac:a:${i}`, '2', `-sample_fmt:a:${i}`, 'fltp'];
+  }
+  const aacBitrate = Math.max(128, Math.min(768, ch * 64));
+  return [`-c:a:${i}`, 'aac', `-b:a:${i}`, `${aacBitrate}k`, `-sample_fmt:a:${i}`, 'fltp'];
+}
 let detectedSourceFps = null;
 let detectedAudioTrackDuration = null;
 let detectedCrop = null;
@@ -2720,12 +2761,12 @@ async function buildJobFromCurrentSettings(chaptersPath){
         // (near) NaN/+-Inf" and error -22 - an exact match for the
         // real, repeated failure here. Forces the correct format
         // explicitly instead of relying on implicit conversion.
-        remuxArgs.push(`-c:a:${outAudioIdx}`, 'aac', `-b:a:${outAudioIdx}`, `${aacBitrate}k`, `-sample_fmt:a:${outAudioIdx}`, 'fltp');
-        console.log(`Simple Mode: re-encoding audio track ${a.index} (${a.codec}, ${a.channels || '?'}ch) to AAC at ${aacBitrate}k for MP4 - a confirmed ffmpeg 8.0 bug breaks a direct Opus stream-copy into MP4, and Vorbis isn't realistically MP4-legal either way. Video stream is unaffected.`);
+        remuxArgs.push(...mp4AudioEncodeArgs(outAudioIdx, a.channels));
+        console.log(`Simple Mode: re-encoding audio track ${a.index} (${a.codec}, ${a.channels || '?'}ch) using MP4 audio choice '${getMp4AudioChoice()}' for MP4 - a confirmed ffmpeg 8.0 bug breaks a direct Opus stream-copy into MP4, and Vorbis isn't realistically MP4-legal either way. Video stream is unaffected.`);
       }
       outAudioIdx++;
     }
-    remuxArgs.push('-strict', 'unofficial', mp4OutPath);
+    remuxArgs.push('-strict', getMp4StrictLevel(), mp4OutPath);
     return {
       id: 'job_' + Date.now() + '_' + Math.random().toString(36).slice(2),
       label: filePath.split(/[\\/]/).pop(),
@@ -5270,12 +5311,11 @@ async function processNextInQueue(){
         let outAudioIdx = 0;
         for (const a of audioStreamsInOrder){
           if (a.codec === 'opus' || a.codec === 'vorbis'){
-            const aacBitrate = Math.max(128, Math.min(768, (a.channels || 2) * 64));
-            remuxArgs.push(`-c:a:${outAudioIdx}`, 'aac', `-b:a:${outAudioIdx}`, `${aacBitrate}k`, `-sample_fmt:a:${outAudioIdx}`, 'fltp');
+            remuxArgs.push(...mp4AudioEncodeArgs(outAudioIdx, a.channels));
           }
           outAudioIdx++;
         }
-        remuxArgs.push('-strict', 'unofficial', mp4CopyPath);
+        remuxArgs.push('-strict', getMp4StrictLevel(), mp4CopyPath);
         console.log('[MP4 copy] args:', JSON.stringify(remuxArgs));
         const mp4Result = await window.electronAPI.runFFmpegWithProgress({
           ffmpeg: document.getElementById('ffmpegPath').value.trim(),
