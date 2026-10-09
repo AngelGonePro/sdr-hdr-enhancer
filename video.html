@@ -2896,6 +2896,9 @@ async function buildJobFromCurrentSettings(chaptersPath){
   const hvForTrust = getHdrMetadataValues();
   const trustedHdrMaxCLL = realMeasuredHdrBrightness ? realMeasuredHdrBrightness.maxCLL : (hvForTrust.isReal ? hvForTrust.maxCLL : null);
   const trustedHdrMaxFALL = realMeasuredHdrBrightness ? realMeasuredHdrBrightness.maxFALL : (hvForTrust.isReal ? hvForTrust.maxFALL : null);
+  // Which primaries the HDR10 mastering-display tag in THIS job's output declares: red x ~0.680 = Display P3, ~0.708 = BT.2020.
+  const dvSourcePrimaries = (Math.abs(hvForTrust.redX - 34000) <= 600) ? 0 : ((Math.abs(hvForTrust.redX - 35400) <= 600) ? 2 : null);
+  console.log(`[DV primaries - captured at queue time] mastering red x=${hvForTrust.redX} -> L9 source primaries index ${dvSourcePrimaries === 0 ? '0 (P3-D65)' : dvSourcePrimaries === 2 ? '2 (BT.2020)' : 'unknown (mkvdovi default)'}`);
   // Read directly from Brightness Reference (npl), not the read-only
   // Metadata Peak display - that display just mirrors this value for
   // visibility; reading the real source of truth here means metadata
@@ -4452,7 +4455,8 @@ clip.set_output()
       stage3Cleanup = [tmpUpmixPath, mkvmergeRawHevcPath, ...(mkvmergeChaptersPath ? [mkvmergeChaptersPath] : []), ...(dvRpuPath ? [dvRpuPath] : []), ...(hdr10PlusMetaPath ? [hdr10PlusMetaPath] : []), ...pgsOcrConvertedPaths];
     } else {
       const stage3Mux = buildMuxInputsAndMaps([{ path: tmpUpmixPath, stream: 'a' }]);
-      stage3Args = buildVideoArgs(stage3Mux.inputArgs, ['-c:a', 'copy'], stage3Mux.mapArgs, outPath);
+      stage3Args = buildVideoArgs(stage3Mux.inputArgs, ['-c:a', 'copy', '-metadata:s:a:0', `language=${audioLanguageForMux}`, '-disposition:a:0', 'default'], stage3Mux.mapArgs, outPath);
+      console.log(`[audio language] Integrated Engine output audio tagged language=${audioLanguageForMux} (source track ${srcIndex})`);
       stage3Name = 'Encode video + mux final MKV';
       stage3Cleanup = [tmpUpmixPath, ...(videoSourcePath !== filePath ? [videoSourcePath] : []), ...(chaptersPath ? [chaptersPath] : []), ...(dvRpuPath ? [dvRpuPath] : []), ...(hdr10PlusMetaPath ? [hdr10PlusMetaPath] : []), ...pgsOcrConvertedPaths];
     }
@@ -4478,13 +4482,13 @@ clip.set_output()
         // execution loop dispatches on isSpawnTool to run mkvmerge.exe
         // directly instead of ffmpeg for this one stage.
         usesMkvmergeMux
-          ? { name: stage3Name, toolPath: stage3Args.toolPath, toolArgs: stage3Args.toolArgs, srtPaths: stage3Args.srtPaths, srtLanguages: stage3Args.srtLanguages, srtStretchRatio: stage3Args.srtStretchRatio, isSpawnTool: true, totalDuration: videoDuration, cleanup: stage3Cleanup }
-          : { name: stage3Name, args: stage3Args, pgsSrtPaths: pgsOcrConvertedPaths, pgsSrtLanguages: pgsOcrConvertedLanguages, pgsSrtStretchRatio: getSrtConformStretchRatio(), totalDuration: videoDuration, cleanup: stage3Cleanup }
+          ? { name: stage3Name, toolPath: stage3Args.toolPath, toolArgs: stage3Args.toolArgs, srtPaths: stage3Args.srtPaths, srtSourceTids: pgsSubtitleSelections, srtLanguages: stage3Args.srtLanguages, srtStretchRatio: stage3Args.srtStretchRatio, isSpawnTool: true, totalDuration: videoDuration, cleanup: stage3Cleanup }
+          : { name: stage3Name, args: stage3Args, pgsSrtPaths: pgsOcrConvertedPaths, pgsSourceTids: pgsSubtitleSelections, pgsSrtLanguages: pgsOcrConvertedLanguages, pgsSrtStretchRatio: getSrtConformStretchRatio(), totalDuration: videoDuration, cleanup: stage3Cleanup }
       ],
       currentStage: 0,
       totalDuration: videoDuration,
       status: 'pending',
-      deferredHdrMeasure, dvDynamicWanted, dvMkvdoviPath: dvQueueMkvdoviPath
+      deferredHdrMeasure, dvDynamicWanted, dvMkvdoviPath: dvQueueMkvdoviPath, dvSourcePrimaries
     };
   }
 
@@ -4509,6 +4513,11 @@ clip.set_output()
     if (audioCorrections.length === 0){
       // No correction needed — genuine stream copy, no re-encode at all.
       const audioArgs = ['-c:a', 'copy'];
+      if (audioSelections.length > 0) audioArgs.push('-disposition:a:0', 'default');
+      audioSelections.forEach((idx, i) => {
+        const langStream = detectedAudioStreams.find(st => String(st.index) === String(idx));
+        if (langStream && langStream.language && langStream.language !== 'und') audioArgs.push(`-metadata:s:a:${i}`, `language=${langStream.language}`);
+      });
       // Real, confirmed bug fixed - same class as the Integrated Engine
       // fix above, applied here too (flagged as an open gap last round):
       // a clip's audio/subtitle-carrying original file can have a
@@ -4605,6 +4614,9 @@ clip.set_output()
       const audioArgs = [];
       audioSelections.forEach((idx, i) => {
         const srcStream = lastAudioStreams.find(s => String(s.index) === String(idx));
+        if (i === 0) audioArgs.push('-disposition:a:0', 'default');
+        const langStreamB = detectedAudioStreams.find(st => String(st.index) === String(idx));
+        if (langStreamB && langStreamB.language && langStreamB.language !== 'und') audioArgs.push(`-metadata:s:a:${i}`, `language=${langStreamB.language}`);
         const target = getAudioEncoderForCodec(srcStream ? srcStream.codec : null);
         audioArgs.push(`-c:a:${i}`, target.encoder);
         if (target.bitrate) audioArgs.push(`-b:a:${i}`, target.bitrate);
@@ -4661,12 +4673,12 @@ clip.set_output()
       stages: [
         ...preStages,
         ...pgsOcrStages,
-        { name: 'Mux final file', args, pgsSrtPaths: pgsOcrConvertedPaths, pgsSrtLanguages: pgsOcrConvertedLanguages, pgsSrtStretchRatio: getSrtConformStretchRatio(), totalDuration: videoDuration, cleanup: cleanupPaths }
+        { name: 'Mux final file', args, pgsSrtPaths: pgsOcrConvertedPaths, pgsSourceTids: pgsSubtitleSelections, pgsSrtLanguages: pgsOcrConvertedLanguages, pgsSrtStretchRatio: getSrtConformStretchRatio(), totalDuration: videoDuration, cleanup: cleanupPaths }
       ],
       currentStage: 0,
       totalDuration: videoDuration,
       status: 'pending',
-      generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: trustedHdrMaxCLL, trustedMaxFALL: trustedHdrMaxFALL, deferredHdrMeasure, dvDynamicWanted, dvMkvdoviPath: dvQueueMkvdoviPath, chaptersPathForFinalCleanup: chaptersPath,
+      generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: trustedHdrMaxCLL, trustedMaxFALL: trustedHdrMaxFALL, deferredHdrMeasure, dvDynamicWanted, dvMkvdoviPath: dvQueueMkvdoviPath, dvSourcePrimaries, chaptersPathForFinalCleanup: chaptersPath,
       mkvdoviPath: mkvdoviPathForJob
     };
   }
@@ -4689,18 +4701,18 @@ clip.set_output()
       id: jobId, label, filePath, outPath,
       stages: [
         ...pgsOcrStages,
-        { name: 'Mux final file', args, pgsSrtPaths: pgsOcrConvertedPaths, pgsSrtLanguages: pgsOcrConvertedLanguages, pgsSrtStretchRatio: getSrtConformStretchRatio(), totalDuration: videoDuration, cleanup: [...(chaptersPath ? [chaptersPath] : []), ...pgsOcrConvertedPaths] }
+        { name: 'Mux final file', args, pgsSrtPaths: pgsOcrConvertedPaths, pgsSourceTids: pgsSubtitleSelections, pgsSrtLanguages: pgsOcrConvertedLanguages, pgsSrtStretchRatio: getSrtConformStretchRatio(), totalDuration: videoDuration, cleanup: [...(chaptersPath ? [chaptersPath] : []), ...pgsOcrConvertedPaths] }
       ],
       currentStage: 0,
       totalDuration: videoDuration,
       status: 'pending',
-      generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: trustedHdrMaxCLL, trustedMaxFALL: trustedHdrMaxFALL, deferredHdrMeasure, dvDynamicWanted, dvMkvdoviPath: dvQueueMkvdoviPath, chaptersPathForFinalCleanup: chaptersPath,
+      generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: trustedHdrMaxCLL, trustedMaxFALL: trustedHdrMaxFALL, deferredHdrMeasure, dvDynamicWanted, dvMkvdoviPath: dvQueueMkvdoviPath, dvSourcePrimaries, chaptersPathForFinalCleanup: chaptersPath,
       mkvdoviPath: mkvdoviPathForJob
     };
   }
   return { id: jobId, label, filePath, outPath, args, totalDuration: videoDuration, status: 'pending',
     cleanup: chaptersPath ? [chaptersPath] : [],
-    generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: trustedHdrMaxCLL, trustedMaxFALL: trustedHdrMaxFALL, deferredHdrMeasure, dvDynamicWanted, dvMkvdoviPath: dvQueueMkvdoviPath, chaptersPathForFinalCleanup: chaptersPath,
+    generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: trustedHdrMaxCLL, trustedMaxFALL: trustedHdrMaxFALL, deferredHdrMeasure, dvDynamicWanted, dvMkvdoviPath: dvQueueMkvdoviPath, dvSourcePrimaries, chaptersPathForFinalCleanup: chaptersPath,
     mkvdoviPath: mkvdoviPathForJob };
 }
 
@@ -4796,6 +4808,14 @@ async function addToQueue(){
   // Every run-time toggle this job's later steps depend on, captured NOW,
   // for THIS file. Anything read live while the queue runs reflects
   // whatever file/toggles are on screen at that moment, not this job's.
+  try {
+    const allToggles = {};
+    document.querySelectorAll('.ti[id^="tog-"]').forEach(el => { allToggles[el.id] = el.classList.contains('on'); });
+    console.log(`[QUEUE ${job.label}] ALL toggles at queue time:`, JSON.stringify(allToggles));
+    console.log(`[QUEUE ${job.label}] audioMode=${document.getElementById('audioModeSelect').value} audioTracks=${JSON.stringify(Array.from(document.querySelectorAll('input[name="audioTrackSel"]:checked, input[name="integratedTrackSel"]:checked')).map(e=>e.value))} subtitleTracks=${JSON.stringify(Array.from(document.querySelectorAll('input[name="subtitleTrackSel"]:checked')).map(e=>e.value))}`);
+  } catch(e){ console.log('[QUEUE toggle log failed]', e && e.message); }
+  job.sourceWasSdr = !isSelectedVideoTrackHDR();
+  try { console.log(`[QUEUE ${job.label}] crop: toggle=${isOn('tog-crop')} W=${document.getElementById('cropW').value || '(blank)'} H=${document.getElementById('cropH').value || '(blank)'} X=${document.getElementById('cropX').value || '(blank)'} Y=${document.getElementById('cropY').value || '(blank)'} -> ${(isOn('tog-crop') && document.getElementById('cropW').value && document.getElementById('cropH').value) ? 'crop WILL be applied' : 'NO crop will be applied to this job'}`); } catch(e){}
   job.toggleSnapshot = {
     autoMp4Remux: isOn('tog-auto-mp4-remux'),
     simpleRemux: isOn('tog-simple-remux'),
@@ -5086,6 +5106,16 @@ async function processNextInQueue(){
                 existingSrtArgs.push('--sync', `0:0,${stage.srtStretchRatio}`);
               }
               existingSrtArgs.push(srtPath);
+              console.log(`[subtitle plan] source track ${stage.srtSourceTids && stage.srtSourceTids[srtIdx]} lang=${srtLang}: OCR text has cues -> muxed as SRT`);
+            } else {
+              const fbTid = stage.srtSourceTids && stage.srtSourceTids[srtIdx];
+              const fbLang = (stage.srtLanguages && stage.srtLanguages[srtIdx]) || 'und';
+              console.log(`[subtitle plan] source track ${fbTid} lang=${fbLang}: OCR text is empty (size ${check && check.size}) -> keeping the ORIGINAL PGS track instead so the track and its language are not lost`);
+              if (fbTid !== undefined){
+                existingSrtArgs.push('--language', `${fbTid}:${fbLang}`, '--default-track-flag', `${fbTid}:0`);
+                if (stage.srtStretchRatio !== null && stage.srtStretchRatio !== undefined) existingSrtArgs.push('--sync', `${fbTid}:0,${stage.srtStretchRatio}`);
+                existingSrtArgs.push('--no-video', '--no-audio', '--no-chapters', '--no-attachments', '--no-global-tags', '--subtitle-tracks', String(fbTid), next.filePath);
+              }
             }
           }
           finalToolArgs = [...stage.toolArgs, ...existingSrtArgs];
@@ -5177,7 +5207,22 @@ async function processNextInQueue(){
           for (let srtIdx = 0; srtIdx < stage.pgsSrtPaths.length; srtIdx++){
             const srtPath = stage.pgsSrtPaths[srtIdx];
             const check = await window.electronAPI.checkFileExists({ path: srtPath }).catch(() => ({ exists: false }));
-            if (check && check.exists && check.size > 20){
+            const srcTidForFallback = stage.pgsSourceTids && stage.pgsSourceTids[srtIdx];
+            const hasRealText = !!(check && check.exists && check.size > 20);
+            console.log(`[subtitle plan] source track ${srcTidForFallback} lang=${(stage.pgsSrtLanguages && stage.pgsSrtLanguages[srtIdx]) || 'und'}: OCR text ${hasRealText ? 'has cues -> muxed as SRT' : 'is empty (size ' + (check && check.size) + ') -> keeping the ORIGINAL PGS track instead so the track and its language are not lost'}`);
+            if (!hasRealText && srcTidForFallback !== undefined){
+              if (stage.pgsSrtStretchRatio !== null && stage.pgsSrtStretchRatio !== undefined){
+                newInputArgs.push('-itsscale', String(stage.pgsSrtStretchRatio));
+              }
+              newInputArgs.push('-i', next.filePath);
+              newMapArgs.push('-map', `${nextInputIdx}:${srcTidForFallback}`);
+              newMetadataArgs.push(`-c:s:${nextSubStreamIdx}`, 'copy');
+              newMetadataArgs.push(`-metadata:s:s:${nextSubStreamIdx}`, `language=${(stage.pgsSrtLanguages && stage.pgsSrtLanguages[srtIdx]) || 'und'}`);
+              newMetadataArgs.push(`-disposition:s:${nextSubStreamIdx}`, '0');
+              nextInputIdx++;
+              nextSubStreamIdx++;
+            }
+            if (hasRealText){
               if (stage.pgsSrtStretchRatio !== null && stage.pgsSrtStretchRatio !== undefined){
                 newInputArgs.push('-itsscale', String(stage.pgsSrtStretchRatio));
               }
@@ -5299,6 +5344,13 @@ async function processNextInQueue(){
   } else if (finalResult.code === 0){
     next.status = 'done';
     setStatus(`✔ Complete: ${next.label}`, 'green');
+    // Everything the app produces is verifiable from the log: probe the
+    // finished file and log every stream's codec, language and default flag.
+    try {
+      const probeExe = ffmpeg.replace(/ffmpeg(\.exe)?$/i, 'ffprobe$1');
+      const probeRes = await window.electronAPI.runToolSimple({ toolPath: probeExe, args: ['-v', 'error', '-show_entries', 'stream=index,codec_type,codec_name,channels,width,height:stream_tags=language,title:stream_disposition=default', '-of', 'compact', next.outPath] });
+      console.log(`[OUTPUT STREAMS - ${next.label}] ${next.outPath}\n${(probeRes && probeRes.stdout || '').trim() || '(ffprobe returned nothing: ' + (probeRes && probeRes.stderr) + ')'}`);
+    } catch(e){ console.log('[OUTPUT STREAMS probe failed]', e && e.message); }
     const fullEl = document.getElementById('fullErrorOutput');
     if (fullEl) fullEl.style.display = 'none';
     // Real, structural fix: reads the toggle and path field LIVE, directly
@@ -5347,7 +5399,9 @@ async function processNextInQueue(){
           mkvmergePath: document.getElementById('mkvmergePath').value.trim(),
           doviToolPath: document.getElementById('dovToolPath').value.trim(),
           mediaInfoPath: document.getElementById('mediaInfoPath').value.trim(),
-          trustedMaxCLL: liveTrustedMaxCLL, trustedMaxFALL: liveTrustedMaxFALL
+          trustedMaxCLL: liveTrustedMaxCLL, trustedMaxFALL: liveTrustedMaxFALL,
+          patchStaticSei: next.sourceWasSdr === true,
+          sourcePrimaries: next.dvSourcePrimaries
         });
         if (dvResult && dvResult.success){
           logJobWarning(`Dolby Vision dynamic metadata generated successfully: ${dvResult.outputPath}`);

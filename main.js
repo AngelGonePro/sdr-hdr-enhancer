@@ -39,6 +39,12 @@ const fs = new Proxy(realFs, {
     if (typeof v === 'function' && LOGGED_FS_CALLS[prop]) {
       return function (...a) {
         try { console.log(`[FILE ${logTs()}] ${LOGGED_FS_CALLS[prop](a)}`); } catch (e) { /* logging must never break a file operation */ }
+        try {
+          if ((prop === 'writeFile' || prop === 'writeFileSync') && typeof a[1] === 'string' && a[1].length > 0) {
+            const txt = a[1].length > 20000 ? a[1].slice(0, 20000) + `\n...[truncated, ${a[1].length} chars total]` : a[1];
+            console.log(`[FILE CONTENT ${logTs()}] ${a[0]}\n----- begin -----\n${txt}\n----- end -----`);
+          }
+        } catch (e) { /* never break file ops */ }
         return v.apply(target, a);
       };
     }
@@ -65,6 +71,72 @@ function appendBounded(existing, chunk) {
   const combined = existing + chunk;
   if (combined.length <= MAX_ACCUMULATED_LOG_BYTES) return combined;
   return combined.slice(combined.length - MAX_ACCUMULATED_LOG_BYTES);
+}
+
+
+// Rewrites the HDR10 "content light level" SEI (MaxCLL / MaxFALL) inside a
+// raw Annex-B HEVC file, in place, to the given values. The DV correction
+// step measures the real ENCODED pixels, but the HDR10 static SEI was baked
+// in by the encoder from a pre-encode estimate, so the two disagreed (e.g.
+// 223 vs 240 nits). Parses each prefix-SEI NAL properly (handles emulation
+// prevention bytes and multi-message SEI NALs); a NAL whose escaped length
+// would change is skipped and counted, never corrupted.
+function patchContentLightSei(hevcPath, maxCll, maxFall) {
+  const result = { found: 0, patched: 0, unchanged: 0, skipped: 0, before: null };
+  const fd = realFs.openSync(hevcPath, 'r+');
+  try {
+    const size = realFs.fstatSync(fd).size;
+    const CHUNK = 16 * 1024 * 1024, KEEP = 4096;
+    const buf = Buffer.alloc(CHUNK + KEEP);
+    let fileOff = 0;
+    while (fileOff < size) {
+      const n = realFs.readSync(fd, buf, 0, CHUNK + KEEP, fileOff);
+      if (n <= 0) break;
+      const atEof = fileOff + n >= size;
+      const limit = atEof ? n : n - KEEP;
+      let i = 0;
+      while (i < limit) {
+        const at = buf.indexOf(Buffer.from([0, 0, 1, 0x4E, 0x01]), i);
+        if (at < 0 || at >= limit) break;
+        const nalStart = at + 3;
+        let end = nalStart + 2;
+        while (end + 2 < n && !(buf[end] === 0 && buf[end + 1] === 0 && (buf[end + 2] === 1 || (buf[end + 2] === 0 && end + 3 < n && buf[end + 3] === 1)))) end++;
+        if (end + 2 >= n && !atEof) break;
+        if (end + 2 >= n) end = n;
+        const esc = buf.subarray(nalStart, end);
+        const rbsp = []; const map = [];
+        for (let k = 0; k < esc.length; k++) {
+          if (k >= 2 && esc[k] === 3 && esc[k - 1] === 0 && esc[k - 2] === 0 && rbsp.length >= 2 && rbsp[rbsp.length - 1] === 0 && rbsp[rbsp.length - 2] === 0) continue;
+          rbsp.push(esc[k]);
+        }
+        let pos = 2; let targetPos = -1;
+        while (pos + 2 < rbsp.length) {
+          let t = 0; while (rbsp[pos] === 0xFF) { t += 255; pos++; } t += rbsp[pos++];
+          let sz = 0; while (rbsp[pos] === 0xFF) { sz += 255; pos++; } sz += rbsp[pos++];
+          if (t === 144 && sz === 4) { targetPos = pos; break; }
+          pos += sz;
+        }
+        if (targetPos >= 0) {
+          result.found++;
+          const oldC = (rbsp[targetPos] << 8) | rbsp[targetPos + 1], oldF = (rbsp[targetPos + 2] << 8) | rbsp[targetPos + 3];
+          if (!result.before) result.before = { maxCll: oldC, maxFall: oldF };
+          if (oldC === maxCll && oldF === maxFall) { result.unchanged++; }
+          else {
+            rbsp[targetPos] = (maxCll >> 8) & 255; rbsp[targetPos + 1] = maxCll & 255;
+            rbsp[targetPos + 2] = (maxFall >> 8) & 255; rbsp[targetPos + 3] = maxFall & 255;
+            const out = []; let zeros = 0;
+            for (const b of rbsp) { if (zeros >= 2 && b <= 3) { out.push(3); zeros = 0; } out.push(b); zeros = (b === 0) ? zeros + 1 : 0; }
+            if (out.length === esc.length) { realFs.writeSync(fd, Buffer.from(out), 0, out.length, fileOff + nalStart); result.patched++; }
+            else result.skipped++;
+          }
+        }
+        i = end;
+      }
+      if (atEof) break;
+      fileOff += Math.max(limit, 1);
+    }
+  } finally { realFs.closeSync(fd); }
+  return result;
 }
 
 function createWindow() {
@@ -624,6 +696,8 @@ ipcMain.handle('detect-crop', async (event, payload) => {
     }
     let stderr = "";
     proc.stderr.on("data", d => stderr = appendBounded(stderr, d.toString()));
+    const logCropResult = (r) => { try { console.log('[detect-crop result]', JSON.stringify(r)); } catch (e) {} return r; };
+    const resolveRaw = resolve; resolve = (r) => resolveRaw(logCropResult(r));
     proc.on("close", (code) => {
       activeProcesses.delete('crop-detect');
       // Confirmed via a real report: a genuine process failure (e.g. GPU
@@ -1029,6 +1103,32 @@ ipcMain.handle('generate-dolby-vision-dynamic', async (event, payload) => {
   // Reverted to mkvdovi's own native, default analysis - already
   // directly confirmed correct via a real, successful run producing
   // valid DV Profile 8 output, unlike this speculative alternative.
+  const primariesArgs = [];
+  // The HDR10 mastering-display primaries this app writes (Display P3 for
+  // converted SDR, the source's own for real HDR) must match what the
+  // Dolby Vision L9 block says; mkvdovi otherwise defaults to BT.2020 and
+  // warns "Use --source-primaries 0 to override if content was mastered on
+  // P3-D65". Only added if this mkvdovi build actually lists the flag.
+  if (payload.sourcePrimaries === 0 || payload.sourcePrimaries === 2) {
+    const helpText = await new Promise((res) => {
+      let out = '';
+      let hp;
+      try { hp = spawn(mkvdoviPath, ['--help'], { windowsHide: true, env: augmentedEnv }); } catch (e) { res(''); return; }
+      hp.stdout && hp.stdout.on('data', d => { out += d.toString(); });
+      hp.stderr && hp.stderr.on('data', d => { out += d.toString(); });
+      hp.on('error', () => res(out));
+      hp.on('close', () => res(out));
+    });
+    if (/--source-primaries/.test(helpText)) {
+      primariesArgs.push('--source-primaries', String(payload.sourcePrimaries));
+      console.log(`[DV primaries] passing --source-primaries ${payload.sourcePrimaries} (matches the HDR10 mastering primaries this file declares)`);
+    } else {
+      console.log('[DV primaries] this mkvdovi build does not list --source-primaries in --help; leaving its default (BT.2020)');
+    }
+  } else {
+    console.log('[DV primaries] no override needed: file declares BT.2020 mastering primaries, which is mkvdovi\'s default');
+  }
+
   return new Promise((resolve) => {
     // Real fix: --verify removed - confirmed via a real run that all 7
     // actual processing steps succeeded (measurements, RPU generation,
@@ -1062,6 +1162,7 @@ ipcMain.handle('generate-dolby-vision-dynamic', async (event, payload) => {
     // still real and disclosed honestly in the toggle's own text below,
     // just without an unconfirmed "fix" applied on top of it.
     const args = [inputPath, '--keep-source'];
+    args.push(...primariesArgs);
     let proc;
     try {
       proc = spawn(mkvdoviPath, args, { windowsHide: true, env: augmentedEnv });
@@ -1280,13 +1381,25 @@ ipcMain.handle('generate-dolby-vision-dynamic', async (event, payload) => {
           // Step 4: inject the corrected RPU back into the raw HEVC
           const r4 = await runStep(payload.doviToolPath, ['inject-rpu', '-i', tempHevc, '--rpu-in', tempRpuEdited, '-o', tempHevcEdited]);
           if (r4.code !== 0) throw new Error('RPU injection failed: ' + r4.stderr.slice(-300));
+          // Step 4b: SDR->HDR jobs only (payload.patchStaticSei): the HDR10 static
+          // MaxCLL/MaxFALL SEI was a pre-encode estimate; make it match the real
+          // measured values the Dolby Vision data now carries. Sources that carry
+          // their own real mastering metadata are never touched.
+          if (payload.patchStaticSei) {
+            try {
+              const sei = patchContentLightSei(tempHevcEdited, Math.round(trustedMaxCLL), Math.max(1, Math.round(trustedMaxFALL)));
+              console.log(`[HDR10 static SEI patch] MaxCLL/MaxFALL ${sei.before ? sei.before.maxCll + '/' + sei.before.maxFall : 'n/a'} -> ${Math.round(trustedMaxCLL)}/${Math.max(1, Math.round(trustedMaxFALL))} nits: SEI messages found=${sei.found} patched=${sei.patched} already-correct=${sei.unchanged} skipped=${sei.skipped}`);
+            } catch (e) { console.log('[HDR10 static SEI patch] failed (non-fatal, file unchanged by this step):', e && e.message || e); }
+          } else {
+            console.log('[HDR10 static SEI patch] not applied: source carries its own real HDR10 metadata, which is kept as-is');
+          }
           // Step 5: remux - corrected video track, everything else (audio/subs/chapters) unchanged from mkvdovi's own output
           const r5 = await runStep(payload.mkvmergePath, ['-o', tempMkv, tempHevcEdited, '--no-video', inputPath]);
           if (r5.code !== 0 && r5.code !== 1) throw new Error('Remux failed: ' + r5.stderr.slice(-300));
           const finalCheck = fs.existsSync(tempMkv) ? fs.statSync(tempMkv) : null;
           if (finalCheck && finalCheck.size > 0) {
             fs.renameSync(tempMkv, inputPath);
-            console.log(`Static AND dynamic HDR10/DV metadata corrected: MaxCLL=${trustedMaxCLL} MaxFALL=${trustedMaxFALL} nits (this app's own verified measurement, flattened across all ${rpuFrameCount} frames, independent of MediaInfo)`);
+            console.log(`Dolby Vision RPU (L1/L6) metadata corrected (see the [HDR10 static SEI patch] line for the HDR10 static values): MaxCLL=${trustedMaxCLL} MaxFALL=${trustedMaxFALL} nits (this app's own verified measurement, flattened across all ${rpuFrameCount} frames, independent of MediaInfo)`);
           } else {
             throw new Error('corrected output file missing or empty');
           }
