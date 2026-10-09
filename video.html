@@ -1941,7 +1941,9 @@ async function runCropDetect(){
   resultEl.textContent = 'Detecting... (sampling across the video)';
   const ffmpeg = document.getElementById('ffmpegPath').value.trim();
   const videoTrackIndex = getSelectedVideoTrackIndex();
-  const result = await window.electronAPI.detectCrop({ ffmpeg, filePath, duration: videoDuration, videoTrackIndex, gpuVendor: getSelectedDetectionGpuVendor(), sourcePixFmt: getSelectedVideoTrackPixFmt() });
+  const cropSelRadio = document.querySelector('input[name="videoTrackSel"]:checked');
+  const cropSelTrack = cropSelRadio ? lastVideoStreams.find(t => String(t.index) === cropSelRadio.value) : lastVideoStreams[0];
+  const result = await window.electronAPI.detectCrop({ ffmpeg, filePath, duration: videoDuration, videoTrackIndex, sourceWidth: cropSelTrack && cropSelTrack.width, sourceHeight: cropSelTrack && cropSelTrack.height, gpuVendor: getSelectedDetectionGpuVendor(), sourcePixFmt: getSelectedVideoTrackPixFmt() });
   if (myGeneration !== cropDetectGeneration) return; // a newer call has since started — discard this stale result
   if (result.error){
     // Confirmed via a real report: a failed re-detection (e.g. triggered
@@ -2635,6 +2637,14 @@ function buildHdrPixelFilters(){
   return filters;
 }
 
+// Crop filter string. Blank X/Y must be written out as ffmpeg's own centering
+// expressions - an empty field ("crop=W:H::") is a hard ffmpeg error.
+function buildCropFilter(w, h, x, y){
+  const xs = (x === '' || x == null) ? '(in_w-out_w)/2' : x;
+  const ys = (y === '' || y == null) ? '(in_h-out_h)/2' : y;
+  return `crop=${w}:${h}:${xs}:${ys}`;
+}
+
 function buildFilterChain(){
   const filters = [];
 
@@ -2643,7 +2653,7 @@ function buildFilterChain(){
     const h = document.getElementById('cropH').value;
     const x = document.getElementById('cropX').value;
     const y = document.getElementById('cropY').value;
-    if (w && h) filters.push(`crop=${w}:${h}:${x}:${y}`);
+    if (w && h) filters.push(buildCropFilter(w, h, x, y));
   }
 
   if (isOn('tog-fps-conform') && isOn('tog-conform-drop-frames') && detectedSourceFps){
@@ -2727,6 +2737,19 @@ async function resolveDeferredHdrMeasure(job){
 }
 
 async function buildJobFromCurrentSettings(chaptersPath){
+  // Dolby Vision (dynamic) decision captured ONCE, here, for THIS job's own
+  // file, at the moment it is queued. Previously the decision was made again
+  // when each job finished, from whatever the UI looked like at that moment:
+  // the toggle's CURRENT state and the CURRENTLY SELECTED file's HDR/DV info,
+  // which in a multi-file queue is a different (later) file than the job
+  // that just finished - so jobs were silently skipped.
+  const dvQueueMkvdoviPath = document.getElementById('mkvdoviPath').value.trim();
+  const dvQueueAlreadyHdrNoDv = isSelectedVideoTrackHDR()
+    && !(selectedTrackHdrMetadata && selectedTrackHdrMetadata.hasDolbyVision)
+    && !(selectedTrackHdrMetadata && selectedTrackHdrMetadata.hasHdr10Plus);
+  const dvDynamicWanted = !isOn('tog-simple-remux') && isOn('tog-dv-dynamic') && !!dvQueueMkvdoviPath
+    && ((isOn('tog-hdr') && !isSelectedVideoTrackHDR()) || dvQueueAlreadyHdrNoDv);
+  console.log('[DV dynamic - captured at queue time for this job] tog-dv-dynamic=', isOn('tog-dv-dynamic'), ' tog-hdr=', isOn('tog-hdr'), ' sourceIsHDR=', isSelectedVideoTrackHDR(), ' sourceHasDV=', !!(selectedTrackHdrMetadata && selectedTrackHdrMetadata.hasDolbyVision), ' mkvdoviPathSet=', !!dvQueueMkvdoviPath, ' => will add Dolby Vision =', dvDynamicWanted);
   if (!filePath) return null;
   // Simple Mode: a completely separate, minimal job - bypasses every
   // other setting on this page (HDR, audio processing, encoder, crop,
@@ -2864,16 +2887,20 @@ async function buildJobFromCurrentSettings(chaptersPath){
   // getHdrMetadataValues()'s own real values (the same ones already
   // trusted enough to feed the main encoder's --max-cll flag) whenever
   // the source's metadata is genuinely real but wasn't measured.
+  // Declared BEFORE first use: getHdrMetadataValues() below reads it, and
+  // declaring it afterwards threw "Cannot access 'peak' before initialization"
+  // whenever HDR processing was off (or no measurement was pending).
+  // Read directly from Brightness Reference (npl), not the read-only
+  // Metadata Peak display - that display just mirrors this value.
+  const peak = document.getElementById('hdrRefSlider').value;
   const hvForTrust = getHdrMetadataValues();
   const trustedHdrMaxCLL = realMeasuredHdrBrightness ? realMeasuredHdrBrightness.maxCLL : (hvForTrust.isReal ? hvForTrust.maxCLL : null);
   const trustedHdrMaxFALL = realMeasuredHdrBrightness ? realMeasuredHdrBrightness.maxFALL : (hvForTrust.isReal ? hvForTrust.maxFALL : null);
-  console.log('[trustedHdr build-time diagnostic] realMeasuredHdrBrightness=', JSON.stringify(realMeasuredHdrBrightness), ' hvForTrust.isReal=', hvForTrust.isReal, ' => trustedHdrMaxCLL=', trustedHdrMaxCLL, ' trustedHdrMaxFALL=', trustedHdrMaxFALL);
   // Read directly from Brightness Reference (npl), not the read-only
   // Metadata Peak display - that display just mirrors this value for
   // visibility; reading the real source of truth here means metadata
   // stays correct even if some future change touches the display sync
   // without this line, rather than depending on two things agreeing.
-  const peak = document.getElementById('hdrRefSlider').value;
 
   // Real source HDR10 static metadata (mastering-display + MaxCLL/MaxFALL)
   // when the selected track is already HDR - confirmed via a real 4K UHD
@@ -3206,7 +3233,7 @@ async function buildJobFromCurrentSettings(chaptersPath){
     if (isOn('tog-crop')){
       const w = document.getElementById('cropW').value, h = document.getElementById('cropH').value,
             x = document.getElementById('cropX').value, y = document.getElementById('cropY').value;
-      if (w && h) preColorFilters.push(`crop=${w}:${h}:${x}:${y}`);
+      if (w && h) preColorFilters.push(buildCropFilter(w, h, x, y));
     }
     // Real fix: frame-drop Conform mode's fps= filter belongs HERE, not
     // only in buildFilterChain() (which this pipeline never calls) -
@@ -3772,11 +3799,14 @@ clip.set_output()
         if (document.getElementById('cropW').value && document.getElementById('cropH').value){
           const cw = parseInt(document.getElementById('cropW').value, 10) || 0;
           const ch = parseInt(document.getElementById('cropH').value, 10) || 0;
-          const cx = parseInt(document.getElementById('cropX').value, 10) || 0;
-          const cy = parseInt(document.getElementById('cropY').value, 10) || 0;
           const selectedStreamInfo = lastVideoStreams.find(s => String(s.index) === videoTrackSel?.value) || lastVideoStreams[0] || {};
           const srcW = parseInt(selectedStreamInfo.width, 10) || 0;
           const srcH = parseInt(selectedStreamInfo.height, 10) || 0;
+          // Blank X/Y = centered, same as the ffmpeg crop filter does.
+          const cxParsed = parseInt(document.getElementById('cropX').value, 10);
+          const cyParsed = parseInt(document.getElementById('cropY').value, 10);
+          const cx = Number.isNaN(cxParsed) ? Math.max(0, Math.floor((srcW - cw) / 2)) : cxParsed;
+          const cy = Number.isNaN(cyParsed) ? Math.max(0, Math.floor((srcH - ch) / 2)) : cyParsed;
           const right = Math.max(0, srcW - cx - cw);
           const bottom = Math.max(0, srcH - cy - ch);
           nativeArgs.splice(3, 0, '--crop', `${cx},${cy},${right},${bottom}`);
@@ -4454,7 +4484,7 @@ clip.set_output()
       currentStage: 0,
       totalDuration: videoDuration,
       status: 'pending',
-      deferredHdrMeasure
+      deferredHdrMeasure, dvDynamicWanted, dvMkvdoviPath: dvQueueMkvdoviPath
     };
   }
 
@@ -4636,7 +4666,7 @@ clip.set_output()
       currentStage: 0,
       totalDuration: videoDuration,
       status: 'pending',
-      generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: trustedHdrMaxCLL, trustedMaxFALL: trustedHdrMaxFALL, deferredHdrMeasure, chaptersPathForFinalCleanup: chaptersPath,
+      generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: trustedHdrMaxCLL, trustedMaxFALL: trustedHdrMaxFALL, deferredHdrMeasure, dvDynamicWanted, dvMkvdoviPath: dvQueueMkvdoviPath, chaptersPathForFinalCleanup: chaptersPath,
       mkvdoviPath: mkvdoviPathForJob
     };
   }
@@ -4664,13 +4694,13 @@ clip.set_output()
       currentStage: 0,
       totalDuration: videoDuration,
       status: 'pending',
-      generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: trustedHdrMaxCLL, trustedMaxFALL: trustedHdrMaxFALL, deferredHdrMeasure, chaptersPathForFinalCleanup: chaptersPath,
+      generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: trustedHdrMaxCLL, trustedMaxFALL: trustedHdrMaxFALL, deferredHdrMeasure, dvDynamicWanted, dvMkvdoviPath: dvQueueMkvdoviPath, chaptersPathForFinalCleanup: chaptersPath,
       mkvdoviPath: mkvdoviPathForJob
     };
   }
   return { id: jobId, label, filePath, outPath, args, totalDuration: videoDuration, status: 'pending',
     cleanup: chaptersPath ? [chaptersPath] : [],
-    generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: trustedHdrMaxCLL, trustedMaxFALL: trustedHdrMaxFALL, deferredHdrMeasure, chaptersPathForFinalCleanup: chaptersPath,
+    generateDolbyVisionDynamic: shouldGenerateDolbyVisionDynamic, trustedMaxCLL: trustedHdrMaxCLL, trustedMaxFALL: trustedHdrMaxFALL, deferredHdrMeasure, dvDynamicWanted, dvMkvdoviPath: dvQueueMkvdoviPath, chaptersPathForFinalCleanup: chaptersPath,
     mkvdoviPath: mkvdoviPathForJob };
 }
 
@@ -4706,13 +4736,17 @@ async function addToQueue(){
   if (isOn('tog-crop')){
     const cw = parseInt(document.getElementById('cropW').value, 10);
     const ch = parseInt(document.getElementById('cropH').value, 10);
-    const cx = parseInt(document.getElementById('cropX').value, 10);
-    const cy = parseInt(document.getElementById('cropY').value, 10);
+    // Blank X/Y is valid: ffmpeg's crop filter centers the crop when they are
+    // left empty, so only validate the position when one was actually typed.
+    const cxRaw = parseInt(document.getElementById('cropX').value, 10);
+    const cyRaw = parseInt(document.getElementById('cropY').value, 10);
     const selectedVideoRadio = document.querySelector('input[name="videoTrackSel"]:checked');
     const selectedTrack = selectedVideoRadio
       ? lastVideoStreams.find(t => String(t.index) === selectedVideoRadio.value)
       : lastVideoStreams[0];
     if (selectedTrack && cw && ch){
+      const cx = Number.isNaN(cxRaw) ? Math.floor((selectedTrack.width - cw) / 2) : cxRaw;
+      const cy = Number.isNaN(cyRaw) ? Math.floor((selectedTrack.height - ch) / 2) : cyRaw;
       const fitsWidth = (cx + cw) <= selectedTrack.width;
       const fitsHeight = (cy + ch) <= selectedTrack.height;
       if (!fitsWidth || !fitsHeight){
@@ -4759,6 +4793,14 @@ async function addToQueue(){
 
   const job = await buildJobFromCurrentSettings(chaptersPath);
   if (!job){ setStatus('Load a file first.', 'red'); return; }
+  // Every run-time toggle this job's later steps depend on, captured NOW,
+  // for THIS file. Anything read live while the queue runs reflects
+  // whatever file/toggles are on screen at that moment, not this job's.
+  job.toggleSnapshot = {
+    autoMp4Remux: isOn('tog-auto-mp4-remux'),
+    simpleRemux: isOn('tog-simple-remux'),
+    keepTempFiles: isOn('tog-keep-temp-files')
+  };
   queue.push(job);
   renderQueue();
   setStatus(`Added to queue: ${job.label}`, '');
@@ -4958,6 +5000,8 @@ async function processNextInQueue(){
 
   await resolveDeferredHdrMeasure(next);
 
+  // This job's own captured toggles (falls back to live UI only for a job built without a snapshot).
+  const jobTog = (key, liveId) => (next.toggleSnapshot ? !!next.toggleSnapshot[key] : isOn(liveId));
   const ffmpeg = document.getElementById('ffmpegPath').value.trim();
   let finalResult = { code: 0 };
 
@@ -5231,7 +5275,7 @@ async function processNextInQueue(){
     // Best-effort cleanup of temp files regardless of outcome.
     for (const stage of next.stages){
       const cleanupPaths = Array.isArray(stage.cleanup) ? stage.cleanup : (stage.cleanup ? [stage.cleanup] : []);
-      if (!isOn('tog-keep-temp-files')) { for (const p of cleanupPaths) await window.electronAPI.deleteTempFile?.({ path: p }).catch(() => {}); }
+      if (!jobTog('keepTempFiles','tog-keep-temp-files')) { for (const p of cleanupPaths) await window.electronAPI.deleteTempFile?.({ path: p }).catch(() => {}); }
     }
   } else {
     currentJobStageInfo = { stageIndex: 0, totalStages: 1, stageName: 'Encoding' };
@@ -5243,7 +5287,7 @@ async function processNextInQueue(){
     // even without any pre-stages — this path had no cleanup at all
     // before, confirmed via a real report of a leftover chapters file.
     const cleanupPaths = Array.isArray(next.cleanup) ? next.cleanup : (next.cleanup ? [next.cleanup] : []);
-    if (!isOn('tog-keep-temp-files')) { for (const p of cleanupPaths) await window.electronAPI.deleteTempFile?.({ path: p }).catch(() => {}); }
+    if (!jobTog('keepTempFiles','tog-keep-temp-files')) { for (const p of cleanupPaths) await window.electronAPI.deleteTempFile?.({ path: p }).catch(() => {}); }
   }
 
   currentJobStageInfo = null;
@@ -5263,12 +5307,16 @@ async function processNextInQueue(){
     // time) could not be conclusively verified as correct or broken
     // through remote diagnosis, so this removes that entire layer of
     // indirection as a possible point of failure.
-    const dvLiveMkvdoviPath = document.getElementById('mkvdoviPath').value.trim();
+    const dvLiveMkvdoviPath = (next.dvMkvdoviPath || document.getElementById('mkvdoviPath').value.trim());
     const alreadyHdrWithoutDvOrHdr10Plus = isSelectedVideoTrackHDR()
       && !(selectedTrackHdrMetadata && selectedTrackHdrMetadata.hasDolbyVision)
       && !(selectedTrackHdrMetadata && selectedTrackHdrMetadata.hasHdr10Plus);
-    const dvLiveShouldRun = !isOn('tog-simple-remux') && isOn('tog-dv-dynamic') && !!dvLiveMkvdoviPath
-      && ((isOn('tog-hdr') && !isSelectedVideoTrackHDR()) || alreadyHdrWithoutDvOrHdr10Plus);
+    // Use the decision captured when THIS job was queued; only jobs built
+    // without it fall back to the old live-UI check.
+    const dvLiveShouldRun = (typeof next.dvDynamicWanted === 'boolean')
+      ? (next.dvDynamicWanted && !!dvLiveMkvdoviPath)
+      : (!jobTog('simpleRemux','tog-simple-remux') && isOn('tog-dv-dynamic') && !!dvLiveMkvdoviPath
+        && ((isOn('tog-hdr') && !isSelectedVideoTrackHDR()) || alreadyHdrWithoutDvOrHdr10Plus));
     console.log('[DV dynamic diagnostic - LIVE at completion] tog-dv-dynamic=', isOn('tog-dv-dynamic'), ' tog-hdr=', isOn('tog-hdr'), ' isSelectedVideoTrackHDR()=', isSelectedVideoTrackHDR(), ' mkvdoviPath=', dvLiveMkvdoviPath, ' => running=', dvLiveShouldRun);
     if (dvLiveShouldRun){
       jobStartTime = Date.now();
@@ -5317,7 +5365,7 @@ async function processNextInQueue(){
       }
       setStatus(`✔ Complete: ${next.label}`, 'green');
     }
-    if (isOn('tog-auto-mp4-remux') && !isOn('tog-simple-remux') && !next.outPath.toLowerCase().endsWith('.mp4')){
+    if (jobTog('autoMp4Remux','tog-auto-mp4-remux') && !jobTog('simpleRemux','tog-simple-remux') && !next.outPath.toLowerCase().endsWith('.mp4')){
       // Real, direct fix for a reported "stuck at 99%" hang: this step
       // immediately opens the same file the DV step's own static-
       // correction sub-step may have just renamed into place - Windows
@@ -5382,7 +5430,7 @@ async function processNextInQueue(){
     // sweep here, rather than only relying on whichever specific
     // stage's own cleanup array was supposed to catch it, since this
     // file is purely internal and should never linger regardless.
-    if (!isOn('tog-keep-temp-files') && next.chaptersPathForFinalCleanup){
+    if (!jobTog('keepTempFiles','tog-keep-temp-files') && next.chaptersPathForFinalCleanup){
       await window.electronAPI.deleteTempFile?.({ path: next.chaptersPathForFinalCleanup }).catch(() => {});
     }
   } else {

@@ -1,8 +1,50 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
-const fs = require('fs');
+const realFs = require('fs');
 const os = require('os');
-const { spawn } = require('child_process');
+const realChildProcess = require('child_process');
+
+// ---------------------------------------------------------------------
+// FULL ACTIVITY LOGGING (per direct request: everything this app does must
+// be in the log, otherwise checking what it did is impossible).
+// Every external program launch is logged here, in ONE place, with its full
+// command line and its exit code/time - so no code path can run a program
+// silently, including ones added later. File deletes/renames/writes are
+// logged the same way.
+// ---------------------------------------------------------------------
+function logTs() { return new Date().toISOString().replace('T', ' ').replace('Z', ''); }
+function quoteArg(a) {
+  const t = String(a);
+  return /[\s"'()&|<>^;,]/.test(t) || t === '' ? '"' + t.replace(/"/g, '\\"') + '"' : t;
+}
+function spawn(bin, args, opts) {
+  const argList = Array.isArray(args) ? args : [];
+  const started = Date.now();
+  console.log(`[RUN ${logTs()}] ${quoteArg(bin)} ${argList.map(quoteArg).join(' ')}`);
+  const proc = realChildProcess.spawn(bin, args, opts);
+  proc.once('error', (e) => console.log(`[RUN ERROR ${logTs()}] ${quoteArg(bin)}: ${e && e.message}`));
+  proc.once('close', (code, signal) => console.log(`[RUN EXIT ${logTs()}] code=${code}${signal ? ' signal=' + signal : ''} after ${((Date.now() - started) / 1000).toFixed(1)}s: ${quoteArg(bin)}`));
+  return proc;
+}
+const LOGGED_FS_CALLS = {
+  unlink: (a) => `delete ${a[0]}`, unlinkSync: (a) => `delete ${a[0]}`,
+  rmSync: (a) => `delete ${a[0]}`,
+  renameSync: (a) => `rename ${a[0]} -> ${a[1]}`, rename: (a) => `rename ${a[0]} -> ${a[1]}`,
+  writeFile: (a) => `write ${a[0]}`, writeFileSync: (a) => `write ${a[0]}`,
+  copyFileSync: (a) => `copy ${a[0]} -> ${a[1]}`, copyFile: (a) => `copy ${a[0]} -> ${a[1]}`
+};
+const fs = new Proxy(realFs, {
+  get(target, prop) {
+    const v = target[prop];
+    if (typeof v === 'function' && LOGGED_FS_CALLS[prop]) {
+      return function (...a) {
+        try { console.log(`[FILE ${logTs()}] ${LOGGED_FS_CALLS[prop](a)}`); } catch (e) { /* logging must never break a file operation */ }
+        return v.apply(target, a);
+      };
+    }
+    return typeof v === 'function' ? v.bind(target) : v;
+  }
+});
 
 // Real, confirmed memory leak found and fixed: accumulating a spawned
 // process's stdout/stderr via naive string concatenation (`text += d`)
@@ -602,15 +644,38 @@ ipcMain.handle('detect-crop', async (event, payload) => {
         resolve({ error: 'No crop values detected — source may have no letterboxing, or detection sample was too short' });
         return;
       }
+      // Real bug fixed (confirmed via a real NVEncC failure, "Frame
+      // dimensions are less than the minimum supported value", on a
+      // 3840x2160 source that got crop=122:2:...): on dark or mostly-
+      // black footage cropdetect can lock onto a tiny bright region and
+      // report it as the "picture". A real letterbox/pillarbox crop never
+      // removes most of the frame, so samples covering under 25% of the
+      // source area are discarded instead of being trusted.
+      let srcW = payload.sourceWidth, srcH = payload.sourceHeight;
+      if (!(srcW > 0 && srcH > 0)) {
+        const dm = stderr.match(/Video:[^\n]*?\b(\d{2,5})x(\d{2,5})\b/);
+        if (dm) { srcW = parseInt(dm[1], 10); srcH = parseInt(dm[2], 10); }
+      }
+      let usable = matches;
+      if (srcW > 0 && srcH > 0) {
+        usable = matches.filter(m => {
+          const mm = m.match(/crop=(\d+):(\d+)/);
+          return parseInt(mm[1], 10) * parseInt(mm[2], 10) >= 0.25 * srcW * srcH;
+        });
+      }
+      if (usable.length === 0) {
+        resolve({ error: 'Crop detection only found implausibly small picture areas (likely very dark or mostly black footage in the sampled section) - ignored, no crop applied. Enter crop values manually if this source really has black bars.' });
+        return;
+      }
       const counts = {};
-      for (const m of matches) counts[m] = (counts[m] || 0) + 1;
+      for (const m of usable) counts[m] = (counts[m] || 0) + 1;
       const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
       const [bestCrop, bestCount] = sorted[0];
       const [, w, h, x, y] = bestCrop.match(/crop=(\d+):(\d+):(\d+):(\d+)/);
       resolve({
         crop: { width: parseInt(w), height: parseInt(h), x: parseInt(x), y: parseInt(y) },
-        confidence: bestCount / matches.length,
-        totalSamples: matches.length
+        confidence: bestCount / usable.length,
+        totalSamples: usable.length
       });
     });
     proc.on("error", err => resolve({ error: err.message }));
