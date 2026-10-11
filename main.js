@@ -17,13 +17,30 @@ function quoteArg(a) {
   const t = String(a);
   return /[\s"'()&|<>^;,]/.test(t) || t === '' ? '"' + t.replace(/"/g, '\\"') + '"' : t;
 }
+// Logs free space on the drive a command is working with (first absolute
+// Windows path found in its arguments), so a "No space left on device" can
+// be traced to exactly which step ran the drive down.
+function logDiskFree(label, argList) {
+  try {
+    const list = Array.isArray(argList) ? argList : [];
+    let drive = null;
+    for (const a of list) { const mm = /([A-Za-z]:)[\\/]/.exec(String(a)); if (mm) { drive = mm[1] + '\\'; break; } }
+    if (!drive || typeof fs.statfsSync !== 'function') return;
+    const st = fs.statfsSync(drive);
+    console.log(`[DISK ${logTs()}] ${drive} free=${(Number(st.bavail) * Number(st.bsize) / 1e9).toFixed(1)} GB (${label})`);
+  } catch (_) {}
+}
+const liveChildren = new Set();
+function logLiveChildren(){ console.log(`[LIVE CHILDREN ${logTs()}] ${liveChildren.size ? [...liveChildren].map(p => p.__label + ' pid=' + p.pid).join(', ') : 'none'}`); }
 function spawn(bin, args, opts) {
   const argList = Array.isArray(args) ? args : [];
   const started = Date.now();
   console.log(`[RUN ${logTs()}] ${quoteArg(bin)} ${argList.map(quoteArg).join(' ')}`);
+  logDiskFree('start of run', argList);
   const proc = realChildProcess.spawn(bin, args, opts);
+  liveChildren.add(proc); proc.__label = quoteArg(bin);
   proc.once('error', (e) => console.log(`[RUN ERROR ${logTs()}] ${quoteArg(bin)}: ${e && e.message}`));
-  proc.once('close', (code, signal) => console.log(`[RUN EXIT ${logTs()}] code=${code}${signal ? ' signal=' + signal : ''} after ${((Date.now() - started) / 1000).toFixed(1)}s: ${quoteArg(bin)}`));
+  proc.once('close', (code, signal) => { liveChildren.delete(proc); logDiskFree('end of run', argList); console.log(`[RUN EXIT ${logTs()}] code=${code}${signal ? ' signal=' + signal : ''} after ${((Date.now() - started) / 1000).toFixed(1)}s: ${quoteArg(bin)}`); logLiveChildren(); });
   return proc;
 }
 const LOGGED_FS_CALLS = {

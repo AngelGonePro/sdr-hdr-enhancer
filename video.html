@@ -3891,7 +3891,7 @@ clip.set_output()
       '-y', tmpRemuxedPath];
     preStages.push({
       name: 'Fix HDR10 stream timing',
-      args: remuxArgs, totalDuration: videoDuration, cleanup: tmpEncOutPath, tool: 'ffmpeg'
+      args: remuxArgs, totalDuration: videoDuration, cleanup: tmpEncOutPath, tool: 'ffmpeg', cleanupNow: true
     });
 
     videoSourcePath = tmpRemuxedPath;
@@ -4422,7 +4422,7 @@ clip.set_output()
       mkvmergeExtractStage = {
         name: 'Extract raw HEVC for mkvmerge',
         args: ['-i', videoSourcePath, '-map', '0:v', '-c:v', 'copy', '-bsf:v', 'hevc_mp4toannexb', '-f', 'hevc', '-y', mkvmergeRawHevcPath],
-        totalDuration: videoDuration, cleanup: (videoSourcePath !== filePath ? [videoSourcePath] : []), tool: 'ffmpeg'
+        totalDuration: videoDuration, cleanup: (videoSourcePath !== filePath ? [videoSourcePath] : []), tool: 'ffmpeg', cleanupNow: true
       };
       // Real, SEPARATE disk-space bug found and fixed via a second
       // instance of the same user's failure log: the previous "Add
@@ -5311,13 +5311,25 @@ async function processNextInQueue(){
         finalResult = { code: 0, stdout: result.stdout, stderr: result.stderr };
         continue;
       }
+      // Free the disk as soon as a big intermediate has been fully consumed
+      // by this (successful) stage, instead of holding every copy until the
+      // very end: a full movie otherwise keeps the raw encode, the remuxed
+      // copy, the re-extracted raw stream AND the output file on disk at once.
+      if (!stopRequested && result.code === 0 && stage.cleanupNow && !jobTog('keepTempFiles','tog-keep-temp-files')){
+        const nowPaths = Array.isArray(stage.cleanup) ? stage.cleanup : (stage.cleanup ? [stage.cleanup] : []);
+        for (const p of nowPaths){ console.log('[early cleanup] ' + stage.name + ' finished - deleting consumed intermediate: ' + p); await window.electronAPI.deleteTempFile?.({ path: p }).catch(() => {}); }
+      }
       if (stopRequested || result.code !== 0){
         finalResult = result;
         break;
       }
       finalResult = result;
     }
-    // Best-effort cleanup of temp files regardless of outcome.
+    // Best-effort cleanup of temp files regardless of outcome. A failed job
+    // leaves nothing behind; the log gets a warning saying so.
+    if (stopRequested || !finalResult || finalResult.code !== 0){
+      console.log('[WARNING] Job did not finish - all of its temporary files (including any finished video encode) are being deleted.');
+    }
     for (const stage of next.stages){
       const cleanupPaths = Array.isArray(stage.cleanup) ? stage.cleanup : (stage.cleanup ? [stage.cleanup] : []);
       if (!jobTog('keepTempFiles','tog-keep-temp-files')) { for (const p of cleanupPaths) await window.electronAPI.deleteTempFile?.({ path: p }).catch(() => {}); }
