@@ -178,12 +178,20 @@
     <button class="btn-detect" onclick="runCropDetect()">Detect Crop (samples across the video, like HandBrake)</button>
     <div id="cropResult" class="detected" style="margin-top:10px"></div>
     <div class="row" style="margin-top:10px">
-      <div class="field"><label>Crop W</label><input type="number" id="cropW"></div>
-      <div class="field"><label>Crop H</label><input type="number" id="cropH"></div>
-      <div class="field"><label>Crop X</label><input type="number" id="cropX"></div>
-      <div class="field"><label>Crop Y</label><input type="number" id="cropY"></div>
+      <div class="field"><label>Crop W</label><input type="number" id="cropW" oninput="updateDownscaleUi()"></div>
+      <div class="field"><label>Crop H</label><input type="number" id="cropH" oninput="updateDownscaleUi()"></div>
+      <div class="field"><label>Crop X</label><input type="number" id="cropX" oninput="updateDownscaleUi()"></div>
+      <div class="field"><label>Crop Y</label><input type="number" id="cropY" oninput="updateDownscaleUi()"></div>
     </div>
-    <div class="ti on" id="tog-crop" onclick="toggle(this)"><div class="sw"></div><div class="ti-txt">Apply crop (leave off to encode full frame with detected values shown for reference only)</div></div>
+    <div class="ti on" id="tog-crop" onclick="toggle(this); updateDownscaleUi()"><div class="sw"></div><div class="ti-txt">Apply crop (leave off to encode full frame with detected values shown for reference only)</div></div>
+    <div class="ti" id="tog-downscale" onclick="toggle(this); updateDownscaleUi()"><div class="sw"></div><div class="ti-txt">Downscale to save space (e.g. 4K &rarr; 1440p / 1080p). Never upscales: sources already at or below the target are left alone. Uses a Lanczos resize after the crop, so letterbox bars are removed first and the picture keeps its aspect ratio.</div></div>
+    <div class="row" id="downscaleRow" style="margin-top:8px;display:none">
+      <div class="field"><label>Target (fits inside)</label>
+        <select id="downscaleTarget" onchange="updateDownscaleUi()"><option value="1440">1440p (2560x1440)</option><option value="1080">1080p (1920x1080)</option></select></div>
+      <div class="field"><label>Bitrate vs. normal for that size</label>
+        <select id="downscaleBitrate" onchange="updateDownscaleUi()"><option value="1">Same quality per pixel (smallest)</option><option value="1.5" selected>+50% (keeps 4K-like crispness)</option><option value="2">+100% (maximum crispness)</option></select></div>
+    </div>
+    <div class="path-hint" id="downscaleHint" style="margin-top:6px;display:none"></div>
     <div class="path-hint" style="margin-top:8px">
       GPU-accelerated decode for detection samples — applies to both crop detection and brightness
       analysis. cropdetect/signalstats themselves have no GPU version for any vendor (confirmed
@@ -221,6 +229,8 @@
         <input type="range" id="hdrSatSlider" min="1.0" max="3.0" step="0.05" value="1.25" oninput="document.getElementById('hdrSatVal').textContent=this.value">
         <div class="ti on" id="tog-auto-sat" onclick="toggle(this)" style="margin-top:6px"><div class="sw"></div><div class="ti-txt">Auto saturation — ON by default. When queueing an SDR video, samples it and sets this slider for you: a muted source keeps the full 1.25 boost, while a colourful source or one dominated by skin tones / warm (orange) scenes gets less (down to 1.0 = original colours), to avoid orange outdoors and pink lips. Turn OFF to use the slider value exactly as you set it.</div></div>
         <div id="autoSatResult" class="detected" style="margin-top:6px"></div>
+        <div class="ti on" id="tog-auto-vib" onclick="toggle(this)" style="margin-top:6px"><div class="sw"></div><div class="ti-txt">Automatic perceptual vibrance — ON by default. Lifts muted colours (greys, pale blues/greens, washed-out clothing and scenery) while leaving already-saturated colours and skin / warm tones alone, so faces don't turn orange and bright colours don't clip. Strength is chosen per video from how muted its colours are. While this is on it replaces the uniform boost above (the slider is set to 1.0 for the job). Turn OFF to go back to the plain saturation boost only.</div></div>
+        <input type="hidden" id="hdrVibStrength" value="0">
       </div>
       <div class="field"><label>Brightness Reference (nits) <span class="va" id="hdrRefVal">300</span> — also sets HDR10 metadata automatically.</label>
         <input type="range" id="hdrRefSlider" min="200" max="4000" step="50" value="300" oninput="document.getElementById('hdrRefVal').textContent=this.value; updatePeakDisplay();">
@@ -795,23 +805,33 @@ function getMp4StrictLevel(){
   const c = getMp4AudioChoice();
   return (c === 'opus' || c === 'flac') ? 'experimental' : 'unofficial';
 }
+// Regular audio timestamps for re-encoded MP4 audio. A source such as a Vorbis MKV carries irregular,
+// millisecond-rounded packet times (2-25 ms apart). ffmpeg hands that jitter to the encoder, so the finished MP4
+// lists packets of a fixed size (Opus 960, AAC 1024 samples) at uneven spacing (measured: 760-1176 samples for Opus,
+// 840-1240 for AAC). Decoders that follow the timestamps then see gaps and overlaps - measured correlation with the
+// source fell to 0.65 (SNR 1.5 dB), which sounds like static - while a plain decode looks fine. Cutting the audio
+// into exact encoder-sized frames on a continuous clock gives perfectly even timestamps (verified: 1 distinct step).
+function mp4AudioRegularizeArgs(outIdx, frameSamples, forceRate){
+  const f = [`aresample=${forceRate ? forceRate + ':' : ''}async=1:first_pts=0`, `asetnsamples=n=${frameSamples}:p=0`];
+  return [`-filter:a:${outIdx}`, f.join(',')];
+}
 function mp4AudioEncodeArgs(outIdx, channels){
   const i = outIdx, ch = channels || 2, choice = getMp4AudioChoice();
   if (choice === 'opus'){
     const br = Math.max(96, Math.min(768, ch * 64));
-    const a = [`-c:a:${i}`, 'libopus', `-b:a:${i}`, `${br}k`];
+    const a = [...mp4AudioRegularizeArgs(i, 960, 48000), `-c:a:${i}`, 'libopus', `-b:a:${i}`, `${br}k`];
     if (ch > 2) a.push(`-mapping_family:a:${i}`, '1');
     a.push(`-sample_fmt:a:${i}`, 'flt');
     return a;
   }
   if (choice === 'flac'){
-    return [`-c:a:${i}`, 'flac', `-sample_fmt:a:${i}`, 's32', `-bits_per_raw_sample:a:${i}`, '24'];
+    return [...mp4AudioRegularizeArgs(i, 4096), `-c:a:${i}`, 'flac', `-sample_fmt:a:${i}`, 's32', `-bits_per_raw_sample:a:${i}`, '24'];
   }
   if (choice === 'aac_stereo'){
-    return [`-c:a:${i}`, 'aac', `-b:a:${i}`, '192k', `-ac:a:${i}`, '2', `-sample_fmt:a:${i}`, 'fltp'];
+    return [...mp4AudioRegularizeArgs(i, 1024), `-c:a:${i}`, 'aac', `-b:a:${i}`, '192k', `-ac:a:${i}`, '2', `-sample_fmt:a:${i}`, 'fltp'];
   }
   const aacBitrate = Math.max(128, Math.min(768, ch * 64));
-  return [`-c:a:${i}`, 'aac', `-b:a:${i}`, `${aacBitrate}k`, `-sample_fmt:a:${i}`, 'fltp'];
+  return [...mp4AudioRegularizeArgs(i, 1024), `-c:a:${i}`, 'aac', `-b:a:${i}`, `${aacBitrate}k`, `-sample_fmt:a:${i}`, 'fltp'];
 }
 let detectedSourceFps = null;
 let detectedAudioTrackDuration = null;
@@ -1966,6 +1986,7 @@ async function runCropDetect(){
   document.getElementById('cropH').value = result.crop.height;
   document.getElementById('cropX').value = result.crop.x;
   document.getElementById('cropY').value = result.crop.y;
+  try { updateDownscaleUi(); } catch(e){}
   const confPct = (result.confidence*100).toFixed(0);
   resultEl.innerHTML = `Detected: <strong style="color:var(--accent)">crop=${result.crop.width}:${result.crop.height}:${result.crop.x}:${result.crop.y}</strong> `
     + `(${confPct}% agreement across ${result.totalSamples} samples)`;
@@ -2618,7 +2639,16 @@ function buildHdrPixelFilters(){
   // does fast table lookups instead. Verified the two produce identical
   // results before switching.
   filters.push(`lutyuv=y='if(gte(val,${bpCode}), min(1023, ${bpCode}+(val-${bpCode})*${slopeAbove.toFixed(4)}), val)':u='val':v='val'`);
-  filters.push(`eq=saturation=${sat}`);
+  const vibA = parseFloat(document.getElementById('hdrVibStrength').value) || 0;
+  // When vibrance is on, the uniform saturation (1.0 in auto mode, or the slider value) is folded into the vibrance
+  // gain below and `eq` is NOT used: eq works in 8-bit, and the 10->8->10 bit conversion around it was measured to
+  // shift levels when followed by the plane-splitting vibrance sub-graph.
+  if (!(vibA > 0)) filters.push(`eq=saturation=${sat}`);
+  // Automatic perceptual vibrance: chroma-adaptive gain, 1 + A*(1 - chroma/0.30)^1.5, so muted colours get
+  // the biggest lift and colours above 0.30 chroma get none; skin / warm hues (angle 2.36 rad +-0.45, fading out by
+  // +-0.85 in the Cb/Cr plane - measured from real skin pixels in six clips, 108..163 deg) get zero lift.
+  // Done with lut2 table lookups on the U/V planes (same speed class as eq), not geq (22x slower).
+  if (vibA > 0) filters.push(buildVibranceFilter(vibA, parseFloat(sat) || 1));
   // Brightness Reference slider sets the PEAK that expanded highlights
   // reach (not a uniform multiplier for the whole image) - default 1000
   // matches BT.2446's own "bridge point" recommendation (§4.2). Because
@@ -2639,6 +2669,67 @@ function buildHdrPixelFilters(){
   return filters;
 }
 
+// ── Output downscale (4K -> 1440p / 1080p) ───────────────────────────
+// Size of the picture that actually reaches the encoder BEFORE downscaling:
+// the crop rectangle when cropping is on, otherwise the selected track's size.
+function getPreScaleDims(){
+  let w = 0, h = 0;
+  if (isOn('tog-crop')){
+    w = parseInt(document.getElementById('cropW').value, 10) || 0;
+    h = parseInt(document.getElementById('cropH').value, 10) || 0;
+  }
+  if (!w || !h){
+    const t = (lastVideoStreams || []).find(s => String(s.index) === getSelectedVideoTrackIndex()) || (lastVideoStreams || [])[0] || {};
+    w = parseInt(t.width, 10) || 0; h = parseInt(t.height, 10) || 0;
+  }
+  return { w, h };
+}
+// Returns {w,h,srcW,srcH} when downscaling is on AND actually shrinks the picture, else null.
+// The target is a 16:9 box (2560x1440 / 1920x1080) the picture must fit inside, so a
+// 3840x1600 scope film becomes 1920x800 at "1080p" instead of being stretched.
+function getDownscaleTarget(){
+  const tog = document.getElementById('tog-downscale');
+  if (!tog || !tog.classList.contains('on')) return null;
+  const { w: sw, h: sh } = getPreScaleDims();
+  if (!sw || !sh) return null;
+  const th = parseInt(document.getElementById('downscaleTarget').value, 10) || 1080;
+  const tw = Math.round(th * 16 / 9);
+  const f = Math.min(tw / sw, th / sh);
+  if (!(f < 0.999)) return null; // never upscale
+  const even = v => Math.max(2, 2 * Math.round(v / 2));
+  return { w: even(sw * f), h: even(sh * f), srcW: sw, srcH: sh };
+}
+function getDownscaleBitrateMultiplier(){
+  return getDownscaleTarget() ? (parseFloat(document.getElementById('downscaleBitrate').value) || 1) : 1;
+}
+function buildDownscaleFilter(){
+  const d = getDownscaleTarget();
+  return d ? `scale=${d.w}:${d.h}:flags=lanczos+accurate_rnd+full_chroma_int` : null;
+}
+function updateDownscaleUi(){
+  const on = isOn('tog-downscale');
+  document.getElementById('downscaleRow').style.display = on ? '' : 'none';
+  const hint = document.getElementById('downscaleHint');
+  hint.style.display = on ? '' : 'none';
+  if (!on) return;
+  const d = getDownscaleTarget();
+  const { w, h } = getPreScaleDims();
+  hint.textContent = d ? `This file: ${d.srcW}x${d.srcH} -> ${d.w}x${d.h} (${(100 * d.w * d.h / (d.srcW * d.srcH)).toFixed(0)}% of the pixels).`
+                       : (w ? `This file: ${w}x${h} already fits inside the target, so it is left at its own size.` : 'Select a file to see the resulting size.');
+}
+
+// Builds the lut2-based vibrance segment. Input and output are full-range yuv444p10le (chroma centre 512).
+// It is a labelled sub-graph ending in mergeplanes, so whatever filter follows it in the chain continues from there.
+function buildVibranceFilter(A, S){
+  const C0 = 0.30, PW = 1.5, H0 = 2.36;
+  const m = `pow(max(0,1-hypot(x-512,y-512)/512/${C0}),${PW})`;
+  const protU = `clip((0.85-abs(atan2(y-512,x-512)-${H0}))/0.4,0,1)`;   // x=U, y=V
+  const protV = `clip((0.85-abs(atan2(x-512,y-512)-${H0}))/0.4,0,1)`;   // x=V, y=U
+  const gU = `${S}*(1+${A}*${m}*(1-${protU}))`, gV = `${S}*(1+${A}*${m}*(1-${protV}))`;
+  return `format=yuv444p10le,split=5[vA][vB][vC][vD][vE];[vA]extractplanes=y[vY];[vB]extractplanes=u[vU1];[vC]extractplanes=v[vV1];[vD]extractplanes=u[vU2];[vE]extractplanes=v[vV2];`
+       + `[vU1][vV1]lut2=c0='clip(512+(x-512)*(${gU}),0,1023)'[vUn];[vV2][vU2]lut2=c0='clip(512+(x-512)*(${gV}),0,1023)'[vVn];[vY][vUn][vVn]mergeplanes=0x001020:yuv444p10le`;
+}
+
 // Crop filter string. Blank X/Y must be written out as ffmpeg's own centering
 // expressions - an empty field ("crop=W:H::") is a hard ffmpeg error.
 function buildCropFilter(w, h, x, y){
@@ -2657,6 +2748,7 @@ function buildFilterChain(){
     const y = document.getElementById('cropY').value;
     if (w && h) filters.push(buildCropFilter(w, h, x, y));
   }
+  { const dsf = buildDownscaleFilter(); if (dsf) filters.push(dsf); }
 
   if (isOn('tog-fps-conform') && isOn('tog-conform-drop-frames') && detectedSourceFps){
     const conformTarget = getConformTargetFps(detectedSourceFps);
@@ -3240,6 +3332,7 @@ async function buildJobFromCurrentSettings(chaptersPath){
             x = document.getElementById('cropX').value, y = document.getElementById('cropY').value;
       if (w && h) preColorFilters.push(buildCropFilter(w, h, x, y));
     }
+    { const dsf = buildDownscaleFilter(); if (dsf) preColorFilters.push(dsf); }
     // Real fix: frame-drop Conform mode's fps= filter belongs HERE, not
     // only in buildFilterChain() (which this pipeline never calls) -
     // confirmed via a real test that the toggle had zero effect until
@@ -3448,11 +3541,12 @@ async function buildJobFromCurrentSettings(chaptersPath){
     // an appropriately smaller budget for equivalent quality instead of
     // a needlessly large one, while genuine 4K output is unaffected
     // (scales back to the exact same numbers that were already there).
-    const outWidthForBitrate = (parseInt(document.getElementById('cropW').value, 10) || 0) || (lastVideoStreams.find(t => String(t.index) === getSelectedVideoTrackIndex())?.width) || (lastVideoStreams[0]?.width) || 3840;
-    const outHeightForBitrate = (parseInt(document.getElementById('cropH').value, 10) || 0) || (lastVideoStreams.find(t => String(t.index) === getSelectedVideoTrackIndex())?.height) || (lastVideoStreams[0]?.height) || 2160;
+    const downscaleOut = getDownscaleTarget();
+    const outWidthForBitrate = (downscaleOut && downscaleOut.w) || (parseInt(document.getElementById('cropW').value, 10) || 0) || (lastVideoStreams.find(t => String(t.index) === getSelectedVideoTrackIndex())?.width) || (lastVideoStreams[0]?.width) || 3840;
+    const outHeightForBitrate = (downscaleOut && downscaleOut.h) || (parseInt(document.getElementById('cropH').value, 10) || 0) || (lastVideoStreams.find(t => String(t.index) === getSelectedVideoTrackIndex())?.height) || (lastVideoStreams[0]?.height) || 2160;
     const outFpsForBitrate = conformTargetFps || detectedSourceFps || 24;
     const referencePixelFrameRate = 3840 * 2160 * 24; // the resolution/fps this app's existing 4K UHD BD-comparable numbers below were actually calibrated against
-    const bitrateScaleFactor = Math.min(1, (outWidthForBitrate * outHeightForBitrate * outFpsForBitrate) / referencePixelFrameRate);
+    const bitrateScaleFactor = Math.min(1, (outWidthForBitrate * outHeightForBitrate * outFpsForBitrate) / referencePixelFrameRate) * getDownscaleBitrateMultiplier(); // downscale multiplier = extra bits per pixel to keep 4K-like crispness at the smaller size
     const use444Bitrate = use444OutputEncode;
     const referenceVbr = use444Bitrate ? 20250 : 11000;
     const referenceMax = use444Bitrate ? 54000 : 30000;
@@ -3590,8 +3684,9 @@ async function buildJobFromCurrentSettings(chaptersPath){
       // ".1" variant at each resolution tier (not ".0") since this app
       // supports Framerate Upscale to 48/60fps, so levels need headroom
       // for that even on 24fps source content.
-      const cropWNum = parseInt(document.getElementById('cropW').value, 10) || 0;
-      const cropHNum = parseInt(document.getElementById('cropH').value, 10) || 0;
+      const levelDs = getDownscaleTarget();
+      const cropWNum = levelDs ? levelDs.w : (parseInt(document.getElementById('cropW').value, 10) || 0);
+      const cropHNum = levelDs ? levelDs.h : (parseInt(document.getElementById('cropH').value, 10) || 0);
       const lumaSamples = cropWNum * cropHNum;
       let hevcLevel;
       if (lumaSamples <= 983040) hevcLevel = '3.1'; // up to ~720p
@@ -3816,6 +3911,12 @@ clip.set_output()
           const bottom = Math.max(0, srcH - cy - ch);
           nativeArgs.splice(3, 0, '--crop', `${cx},${cy},${right},${bottom}`);
         }
+        { const dsN = getDownscaleTarget();
+          if (dsN){
+            // Resize happens on the GPU after --crop (NVEncC applies crop at the reader, resize in the vpp stage).
+            const at = nativeArgs.indexOf('--output-depth');
+            nativeArgs.splice(at > 0 ? at : nativeArgs.length, 0, '--output-res', `${dsN.w}x${dsN.h}`, '--vpp-resize', 'spline36');
+          } }
         // Real gap fixed per direct request: Framerate Conform now
         // applies here too, not just the standard ffmpeg-pipe path.
         // Confirmed via multiple independent real sources (including a
@@ -4727,18 +4828,23 @@ async function runAutoSaturation(){
     const ffmpeg = document.getElementById('ffmpegPath').value.trim();
     const r = await window.electronAPI.analyzeSaturation({ ffmpeg, filePath, duration: videoDuration, videoTrackIndex: getSelectedVideoTrackIndex() });
     if (!r || r.error){
-      console.log('[AUTO SATURATION] analysis failed - keeping the slider value ' + document.getElementById('hdrSatSlider').value + ': ' + (r && r.error));
+      document.getElementById('hdrVibStrength').value = '0';
+      console.log('[AUTO SATURATION] analysis failed - keeping the slider value ' + document.getElementById('hdrSatSlider').value + ' and NO vibrance: ' + (r && r.error));
       if (out) out.textContent = 'Auto saturation analysis failed - using the slider value as set.';
       return;
     }
     const sl = document.getElementById('hdrSatSlider');
-    sl.value = r.sat;
-    document.getElementById('hdrSatVal').textContent = r.sat;
-    const msg = `colourfulness ${r.colorfulness.toFixed(3)}, skin-tone ${(r.skin * 100).toFixed(1)}% of picture, warm ${(r.warm * 100).toFixed(1)}% (${r.samples} sampled frames) -> saturation ${r.sat}`;
+    const useVib = isOn('tog-auto-vib') && r.vibrance > 0;
+    const satUsed = useVib ? 1.0 : r.sat;   // vibrance replaces the uniform boost
+    sl.value = satUsed;
+    document.getElementById('hdrSatVal').textContent = satUsed.toFixed(2);
+    document.getElementById('hdrVibStrength').value = useVib ? String(r.vibrance) : '0';
+    const msg = `colourfulness ${r.colorfulness.toFixed(3)}, skin-tone ${(r.skin * 100).toFixed(1)}% of picture, warm ${(r.warm * 100).toFixed(1)}% (${r.samples} sampled frames) -> ` + (useVib ? `perceptual vibrance ${r.vibrance} (muted colours lifted, skin/warm tones and saturated colours protected), uniform saturation 1.0` : `saturation ${r.sat}`);
     console.log('[AUTO SATURATION] ' + filePath.split(/[\\/]/).pop() + ': ' + msg + ` (penalty ${r.penalty.toFixed(2)}: colour ${r.A.toFixed(2)}, skin/warm ${r.B.toFixed(2)})`);
     if (out) out.textContent = 'Auto: ' + msg;
   } catch (e){
-    console.log('[AUTO SATURATION] error - keeping the slider value: ' + (e && e.message || e));
+    document.getElementById('hdrVibStrength').value = '0';
+    console.log('[AUTO SATURATION] error - keeping the slider value and NO vibrance: ' + (e && e.message || e));
   }
 }
 
@@ -4765,8 +4871,9 @@ async function addToQueue(){
   }
 
   // Auto saturation for SDR -> HDR conversion jobs (not HDR passthrough).
-  if (isOn('tog-hdr') && isOn('tog-auto-sat') && !isSelectedVideoTrackHDR()){
-    setStatus('Analyzing source colors for automatic saturation...', '');
+  document.getElementById('hdrVibStrength').value = '0';
+  if (isOn('tog-hdr') && (isOn('tog-auto-sat') || isOn('tog-auto-vib')) && !isSelectedVideoTrackHDR()){
+    setStatus('Analyzing source colors for automatic saturation / vibrance...', '');
     await runAutoSaturation();
   }
 
@@ -4844,10 +4951,11 @@ async function addToQueue(){
     const allToggles = {};
     document.querySelectorAll('.ti[id^="tog-"]').forEach(el => { allToggles[el.id] = el.classList.contains('on'); });
     console.log(`[QUEUE ${job.label}] ALL toggles at queue time:`, JSON.stringify(allToggles));
-    console.log(`[QUEUE ${job.label}] saturation boost used for this job: ${document.getElementById('hdrSatSlider').value} (auto saturation ${isOn('tog-auto-sat') ? 'ON' : 'OFF'})`);
+    console.log(`[QUEUE ${job.label}] perceptual vibrance used for this job: ${document.getElementById('hdrVibStrength').value} (0 = none; auto vibrance ${isOn('tog-auto-vib') ? 'ON' : 'OFF'}); saturation boost used for this job: ${document.getElementById('hdrSatSlider').value} (auto saturation ${isOn('tog-auto-sat') ? 'ON' : 'OFF'})`);
     console.log(`[QUEUE ${job.label}] audioMode=${document.getElementById('audioModeSelect').value} audioTracks=${JSON.stringify(Array.from(document.querySelectorAll('input[name="audioTrackSel"]:checked, input[name="integratedTrackSel"]:checked')).map(e=>e.value))} subtitleTracks=${JSON.stringify(Array.from(document.querySelectorAll('input[name="subtitleTrackSel"]:checked')).map(e=>e.value))}`);
   } catch(e){ console.log('[QUEUE toggle log failed]', e && e.message); }
   job.sourceWasSdr = !isSelectedVideoTrackHDR();
+  try { const dsq = getDownscaleTarget(); console.log(`[QUEUE ${job.label}] downscale: toggle=${isOn('tog-downscale')} target=${document.getElementById('downscaleTarget').value}p bitrate x${document.getElementById('downscaleBitrate').value} -> ${dsq ? ('DOWNSCALE ' + dsq.srcW + 'x' + dsq.srcH + ' -> ' + dsq.w + 'x' + dsq.h + ' (Lanczos, bitrate multiplier x' + getDownscaleBitrateMultiplier() + ')') : 'NO downscale (off, or the picture already fits)'}`); } catch(e){}
   try { console.log(`[QUEUE ${job.label}] crop: toggle=${isOn('tog-crop')} W=${document.getElementById('cropW').value || '(blank)'} H=${document.getElementById('cropH').value || '(blank)'} X=${document.getElementById('cropX').value || '(blank)'} Y=${document.getElementById('cropY').value || '(blank)'} -> ${(isOn('tog-crop') && document.getElementById('cropW').value && document.getElementById('cropH').value) ? 'crop WILL be applied' : 'NO crop will be applied to this job'}`); } catch(e){}
   job.toggleSnapshot = {
     autoMp4Remux: isOn('tog-auto-mp4-remux'),

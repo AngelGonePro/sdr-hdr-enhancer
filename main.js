@@ -879,6 +879,16 @@ function autoSaturationFromFeatures(colorfulness, skin, warm) {
   const sat = Math.max(AUTO_SAT.MIN, Math.min(AUTO_SAT.MAX, Math.round(raw / 0.05) * 0.05));
   return { sat: Math.round(sat * 100) / 100, A, B, penalty };
 }
+// Perceptual vibrance strength (chroma-adaptive, hue-protected gain applied in video.html's
+// buildHdrPixelFilters). Muted footage gets a stronger lift than already colourful footage.
+// Tuned on six reference clips: at 0.8 muted colours rise ~x1.24 (same lift the old fixed 1.25 gave)
+// while skin-tone chroma stays at x1.01 and already-saturated colours are not boosted at all.
+const AUTO_VIB = { MAX: 0.85, MIN: 0.45, COLOR_LO: 0.06, COLOR_HI: 0.24 };
+function autoVibranceFromFeatures(colorfulness) {
+  const t = Math.max(0, Math.min(1, (colorfulness - AUTO_VIB.COLOR_LO) / (AUTO_VIB.COLOR_HI - AUTO_VIB.COLOR_LO)));
+  const raw = AUTO_VIB.MAX - (AUTO_VIB.MAX - AUTO_VIB.MIN) * t;
+  return Math.round(Math.round(raw / 0.05) * 0.05 * 100) / 100;
+}
 function saturationFeaturesFromRgb(buf, w, h) {
   const frameBytes = w * h * 3, n = Math.floor(buf.length / frameBytes);
   const colorPerFrame = []; let skinSum = 0, warmSum = 0;
@@ -944,7 +954,7 @@ ipcMain.handle('analyze-saturation', async (event, payload) => {
   const feat = saturationFeaturesFromRgb(Buffer.concat(bufs), W, H);
   if (feat.samples < 3) return { error: `Saturation analysis got only ${feat.samples} frame(s)` };
   const dec = autoSaturationFromFeatures(feat.colorfulness, feat.skin, feat.warm);
-  return { ...feat, ...dec };
+  return { ...feat, ...dec, vibrance: autoVibranceFromFeatures(feat.colorfulness) };
 });
 
 // Automatic, real detection of a mislabeled-HDR source, per direct request
