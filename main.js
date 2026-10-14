@@ -862,6 +862,91 @@ ipcMain.handle('analyze-brightness', async (event, payload) => {
   });
 });
 
+// Automatic saturation boost for the SDR->HDR path. A fixed 1.25 multiplies
+// chroma equally everywhere, which pushes skin and warm (orange) scenes too
+// far (orange outdoors, pink lips) while the same 1.25 is fine on a muted
+// source. This samples the source (small RGB frames), measures how colourful
+// it already is and how much of the picture is skin-tone/warm, and returns the
+// largest boost (never above the old 1.25 default, never below 1.0 = exact
+// colours) that those measurements allow.
+const AUTO_SAT = { MAX: 1.25, MIN: 1.0, COLOR_LO: 0.12, COLOR_HI: 0.24, SKIN_FULL: 0.25, W_COLOR: 0.4, W_SKIN: 0.6 };
+function autoSaturationFromFeatures(colorfulness, skin, warm) {
+  const clamp01 = (x) => Math.max(0, Math.min(1, x));
+  const A = clamp01((colorfulness - AUTO_SAT.COLOR_LO) / (AUTO_SAT.COLOR_HI - AUTO_SAT.COLOR_LO));
+  const B = clamp01(Math.max(skin, 0.7 * warm) / AUTO_SAT.SKIN_FULL);
+  const penalty = clamp01(AUTO_SAT.W_COLOR * A + AUTO_SAT.W_SKIN * B);
+  const raw = AUTO_SAT.MAX - (AUTO_SAT.MAX - AUTO_SAT.MIN) * penalty;
+  const sat = Math.max(AUTO_SAT.MIN, Math.min(AUTO_SAT.MAX, Math.round(raw / 0.05) * 0.05));
+  return { sat: Math.round(sat * 100) / 100, A, B, penalty };
+}
+function saturationFeaturesFromRgb(buf, w, h) {
+  const frameBytes = w * h * 3, n = Math.floor(buf.length / frameBytes);
+  const colorPerFrame = []; let skinSum = 0, warmSum = 0;
+  for (let f = 0; f < n; f++) {
+    let skin = 0, warm = 0, cSum = 0, cCnt = 0;
+    const base = f * frameBytes;
+    for (let i = 0; i < w * h; i++) {
+      const r = buf[base + i * 3] / 255, g = buf[base + i * 3 + 1] / 255, b = buf[base + i * 3 + 2] / 255;
+      const mx = Math.max(r, g, b), mn = Math.min(r, g, b), c = mx - mn;
+      if (mx <= 0.2) continue;                    // ignore very dark pixels
+      cSum += c; cCnt++;
+      if (c < 1e-6) continue;
+      const s = c / mx;
+      let hue;
+      if (mx === r) hue = (((g - b) / c) % 6 + 6) % 6; else if (mx === g) hue = (b - r) / c + 2; else hue = (r - g) / c + 4;
+      hue *= 60;
+      if (hue >= 5 && hue <= 50 && s >= 0.15 && s <= 0.75) skin++;
+      if ((hue <= 65 || hue >= 345) && s >= 0.25) warm++;
+    }
+    if (cCnt >= 0.05 * w * h) colorPerFrame.push(cSum / cCnt);   // skip (near-)black frames
+    skinSum += skin / (w * h); warmSum += warm / (w * h);
+  }
+  colorPerFrame.sort((a, b) => a - b);
+  const mid = colorPerFrame.length;
+  // Median across frames: a few unusually colourful frames (a title card,
+  // an explosion) must not decide the whole movie.
+  const colorfulness = mid ? (mid % 2 ? colorPerFrame[(mid - 1) / 2] : (colorPerFrame[mid / 2 - 1] + colorPerFrame[mid / 2]) / 2) : 0;
+  return { samples: n, colorfulness, skin: n ? skinSum / n : 0, warm: n ? warmSum / n : 0 };
+}
+ipcMain.handle('analyze-saturation', async (event, payload) => {
+  const W = 160, H = 90;
+  const duration = payload.duration || 0;
+  // Sample SEGMENTS spread across the whole video (not one contiguous block),
+  // so the result reflects the whole movie, not just one scene.
+  const segCount = duration > 60 ? 12 : 6;
+  const segLen = duration > 0 ? Math.max(2, Math.min(6, duration / (segCount * 1.5))) : 6;
+  const runSegment = (start) => new Promise((resolve) => {
+    const args = [
+      '-ss', String(Math.max(0, start)), '-i', payload.filePath, '-t', String(segLen),
+      ...(payload.videoTrackIndex != null ? ['-map', `0:${payload.videoTrackIndex}`] : []),
+      '-vf', `fps=1/2,scale=${W}:${H},format=rgb24`, '-f', 'rawvideo', '-'
+    ];
+    let proc;
+    try { proc = spawn(payload.ffmpeg, args, { windowsHide: true }); activeProcesses.set('saturation-detect', proc); }
+    catch (err) { resolve({ error: String(err && err.message || err) }); return; }
+    const chunks = []; let stderr = '';
+    proc.stdout.on('data', d => chunks.push(d));
+    proc.stderr.on('data', d => stderr = appendBounded(stderr, d.toString()));
+    proc.on('close', (code) => {
+      activeProcesses.delete('saturation-detect');
+      if (code !== 0) resolve({ error: `exit code ${code}: ${stderr.trim().slice(-200)}` });
+      else resolve({ buf: Buffer.concat(chunks) });
+    });
+    proc.on('error', err => resolve({ error: err.message }));
+  });
+  const bufs = [];
+  for (let s = 0; s < segCount; s++) {
+    const start = duration > 0 ? ((s + 0.5) / segCount) * duration - segLen / 2 : s * 10;
+    const r = await runSegment(start);
+    if (r.error) { return { error: `Saturation analysis failed: ${r.error}` }; }
+    bufs.push(r.buf);
+  }
+  const feat = saturationFeaturesFromRgb(Buffer.concat(bufs), W, H);
+  if (feat.samples < 3) return { error: `Saturation analysis got only ${feat.samples} frame(s)` };
+  const dec = autoSaturationFromFeatures(feat.colorfulness, feat.skin, feat.warm);
+  return { ...feat, ...dec };
+});
+
 // Automatic, real detection of a mislabeled-HDR source, per direct request
 // (no manual toggle - this runs on every file loaded automatically).
 // Some sources carry a smpte2084/PQ color_transfer tag whose actual pixel

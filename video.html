@@ -219,6 +219,8 @@
       </div>
       <div class="field"><label>Saturation Boost <span class="va" id="hdrSatVal">1.25</span></label>
         <input type="range" id="hdrSatSlider" min="1.0" max="3.0" step="0.05" value="1.25" oninput="document.getElementById('hdrSatVal').textContent=this.value">
+        <div class="ti on" id="tog-auto-sat" onclick="toggle(this)" style="margin-top:6px"><div class="sw"></div><div class="ti-txt">Auto saturation — ON by default. When queueing an SDR video, samples it and sets this slider for you: a muted source keeps the full 1.25 boost, while a colourful source or one dominated by skin tones / warm (orange) scenes gets less (down to 1.0 = original colours), to avoid orange outdoors and pink lips. Turn OFF to use the slider value exactly as you set it.</div></div>
+        <div id="autoSatResult" class="detected" style="margin-top:6px"></div>
       </div>
       <div class="field"><label>Brightness Reference (nits) <span class="va" id="hdrRefVal">300</span> — also sets HDR10 metadata automatically.</label>
         <input type="range" id="hdrRefSlider" min="200" max="4000" step="50" value="300" oninput="document.getElementById('hdrRefVal').textContent=this.value; updatePeakDisplay();">
@@ -4716,6 +4718,30 @@ clip.set_output()
     mkvdoviPath: mkvdoviPathForJob };
 }
 
+// Auto saturation: see analyze-saturation in main.js. Sets the Saturation
+// Boost slider from the source's own colour content just before an SDR->HDR
+// job is built, and logs exactly what was measured.
+async function runAutoSaturation(){
+  const out = document.getElementById('autoSatResult');
+  try {
+    const ffmpeg = document.getElementById('ffmpegPath').value.trim();
+    const r = await window.electronAPI.analyzeSaturation({ ffmpeg, filePath, duration: videoDuration, videoTrackIndex: getSelectedVideoTrackIndex() });
+    if (!r || r.error){
+      console.log('[AUTO SATURATION] analysis failed - keeping the slider value ' + document.getElementById('hdrSatSlider').value + ': ' + (r && r.error));
+      if (out) out.textContent = 'Auto saturation analysis failed - using the slider value as set.';
+      return;
+    }
+    const sl = document.getElementById('hdrSatSlider');
+    sl.value = r.sat;
+    document.getElementById('hdrSatVal').textContent = r.sat;
+    const msg = `colourfulness ${r.colorfulness.toFixed(3)}, skin-tone ${(r.skin * 100).toFixed(1)}% of picture, warm ${(r.warm * 100).toFixed(1)}% (${r.samples} sampled frames) -> saturation ${r.sat}`;
+    console.log('[AUTO SATURATION] ' + filePath.split(/[\\/]/).pop() + ': ' + msg + ` (penalty ${r.penalty.toFixed(2)}: colour ${r.A.toFixed(2)}, skin/warm ${r.B.toFixed(2)})`);
+    if (out) out.textContent = 'Auto: ' + msg;
+  } catch (e){
+    console.log('[AUTO SATURATION] error - keeping the slider value: ' + (e && e.message || e));
+  }
+}
+
 async function addToQueue(){
   if (!filePath){ setStatus('Load a file first.', 'red'); return; }
   // This toggle is documented as research-based and untested - the script
@@ -4736,6 +4762,12 @@ async function addToQueue(){
     setStatus('Finishing crop/brightness detection before queueing...', '');
     await Promise.allSettled(pendingDetections);
     pendingDetections = [];
+  }
+
+  // Auto saturation for SDR -> HDR conversion jobs (not HDR passthrough).
+  if (isOn('tog-hdr') && isOn('tog-auto-sat') && !isSelectedVideoTrackHDR()){
+    setStatus('Analyzing source colors for automatic saturation...', '');
+    await runAutoSaturation();
   }
 
   // Validate crop against the ACTUAL selected video track's known
@@ -4812,6 +4844,7 @@ async function addToQueue(){
     const allToggles = {};
     document.querySelectorAll('.ti[id^="tog-"]').forEach(el => { allToggles[el.id] = el.classList.contains('on'); });
     console.log(`[QUEUE ${job.label}] ALL toggles at queue time:`, JSON.stringify(allToggles));
+    console.log(`[QUEUE ${job.label}] saturation boost used for this job: ${document.getElementById('hdrSatSlider').value} (auto saturation ${isOn('tog-auto-sat') ? 'ON' : 'OFF'})`);
     console.log(`[QUEUE ${job.label}] audioMode=${document.getElementById('audioModeSelect').value} audioTracks=${JSON.stringify(Array.from(document.querySelectorAll('input[name="audioTrackSel"]:checked, input[name="integratedTrackSel"]:checked')).map(e=>e.value))} subtitleTracks=${JSON.stringify(Array.from(document.querySelectorAll('input[name="subtitleTrackSel"]:checked')).map(e=>e.value))}`);
   } catch(e){ console.log('[QUEUE toggle log failed]', e && e.message); }
   job.sourceWasSdr = !isSelectedVideoTrackHDR();

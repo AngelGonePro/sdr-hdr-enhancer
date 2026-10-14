@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   checkFileExists: (payload) => ipcRenderer.invoke('check-file-exists', payload),
   detectCrop: (payload) => ipcRenderer.invoke('detect-crop', payload),
   analyzeBrightness: (payload) => ipcRenderer.invoke('analyze-brightness', payload),
+  analyzeSaturation: (payload) => ipcRenderer.invoke('analyze-saturation', payload),
   detectMislabeledHdr: (payload) => ipcRenderer.invoke('detect-mislabeled-hdr', payload),
   measureRealHdrBrightness: (payload) => ipcRenderer.invoke('measure-real-hdr-brightness', payload),
   generateDolbyVisionDynamic: (payload) => ipcRenderer.invoke('generate-dolby-vision-dynamic', payload),
