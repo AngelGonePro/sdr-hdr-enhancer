@@ -3319,7 +3319,31 @@ async function buildJobFromCurrentSettings(chaptersPath){
     // falsy) - no other changes needed downstream.
     if (sourcePixFmt && /422|444/i.test(sourcePixFmt)) encodeGpuVendor = null;
     const encodeNativeFormat = is10BitSource ? 'p010le' : 'nv12';
-    const encodeHwaccelPre = encodeGpuVendor === 'nvidia' ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda']
+    // Preflight: confirm hardware decode can actually start for THIS file
+    // (NVDEC/QSV/D3D11 can refuse a stream for reasons that can't be
+    // predicted from pixel format alone, e.g. surface-count limits). A
+    // failed start used to kill the whole encode with a cryptic filter
+    // error; now it logs why and falls back to CPU decode for this job.
+    if (encodeGpuVendor){
+      try {
+        const pfPre = encodeGpuVendor === 'nvidia' ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-threads', '1']
+          : encodeGpuVendor === 'intel' ? ['-hwaccel', 'qsv']
+          : ['-hwaccel', 'd3d11va', '-hwaccel_output_format', 'd3d11'];
+        const pfIdx = getSelectedVideoTrackIndex();
+        const pf = await window.electronAPI.runFFmpeg({
+          ffmpeg: document.getElementById('ffmpegPath').value.trim(),
+          args: [...pfPre, '-i', filePath, ...(pfIdx != null ? ['-map', `0:${pfIdx}`] : []), '-frames:v', '3', '-vf', `hwdownload,format=${encodeNativeFormat}`, '-f', 'null', '-']
+        });
+        if (pf && pf.code !== 0){
+          console.log(`[HW DECODE preflight] ${encodeGpuVendor} hardware decode failed for this source (exit ${pf.code}) - using CPU decode for this job instead. ffmpeg said: ` + String(pf.stderr || '').split('\n').filter(l => /AVHWDevice|hwaccel|cuvid|CUDA_ERROR|hwframe|Failed|error/i.test(l)).slice(0, 3).join(' | '));
+          encodeGpuVendor = null;
+        } else {
+          console.log(`[HW DECODE preflight] ${encodeGpuVendor} hardware decode OK for this source`);
+        }
+      } catch (e){ console.log('[HW DECODE preflight] check itself failed (' + (e && e.message) + ') - keeping the selected decode mode'); }
+    }
+    // '-threads', '1': see main.js buildDetectionHwaccelArgs - avoids NVDEC's 32-surface limit on H.264 sources.
+    const encodeHwaccelPre = encodeGpuVendor === 'nvidia' ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-threads', '1']
       : encodeGpuVendor === 'intel' ? ['-hwaccel', 'qsv']
       : encodeGpuVendor === 'amd' ? ['-hwaccel', 'd3d11va', '-hwaccel_output_format', 'd3d11']
       : [];
@@ -4423,10 +4447,20 @@ clip.set_output()
     const useDplII = isOn('tog-ambisonics');
     const dplIIFilter = useDplII ? buildDplIIStereoFilter(srcChannels, [fpsFilter, durationFilter, delayFilter]) : null;
     const plainDownmixFilter = buildDownmixToStereoFilter(srcChannels, [fpsFilter, durationFilter, delayFilter]);
-    const downmixFilter = useDplII ? dplIIFilter : plainDownmixFilter;
+    let downmixFilter = useDplII ? dplIIFilter : plainDownmixFilter;
     if (!downmixFilter){
-      setStatus('Selected track is already stereo/mono — nothing to downmix. Use "Embedded Track" mode instead.', 'red');
-      return null;
+      // Stereo/mono source: there is nothing to fold down, but the engine's
+      // real purpose here (Vorbis/Opus 7.1 upmix in Stage 2) still applies.
+      // Previously this refused the job. Stage 1 now just normalises the
+      // track to stereo (mono is duplicated to L/R) and applies the same
+      // framerate/duration/delay corrections, then Stage 2 upmixes it.
+      const ptCorr = [fpsFilter, durationFilter, delayFilter].filter(Boolean);
+      let ptLabel = 'pt_in';
+      const ptLines = [`[0:a]aformat=channel_layouts=stereo[pt_in]`];
+      ptCorr.forEach((f, i) => { ptLines.push(`[${ptLabel}]${f}[pt_c${i}]`); ptLabel = `pt_c${i}`; });
+      ptLines.push(`[${ptLabel}]acopy[out]`);
+      downmixFilter = ptLines.join(';');
+      console.log(`[AUDIO ENGINE] source track is ${srcChannels}ch (stereo/mono): skipping the fold-down, upmixing it directly to 7.1 (DPLII not applicable to a stereo source)`);
     }
 
     const stage1FilterFinal = downmixFilter.replace('[0:a]', `[0:${srcIndex}]`);
@@ -4942,8 +4976,19 @@ async function addToQueue(){
     if (result.hasChapters) chaptersPath = result.chaptersPath;
   }
 
+  const statusBeforeBuild = document.getElementById('statusMsg') ? document.getElementById('statusMsg').innerText : '';
   const job = await buildJobFromCurrentSettings(chaptersPath);
-  if (!job){ setStatus('Load a file first.', 'red'); return; }
+  if (!job){
+    // buildJobFromCurrentSettings already set the REAL reason (e.g. no audio
+    // track selected for the integrated engine). Only fall back to the
+    // generic message when it set nothing - previously this line always
+    // overwrote the real reason with a misleading "Load a file first.".
+    const msgNow = document.getElementById('statusMsg') ? document.getElementById('statusMsg').innerText : '';
+    if (!filePath) setStatus('Load a file first.', 'red');
+    else if (!msgNow || msgNow === statusBeforeBuild || /^Checking for chapters/.test(msgNow)) setStatus('Could not add this job to the queue (the job builder returned nothing) - see the console log.', 'red');
+    console.log('[QUEUE] job NOT added: ' + (document.getElementById('statusMsg') ? document.getElementById('statusMsg').innerText : '(no status element)'));
+    return;
+  }
   // Every run-time toggle this job's later steps depend on, captured NOW,
   // for THIS file. Anything read live while the queue runs reflects
   // whatever file/toggles are on screen at that moment, not this job's.

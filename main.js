@@ -647,7 +647,9 @@ function buildDetectionHwaccelArgs(gpuVendor, sourcePixFmt){
   // native format from the source's own pixel format instead.
   const is10Bit = !!(sourcePixFmt && /10le|10be|p010|p016|12le|12be/i.test(sourcePixFmt));
   const nativeFormat = is10Bit ? 'p010le' : 'nv12';
-  if (gpuVendor === 'nvidia') return { pre: ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda'], vfPrefix: `hwdownload,format=${nativeFormat},` };
+  // -threads 1: with hardware decode, ffmpeg adds one extra NVDEC surface per software decoder thread; on a 16-thread CPU an H.264 stream needing
+  // 18 surfaces asks for 34 (> NVDEC's 32) and cuvidCreateDecoder fails with CUDA_ERROR_INVALID_VALUE. The GPU does the decoding, so one thread is enough.
+  if (gpuVendor === 'nvidia') return { pre: ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-threads', '1'], vfPrefix: `hwdownload,format=${nativeFormat},` };
   if (gpuVendor === 'intel') return { pre: ['-hwaccel', 'qsv'], vfPrefix: `hwdownload,format=${nativeFormat},` };
   if (gpuVendor === 'amd') return { pre: ['-hwaccel', 'd3d11va', '-hwaccel_output_format', 'd3d11'], vfPrefix: `hwdownload,format=${nativeFormat},` };
   return { pre: [], vfPrefix: '' };
@@ -657,7 +659,7 @@ function buildDetectionHwaccelArgs(gpuVendor, sourcePixFmt){
 // cropdetect across the video (not just one frame, which can be thrown off
 // by an all-black or unusually bright scene) and returns the crop value
 // that appeared most consistently, plus how many samples agreed with it.
-ipcMain.handle('detect-crop', async (event, payload) => {
+function detectCropImpl(payload){
   return new Promise((resolve) => {
     const ffmpegPath = payload.ffmpeg;
     const filePath = payload.filePath;
@@ -724,6 +726,11 @@ ipcMain.handle('detect-crop', async (event, payload) => {
       // produces. A non-zero exit code or explicit error text in stderr
       // means the sampling never actually ran, which is a materially
       // different problem the user needs to see, not this generic message.
+      if (code !== 0 && hwaccel.pre.length > 0 && /hwaccel|cuvid|CUDA_ERROR|hwdownload|hwframe|Impossible to convert|Device creation failed|Device setup failed|Cannot load libcuda/i.test(stderr)) {
+        console.log('[detect-crop] hardware decode failed for this source - retrying with CPU decode. ffmpeg said: ' + stderr.split('\n').filter(l => /hwaccel|cuvid|CUDA_ERROR|hwframe/i.test(l)).slice(0, 2).join(' | '));
+        detectCropImpl({ ...payload, gpuVendor: null }).then(resolve);
+        return;
+      }
       if (code !== 0) {
         const errorLines = stderr.split('\n').filter(l => /error|failed|cannot|unable|invalid|device creation/i.test(l));
         const detail = errorLines.length > 0 ? errorLines.slice(0, 2).join(' | ') : stderr.trim().slice(-300);
@@ -771,7 +778,8 @@ ipcMain.handle('detect-crop', async (event, payload) => {
     });
     proc.on("error", err => resolve({ error: err.message }));
   });
-});
+}
+ipcMain.handle('detect-crop', async (event, payload) => detectCropImpl(payload));
 
 // Samples real luma statistics across the source (same sampling window as
 // crop detection) to find the ACTUAL peak brightness the content uses —
@@ -782,7 +790,7 @@ ipcMain.handle('detect-crop', async (event, payload) => {
 // case for every source. Uses a high percentile (not the raw single-frame
 // max) so one unusual bright frame — a lens flare, a title card — doesn't
 // skew the result the way a true max() would.
-ipcMain.handle('analyze-brightness', async (event, payload) => {
+function analyzeBrightnessImpl(payload){
   return new Promise((resolve) => {
     const ffmpegPath = payload.ffmpeg;
     const filePath = payload.filePath;
@@ -834,6 +842,11 @@ ipcMain.handle('analyze-brightness', async (event, payload) => {
       // as this generic message, identical to what a source with a
       // sample that's genuinely too short produces. Surface the real
       // error when the process didn't actually complete successfully.
+      if (code !== 0 && hwaccel.pre.length > 0 && /hwaccel|cuvid|CUDA_ERROR|hwdownload|hwframe|Impossible to convert|Device creation failed|Device setup failed|Cannot load libcuda/i.test(stderr)) {
+        console.log('[analyze-brightness] hardware decode failed for this source - retrying with CPU decode.');
+        analyzeBrightnessImpl({ ...payload, gpuVendor: null }).then(resolve);
+        return;
+      }
       if (code !== 0) {
         const errorLines = stderr.split('\n').filter(l => /error|failed|cannot|unable|invalid|device creation/i.test(l));
         const detail = errorLines.length > 0 ? errorLines.slice(0, 2).join(' | ') : stderr.trim().slice(-300);
@@ -860,7 +873,8 @@ ipcMain.handle('analyze-brightness', async (event, payload) => {
     });
     proc.on("error", err => resolve({ error: err.message }));
   });
-});
+}
+ipcMain.handle('analyze-brightness', async (event, payload) => analyzeBrightnessImpl(payload));
 
 // Automatic saturation boost for the SDR->HDR path. A fixed 1.25 multiplies
 // chroma equally everywhere, which pushes skin and warm (orange) scenes too
