@@ -2638,7 +2638,20 @@ function buildHdrPixelFilters(){
   // ~3x slower than lutyuv, which precomputes a lookup table once and
   // does fast table lookups instead. Verified the two produce identical
   // results before switching.
-  filters.push(`lutyuv=y='if(gte(val,${bpCode}), min(1023, ${bpCode}+(val-${bpCode})*${slopeAbove.toFixed(4)}), val)':u='val':v='val'`);
+  // Automatic shadow lift (SDR sources only). Measured on a real dark scene
+  // (Maze Runner clip): the plain BT.1886 mapping puts the darkest tones
+  // (SDR codes ~18-30, where detail like truck tyres lives) at 0.004-0.4 nits,
+  // about 5x darker than players show SDR on an HDR desktop (which use the sRGB
+  // curve, whose toe is much brighter than gamma 2.4). That crushed dark
+  // detail. This lifts only the toe, 80% of the way toward the sRGB curve,
+  // ramped in from true black (so black bars/black level stay exactly black)
+  // and faded out by ~40% signal so midtones and highlights are untouched.
+  // v = val/1023; vs = sRGB-equivalent code; a = lift amount.
+  const toeV = `(val/1023)`;
+  const toeVs = `if(lte(${toeV},0.04045),pow(${toeV}/12.92,0.416667),(${toeV}+0.055)/1.055)`;
+  const toeA = `(0.8*min(1,${toeV}/0.012)*clip((0.40-${toeV})/0.28,0,1))`;
+  const toeExpr = `1023*(${toeV}+${toeA}*(${toeVs}-${toeV}))`;
+  filters.push(`lutyuv=y='if(gte(val,${bpCode}), min(1023, ${bpCode}+(val-${bpCode})*${slopeAbove.toFixed(4)}), ${toeExpr})':u='val':v='val'`);
   const vibA = parseFloat(document.getElementById('hdrVibStrength').value) || 0;
   // When vibrance is on, the uniform saturation (1.0 in auto mode, or the slider value) is folded into the vibrance
   // gain below and `eq` is NOT used: eq works in 8-bit, and the 10->8->10 bit conversion around it was measured to
