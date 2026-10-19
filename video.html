@@ -346,7 +346,7 @@
   <div class="slbl">Smoothing / Sharpening</div>
   <div class="card">
     <div class="ti" id="tog-denoise" onclick="toggle(this)"><div class="sw"></div><div class="ti-txt">Minimal smoothing (hqdn3d) — OFF by default. Turned off after a real report of visible softness on a heavily-grained film (Blade Runner 2049) resembling streaming-service processing — temporal denoising specifically is well-documented to smooth frame-to-frame-uncorrelated film grain, which is exactly the deliberate texture a film like this relies on. Worth enabling only for genuinely noisy/low-quality sources where grain isn't an intentional part of the look.</div></div>
-    <div class="ti" id="tog-sharpen" onclick="toggle(this)"><div class="sw"></div><div class="ti-txt">Minimal sharpening (unsharp) — OFF by default. Turned off alongside denoise — measured directly that this filter increases output file size versus the untouched source (adding artificial edge-enhancement complexity rather than restoring real detail), which is the same kind of over-processed signature as the softness report above, just from the opposite direction.</div></div>
+    <div class="ti on" id="tog-sharpen" onclick="toggle(this)"><div class="sw"></div><div class="ti-txt">Automatic sharpening (unsharp) — ON by default, strength chosen per video. When the queue starts each SDR job, the app measures how sharp the picture's strong edges actually are (after crop / downscale, the way it will be encoded) and how grainy it is, then sets the amount itself: already-sharp sources get <strong>no filter at all</strong>, clearly soft ones get up to a capped amount (0.45, where halos stay under ~0.15% of pixels in testing), reduced further for grainy footage so grain isn't amplified. Skipped automatically for 4K sources downscaled to 1080p (the downscale already keeps real detail), for HDR sources, and for pictures outside 1280-2600 px wide. The measured values and the chosen amount are written to the log as [AUTO SHARPEN]. Turn OFF to disable it completely.</div></div>
     <div class="path-hint" style="margin-top:8px">
       If used together, smoothing runs first, then sharpening — so sharpening enhances real detail
       rather than amplifying noise/artifacts the smoothing would otherwise remove.
@@ -804,6 +804,26 @@ function getMp4StrictLevel(){
   // 'unofficial' is what these paths always used; Opus/FLAC in MP4 need 'experimental' (a superset).
   const c = getMp4AudioChoice();
   return (c === 'opus' || c === 'flac') ? 'experimental' : 'unofficial';
+}
+// Per-stream MP4 video tag args for a stream-copy remux of `inputPath` (see probe-mp4-video-tags
+// in main.js): 'dvh1' for HEVC Dolby Vision profile 5/8, 'hvc1' for other HEVC. Without this ffmpeg
+// writes 'hev1', which Apple devices won't play, and Dolby Vision is ignored. Never blocks the
+// remux: if the probe fails, no tag args are added (previous behaviour) and the reason is logged.
+async function getMp4VideoTagArgs(inputPath, label){
+  try {
+    const ffmpeg = document.getElementById('ffmpegPath').value.trim();
+    const r = await window.electronAPI.probeMp4VideoTags({ ffmpeg, filePath: inputPath });
+    if (!r || r.error){ console.log(`[MP4 TAG] ${label}: probe failed (${r && r.error}) - leaving ffmpeg's default tag`); return []; }
+    const args = [];
+    for (const v of r.videos){
+      if (v.tag) args.push(`-tag:v:${v.outIndex}`, v.tag);
+      console.log(`[MP4 TAG] ${label}: video stream ${v.outIndex} (${v.codec}${v.dvProfile != null ? ', Dolby Vision profile ' + v.dvProfile : ''}${v.attached ? ', cover art' : ''}) -> ${v.tag ? v.tag + (v.tag === 'dvh1' ? ' (Apple Dolby Vision)' : ' (Apple-compatible HEVC)') : 'no tag change'}`);
+    }
+    return args;
+  } catch (e){
+    console.log(`[MP4 TAG] ${label}: error (${e && e.message || e}) - leaving ffmpeg's default tag`);
+    return [];
+  }
 }
 // Regular audio timestamps for re-encoded MP4 audio. A source such as a Vorbis MKV carries irregular,
 // millisecond-rounded packet times (2-25 ms apart). ffmpeg hands that jitter to the encoder, so the finished MP4
@@ -2656,12 +2676,13 @@ function buildHdrPixelFilters(){
   // When vibrance is on, the uniform saturation (1.0 in auto mode, or the slider value) is folded into the vibrance
   // gain below and `eq` is NOT used: eq works in 8-bit, and the 10->8->10 bit conversion around it was measured to
   // shift levels when followed by the plane-splitting vibrance sub-graph.
-  if (!(vibA > 0)) filters.push(`eq=saturation=${sat}`);
+  if (deferAutoColor) filters.push(AUTO_COLOR_TOKEN);   // real filter chosen when the job starts (resolveDeferredAuto)
+  else if (!(vibA > 0)) filters.push(`eq=saturation=${sat}`);
   // Automatic perceptual vibrance: chroma-adaptive gain, 1 + A*(1 - chroma/0.30)^1.5, so muted colours get
   // the biggest lift and colours above 0.30 chroma get none; skin / warm hues (angle 2.36 rad +-0.45, fading out by
   // +-0.85 in the Cb/Cr plane - measured from real skin pixels in six clips, 108..163 deg) get zero lift.
   // Done with lut2 table lookups on the U/V planes (same speed class as eq), not geq (22x slower).
-  if (vibA > 0) filters.push(buildVibranceFilter(vibA, parseFloat(sat) || 1));
+  if (!deferAutoColor && vibA > 0) filters.push(buildVibranceFilter(vibA, parseFloat(sat) || 1));
   // Brightness Reference slider sets the PEAK that expanded highlights
   // reach (not a uniform multiplier for the whole image) - default 1000
   // matches BT.2446's own "bridge point" recommendation (§4.2). Because
@@ -2751,6 +2772,98 @@ function buildCropFilter(w, h, x, y){
   return `crop=${w}:${h}:${xs}:${ys}`;
 }
 
+// Automatic sharpening and automatic saturation/vibrance are measured when a queued job STARTS
+// (resolveDeferredAuto, called by the queue runner), not when it is added - adding to the queue stays
+// instant. While a job is being built, placeholders stand in for the two filters; the runner swaps in
+// the real filter text (or removes the placeholder) once the measurements are done.
+const AUTO_SHARP_TOKEN = '__AUTO_SHARPEN_FILTER__';
+const AUTO_COLOR_TOKEN = '__AUTO_COLOR_FILTER__';
+let deferAutoSharpen = false, deferAutoColor = false;   // true only while addToQueue builds a job
+function autoSharpenFilter(){
+  return (deferAutoSharpen && isOn('tog-sharpen')) ? AUTO_SHARP_TOKEN : null;
+}
+// Cheap, synchronous part (no ffmpeg): decides whether this job gets the measurement at all and
+// captures the geometry (crop + downscale) the measurement must use, for THIS file.
+function planAutoSharpen(){
+  if (!isOn('tog-sharpen') || isOn('tog-simple-remux')) return null;   // off, or no video re-encode in this mode
+  if (isSelectedVideoTrackHDR()) return { skip: 'HDR source - not measured (calibrated for SDR), no sharpening' };
+  const { w: pw, h: ph } = getPreScaleDims();
+  const ds = getDownscaleTarget();
+  if (ds && (ds.srcW * ds.srcH) / (ds.w * ds.h) > 1.3) return { skip: `${ds.srcW}x${ds.srcH} downscaled to ${ds.w}x${ds.h} - the downscale already keeps real detail, no sharpening` };
+  const outW = ds ? ds.w : pw, outH = ds ? ds.h : ph;
+  if (!outW || !outH) return { skip: 'picture size unknown, no sharpening' };
+  let vfPrefix = '';
+  if (isOn('tog-crop')){
+    const cw = document.getElementById('cropW').value, ch = document.getElementById('cropH').value;
+    if (cw && ch) vfPrefix = buildCropFilter(cw, ch, document.getElementById('cropX').value, document.getElementById('cropY').value);
+  }
+  const dsf = buildDownscaleFilter(); if (dsf) vfPrefix = vfPrefix ? vfPrefix + ',' + dsf : dsf;
+  return { outW, outH, vfPrefix };
+}
+// Runs at job start. Returns the unsharp filter text, or '' for no sharpening.
+async function measureAutoSharpen(job, c){
+  const name = (job.filePath || '').split(/[\\/]/).pop();
+  if (c.sharp.skip){ console.log(`[AUTO SHARPEN] ${name}: ${c.sharp.skip}`); return ''; }
+  try {
+    const r = await window.electronAPI.analyzeSharpness({ ffmpeg: c.ffmpeg, filePath: job.filePath, duration: c.duration, videoTrackIndex: c.videoTrackIndex, outW: c.sharp.outW, outH: c.sharp.outH, vfPrefix: c.sharp.vfPrefix });
+    if (!r || r.error){ console.log(`[AUTO SHARPEN] ${name}: analysis failed (${r && r.error}) - no sharpening`); return ''; }
+    console.log(`[AUTO SHARPEN] ${name}: ${c.sharp.outW}x${c.sharp.outH}, strong-edge score ${r.S == null ? 'n/a' : r.S.toFixed(3)}, grain ${r.noise == null ? 'n/a' : r.noise.toFixed(2)}, ${r.usable}/${r.frames} usable frames -> amount ${r.amount}${r.amount > 0 ? ' (unsharp=5:5:' + r.amount + ':5:5:0.0)' : ''}: ${r.reason}`);
+    return r.amount > 0 ? `unsharp=5:5:${r.amount}:5:5:0.0` : '';
+  } catch (e){
+    console.log('[AUTO SHARPEN] error - no sharpening: ' + (e && e.message || e));
+    return '';
+  }
+}
+// Runs at job start. Returns the colour filter text: vibrance sub-graph or plain eq saturation.
+// Same decisions the queue-time version made; on any failure: the slider value, no vibrance.
+async function measureAutoColor(job, c){
+  const name = (job.filePath || '').split(/[\\/]/).pop();
+  const plain = (v) => `eq=saturation=${v}`;
+  try {
+    const r = await window.electronAPI.analyzeSaturation({ ffmpeg: c.ffmpeg, filePath: job.filePath, duration: c.duration, videoTrackIndex: c.videoTrackIndex });
+    if (!r || r.error){
+      console.log('[AUTO SATURATION] ' + name + ': analysis failed - keeping the slider value ' + c.color.sliderSat + ' and NO vibrance: ' + (r && r.error));
+      return plain(c.color.sliderSat);
+    }
+    const useVib = c.color.autoVib && r.vibrance > 0;
+    const satUsed = useVib ? 1.0 : r.sat;   // vibrance replaces the uniform boost
+    const satStr = String(Math.round(Math.min(3, Math.max(1, satUsed)) / 0.05) / 20);   // same 0.05 steps the slider uses
+    const msg = `colourfulness ${r.colorfulness.toFixed(3)}, skin-tone ${(r.skin * 100).toFixed(1)}% of picture, warm ${(r.warm * 100).toFixed(1)}% (${r.samples} sampled frames) -> ` + (useVib ? `perceptual vibrance ${r.vibrance} (muted colours lifted, skin/warm tones and saturated colours protected), uniform saturation 1.0` : `saturation ${r.sat}`);
+    console.log('[AUTO SATURATION] ' + name + ': ' + msg + ` (penalty ${r.penalty.toFixed(2)}: colour ${r.A.toFixed(2)}, skin/warm ${r.B.toFixed(2)})`);
+    return useVib ? buildVibranceFilter(r.vibrance, parseFloat(satStr) || 1) : plain(satStr);
+  } catch (e){
+    console.log('[AUTO SATURATION] ' + name + ': error - keeping the slider value and NO vibrance: ' + (e && e.message || e));
+    return plain(c.color.sliderSat);
+  }
+}
+// Walks the whole job and swaps the two placeholders in every string (args, stages, the deferred HDR
+// measurement's filter chain...). An empty replacement removes the filter together with its comma.
+function applyAutoPlaceholders(node, sharpText, colorText){
+  const fix = (str) => {
+    if (str.indexOf('__AUTO_') === -1) return str;
+    if (sharpText) str = str.split(AUTO_SHARP_TOKEN).join(sharpText);
+    else str = str.split(',' + AUTO_SHARP_TOKEN).join('').split(AUTO_SHARP_TOKEN + ',').join('').split(AUTO_SHARP_TOKEN).join('null');
+    if (colorText != null) str = str.split(AUTO_COLOR_TOKEN).join(colorText);
+    return str;
+  };
+  const walk = (n) => {
+    if (typeof n === 'string') return fix(n);
+    if (Array.isArray(n)){ for (let i = 0; i < n.length; i++) n[i] = walk(n[i]); return n; }
+    if (n && typeof n === 'object'){ for (const k of Object.keys(n)) n[k] = walk(n[k]); return n; }
+    return n;
+  };
+  return walk(node);
+}
+async function resolveDeferredAuto(job){
+  const c = job.autoCtx;
+  if (!c) return;
+  job.autoCtx = null;
+  let sharpText = '', colorText = null;
+  if (c.sharp){ setStatus(`Measuring sharpness for automatic sharpening: ${job.label}...`, ''); sharpText = await measureAutoSharpen(job, c); }
+  if (c.color){ setStatus(`Analyzing source colors for automatic saturation / vibrance: ${job.label}...`, ''); colorText = await measureAutoColor(job, c); }
+  applyAutoPlaceholders(job, sharpText, colorText);
+}
+
 function buildFilterChain(){
   const filters = [];
 
@@ -2782,13 +2895,7 @@ function buildFilterChain(){
   if (isOn('tog-denoise')){
     filters.push(`hqdn3d=1.5:1.5:3:3`);
   }
-  if (isOn('tog-sharpen')){
-    // amount=0.15 — tested specifically against edge overshoot on a
-    // real text sample; higher values (0.5) produced visible clipping
-    // to full 0-255 beyond the source's actual range (halo artifacts).
-    // 0.15 keeps overshoot low while still being a real, measurable effect.
-    filters.push(`unsharp=5:5:0.15:5:5:0.0`);
-  }
+  { const sh = autoSharpenFilter(); if (sh) filters.push(sh); }
 
   filters.push(...buildHdrPixelFilters());
 
@@ -2932,6 +3039,7 @@ async function buildJobFromCurrentSettings(chaptersPath){
       }
       outAudioIdx++;
     }
+    remuxArgs.push(...(await getMp4VideoTagArgs(filePath, 'Simple Mode')));
     remuxArgs.push('-strict', getMp4StrictLevel(), mp4OutPath);
     return {
       id: 'job_' + Date.now() + '_' + Math.random().toString(36).slice(2),
@@ -3395,7 +3503,7 @@ async function buildJobFromCurrentSettings(chaptersPath){
       preColorFilters.push(`minterpolate=fps=${interpFps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1`);
     }
     if (isOn('tog-denoise')) preColorFilters.push(`hqdn3d=1.5:1.5:3:3`);
-    if (isOn('tog-sharpen')) preColorFilters.push(`unsharp=5:5:0.15:5:5:0.0`);
+    { const sh = autoSharpenFilter(); if (sh) preColorFilters.push(sh); }
 
     if (useLibplacebo){
       // Experimental, NOT mixed with the GPU decode path above — known
@@ -4866,35 +4974,6 @@ clip.set_output()
     mkvdoviPath: mkvdoviPathForJob };
 }
 
-// Auto saturation: see analyze-saturation in main.js. Sets the Saturation
-// Boost slider from the source's own colour content just before an SDR->HDR
-// job is built, and logs exactly what was measured.
-async function runAutoSaturation(){
-  const out = document.getElementById('autoSatResult');
-  try {
-    const ffmpeg = document.getElementById('ffmpegPath').value.trim();
-    const r = await window.electronAPI.analyzeSaturation({ ffmpeg, filePath, duration: videoDuration, videoTrackIndex: getSelectedVideoTrackIndex() });
-    if (!r || r.error){
-      document.getElementById('hdrVibStrength').value = '0';
-      console.log('[AUTO SATURATION] analysis failed - keeping the slider value ' + document.getElementById('hdrSatSlider').value + ' and NO vibrance: ' + (r && r.error));
-      if (out) out.textContent = 'Auto saturation analysis failed - using the slider value as set.';
-      return;
-    }
-    const sl = document.getElementById('hdrSatSlider');
-    const useVib = isOn('tog-auto-vib') && r.vibrance > 0;
-    const satUsed = useVib ? 1.0 : r.sat;   // vibrance replaces the uniform boost
-    sl.value = satUsed;
-    document.getElementById('hdrSatVal').textContent = satUsed.toFixed(2);
-    document.getElementById('hdrVibStrength').value = useVib ? String(r.vibrance) : '0';
-    const msg = `colourfulness ${r.colorfulness.toFixed(3)}, skin-tone ${(r.skin * 100).toFixed(1)}% of picture, warm ${(r.warm * 100).toFixed(1)}% (${r.samples} sampled frames) -> ` + (useVib ? `perceptual vibrance ${r.vibrance} (muted colours lifted, skin/warm tones and saturated colours protected), uniform saturation 1.0` : `saturation ${r.sat}`);
-    console.log('[AUTO SATURATION] ' + filePath.split(/[\\/]/).pop() + ': ' + msg + ` (penalty ${r.penalty.toFixed(2)}: colour ${r.A.toFixed(2)}, skin/warm ${r.B.toFixed(2)})`);
-    if (out) out.textContent = 'Auto: ' + msg;
-  } catch (e){
-    document.getElementById('hdrVibStrength').value = '0';
-    console.log('[AUTO SATURATION] error - keeping the slider value and NO vibrance: ' + (e && e.message || e));
-  }
-}
-
 async function addToQueue(){
   if (!filePath){ setStatus('Load a file first.', 'red'); return; }
   // This toggle is documented as research-based and untested - the script
@@ -4915,13 +4994,6 @@ async function addToQueue(){
     setStatus('Finishing crop/brightness detection before queueing...', '');
     await Promise.allSettled(pendingDetections);
     pendingDetections = [];
-  }
-
-  // Auto saturation for SDR -> HDR conversion jobs (not HDR passthrough).
-  document.getElementById('hdrVibStrength').value = '0';
-  if (isOn('tog-hdr') && (isOn('tog-auto-sat') || isOn('tog-auto-vib')) && !isSelectedVideoTrackHDR()){
-    setStatus('Analyzing source colors for automatic saturation / vibrance...', '');
-    await runAutoSaturation();
   }
 
   // Validate crop against the ACTUAL selected video track's known
@@ -4989,8 +5061,19 @@ async function addToQueue(){
     if (result.hasChapters) chaptersPath = result.chaptersPath;
   }
 
+  // Automatic saturation/vibrance and automatic sharpening are NOT measured here (that made adding to the
+  // queue slow): placeholders go into the job now and the real values are measured when the queue
+  // reaches this job (resolveDeferredAuto). Only the cheap decisions and this file's geometry are captured.
+  const autoColorWanted = !isOn('tog-simple-remux') && isOn('tog-hdr') && (isOn('tog-auto-sat') || isOn('tog-auto-vib')) && !isSelectedVideoTrackHDR();
+  const sharpPlan = planAutoSharpen();
+  deferAutoColor = autoColorWanted;
+  deferAutoSharpen = !!(sharpPlan && !sharpPlan.skip);
+
   const statusBeforeBuild = document.getElementById('statusMsg') ? document.getElementById('statusMsg').innerText : '';
-  const job = await buildJobFromCurrentSettings(chaptersPath);
+
+  let job;
+  try { job = await buildJobFromCurrentSettings(chaptersPath); }
+  finally { deferAutoColor = false; deferAutoSharpen = false; }
   if (!job){
     // buildJobFromCurrentSettings already set the REAL reason (e.g. no audio
     // track selected for the integrated engine). Only fall back to the
@@ -5009,10 +5092,17 @@ async function addToQueue(){
     const allToggles = {};
     document.querySelectorAll('.ti[id^="tog-"]').forEach(el => { allToggles[el.id] = el.classList.contains('on'); });
     console.log(`[QUEUE ${job.label}] ALL toggles at queue time:`, JSON.stringify(allToggles));
-    console.log(`[QUEUE ${job.label}] perceptual vibrance used for this job: ${document.getElementById('hdrVibStrength').value} (0 = none; auto vibrance ${isOn('tog-auto-vib') ? 'ON' : 'OFF'}); saturation boost used for this job: ${document.getElementById('hdrSatSlider').value} (auto saturation ${isOn('tog-auto-sat') ? 'ON' : 'OFF'})`);
     console.log(`[QUEUE ${job.label}] audioMode=${document.getElementById('audioModeSelect').value} audioTracks=${JSON.stringify(Array.from(document.querySelectorAll('input[name="audioTrackSel"]:checked, input[name="integratedTrackSel"]:checked')).map(e=>e.value))} subtitleTracks=${JSON.stringify(Array.from(document.querySelectorAll('input[name="subtitleTrackSel"]:checked')).map(e=>e.value))}`);
   } catch(e){ console.log('[QUEUE toggle log failed]', e && e.message); }
   job.sourceWasSdr = !isSelectedVideoTrackHDR();
+  if (autoColorWanted || sharpPlan){
+    job.autoCtx = {
+      ffmpeg: document.getElementById('ffmpegPath').value.trim(), duration: videoDuration, videoTrackIndex: getSelectedVideoTrackIndex(),
+      color: autoColorWanted ? { autoVib: isOn('tog-auto-vib'), sliderSat: document.getElementById('hdrSatSlider').value } : null,
+      sharp: sharpPlan || null
+    };
+    console.log(`[QUEUE ${job.label}] automatic saturation/vibrance: ${autoColorWanted ? 'will be measured when this job starts' : 'not used'}; automatic sharpening: ${sharpPlan ? (sharpPlan.skip ? 'skipped (' + sharpPlan.skip + ')' : 'will be measured when this job starts') : 'not used'}`);
+  }
   try { const dsq = getDownscaleTarget(); console.log(`[QUEUE ${job.label}] downscale: toggle=${isOn('tog-downscale')} target=${document.getElementById('downscaleTarget').value}p bitrate x${document.getElementById('downscaleBitrate').value} -> ${dsq ? ('DOWNSCALE ' + dsq.srcW + 'x' + dsq.srcH + ' -> ' + dsq.w + 'x' + dsq.h + ' (Lanczos, bitrate multiplier x' + getDownscaleBitrateMultiplier() + ')') : 'NO downscale (off, or the picture already fits)'}`); } catch(e){}
   try { console.log(`[QUEUE ${job.label}] crop: toggle=${isOn('tog-crop')} W=${document.getElementById('cropW').value || '(blank)'} H=${document.getElementById('cropH').value || '(blank)'} X=${document.getElementById('cropX').value || '(blank)'} Y=${document.getElementById('cropY').value || '(blank)'} -> ${(isOn('tog-crop') && document.getElementById('cropW').value && document.getElementById('cropH').value) ? 'crop WILL be applied' : 'NO crop will be applied to this job'}`); } catch(e){}
   job.toggleSnapshot = {
@@ -5217,6 +5307,7 @@ async function processNextInQueue(){
   document.getElementById('progressWrap').style.display = 'block';
   document.getElementById('stopBtn').disabled = false;
 
+  await resolveDeferredAuto(next);   // saturation/vibrance + sharpening, measured now (must run first: the HDR measurement below uses this job's filter chain)
   await resolveDeferredHdrMeasure(next);
 
   // This job's own captured toggles (falls back to live UI only for a job built without a snapshot).
@@ -5673,6 +5764,7 @@ async function processNextInQueue(){
           }
           outAudioIdx++;
         }
+        remuxArgs.push(...(await getMp4VideoTagArgs(next.outPath, 'MP4 copy')));
         remuxArgs.push('-strict', getMp4StrictLevel(), mp4CopyPath);
         console.log('[MP4 copy] args:', JSON.stringify(remuxArgs));
         const mp4Result = await window.electronAPI.runFFmpegWithProgress({
