@@ -2667,11 +2667,25 @@ function buildHdrPixelFilters(){
   // ramped in from true black (so black bars/black level stay exactly black)
   // and faded out by ~40% signal so midtones and highlights are untouched.
   // v = val/1023; vs = sRGB-equivalent code; a = lift amount.
-  const toeV = `(val/1023)`;
-  const toeVs = `if(lte(${toeV},0.04045),pow(${toeV}/12.92,0.416667),(${toeV}+0.055)/1.055)`;
-  const toeA = `(0.8*min(1,${toeV}/0.012)*clip((0.40-${toeV})/0.28,0,1))`;
-  const toeExpr = `1023*(${toeV}+${toeA}*(${toeVs}-${toeV}))`;
-  filters.push(`lutyuv=y='if(gte(val,${bpCode}), min(1023, ${bpCode}+(val-${bpCode})*${slopeAbove.toFixed(4)}), ${toeExpr})':u='val':v='val'`);
+  // Noise-aware: the lift is applied to a lightly blurred copy of the luma (the "base"), and the fine
+  // detail (original minus base) is added back at its ORIGINAL strength. Lifting the raw pixels also
+  // multiplied the source's dither/grain/compression noise ~3.4x (visible as dark speckle); this keeps
+  // the brightness lift and all real detail but does not amplify the noise. Measured on the Maze clip:
+  // dark-area noise 1.00 -> 0.75 (source 0.63) at identical lifted brightness.
+  const toeOf = (yv) => {
+    const v = `(${yv}/1023)`;
+    const vs = `if(lte(${v},0.04045),pow(${v}/12.92,0.416667),(${v}+0.055)/1.055)`;
+    const a = `(0.8*min(1,${v}/0.012)*clip((0.40-${v})/0.28,0,1))`;
+    return `1023*(${v}+${a}*(${vs}-${v}))`;
+  };
+  // Highlight shoulder (default slope only): a gentle convex curve above the breakpoint keeps the brightest
+  // core of small lights at full level but lowers the glow around them (~5% at the disk edge), so bright
+  // lights no longer read as over-exposed/hazy next to the lifted surroundings. A user-set highlight
+  // slope other than 1 keeps the old linear behaviour.
+  const hiExpr = Math.abs(slopeAbove - 1) < 0.001
+    ? `${bpCode}+(1023-${bpCode})*pow(max(0,(x-${bpCode})/(1023-${bpCode})),1.25)`
+    : `min(1023,${bpCode}+(x-${bpCode})*${slopeAbove.toFixed(4)})`;
+  filters.push(`format=yuv444p10le,split=2[tA][tB];[tB]gblur=sigma=2:planes=1[tBB];[tA][tBB]lut2=c0='if(gte(x,${bpCode}),${hiExpr},clip(${toeOf('y')}+(x-y),0,1023))'`);
   const vibA = parseFloat(document.getElementById('hdrVibStrength').value) || 0;
   // When vibrance is on, the uniform saturation (1.0 in auto mode, or the slider value) is folded into the vibrance
   // gain below and `eq` is NOT used: eq works in 8-bit, and the 10->8->10 bit conversion around it was measured to
@@ -2699,6 +2713,9 @@ function buildHdrPixelFilters(){
   // genuinely 4:4:4 final file), otherwise back down to 4:2:0 — the
   // one case that needs an explicit downsample is intermediate-only
   // (better processing precision, unchanged final compatibility).
+  // Chroma 4:4:4 -> 4:2:0 with a sharper (lanczos) filter than swscale's default: keeps thin coloured details
+  // (e.g. the flashlight rim) stronger - measured rim colour 24.2 -> 29.2 (source 43.4).
+  if (!use444Output) filters.push('zscale=filter=lanczos');
   filters.push(`format=${use444Output ? 'yuv444p10le' : 'yuv420p10le'}`);
   return filters;
 }
@@ -3695,8 +3712,8 @@ async function buildJobFromCurrentSettings(chaptersPath){
     const use444Bitrate = use444OutputEncode;
     const referenceVbr = use444Bitrate ? 20250 : 11000;
     const referenceMax = use444Bitrate ? 54000 : 30000;
-    const vbrTargetKbps = String(Math.max(2000, Math.round(referenceVbr * bitrateScaleFactor))); // generous average target, real ceiling is max-bitrate below
-    const maxBitrateKbps = String(Math.max(6000, Math.round(referenceMax * bitrateScaleFactor)));
+    const vbrTargetKbps = String(Math.max(use444Bitrate ? 5500 : 3000, Math.round(referenceVbr * bitrateScaleFactor))); // generous average target, real ceiling is max-bitrate below
+    const maxBitrateKbps = String(Math.max(use444Bitrate ? 20000 : 12000, Math.round(referenceMax * bitrateScaleFactor)));
     const vbvBufsizeKbps = maxBitrateKbps;
     const qvbrArgs = ['--vbr', vbrTargetKbps, '--qp-min', `${crfNum-3}:${crfNum-3}:${crfNum-3}`, '--qp-max', `${crfNum+10}:${crfNum+10}:${crfNum+3}`];
     // --aq (adaptive quantization) - confirmed via direct user testing
