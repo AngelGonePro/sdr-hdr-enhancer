@@ -2669,9 +2669,12 @@ function buildHdrPixelFilters(){
   // v = val/1023; vs = sRGB-equivalent code; a = lift amount.
   // Noise-aware: the lift is applied to a lightly blurred copy of the luma (the "base"), and the fine
   // detail (original minus base) is added back at its ORIGINAL strength. Lifting the raw pixels also
-  // multiplied the source's dither/grain/compression noise ~3.4x (visible as dark speckle); this keeps
-  // the brightness lift and all real detail but does not amplify the noise. Measured on the Maze clip:
-  // dark-area noise 1.00 -> 0.75 (source 0.63) at identical lifted brightness.
+  // Detail preservation: fine detail (within +-24 codes of the blurred base) is added back with a gain that is
+  // 3.4x in the deep shadows and fades to 1x by ~30% signal; bigger edges always stay at 1x (no halos/overshoot).
+  // Lifting shadows raises brightness but not contrast, so without this thin dark detail (hair-thin wires, cables)
+  // looked 25-45% weaker than in the SDR original, and the HEVC encode loses another 10-17%. Measured end to end
+  // on the Maze clip after a real encode: relative contrast of that detail 0.87-1.08 of the SDR original (was
+  // 0.55-0.97), dark noise 1.09x source, and no brightness/highlight change on the other SDR clips tested.
   const toeOf = (yv) => {
     const v = `(${yv}/1023)`;
     const vs = `if(lte(${v},0.04045),pow(${v}/12.92,0.416667),(${v}+0.055)/1.055)`;
@@ -2685,7 +2688,7 @@ function buildHdrPixelFilters(){
   const hiExpr = Math.abs(slopeAbove - 1) < 0.001
     ? `${bpCode}+(1023-${bpCode})*pow(max(0,(x-${bpCode})/(1023-${bpCode})),1.25)`
     : `min(1023,${bpCode}+(x-${bpCode})*${slopeAbove.toFixed(4)})`;
-  filters.push(`format=yuv444p10le,split=2[tA][tB];[tB]gblur=sigma=2:planes=1[tBB];[tA][tBB]lut2=c0='if(gte(x,${bpCode}),${hiExpr},clip(${toeOf('y')}+(x-y),0,1023))'`);
+  filters.push(`format=yuv444p10le,split=2[tA][tB];[tB]gblur=sigma=2:planes=1[tBB];[tA][tBB]lut2=c0='if(gte(x,${bpCode}),${hiExpr},clip(${toeOf('y')}+clip(x-y,-24,24)*(1+2.4*clip((307-y)/150,0,1))+(x-y-clip(x-y,-24,24)),0,1023))'`);
   const vibA = parseFloat(document.getElementById('hdrVibStrength').value) || 0;
   // When vibrance is on, the uniform saturation (1.0 in auto mode, or the slider value) is folded into the vibrance
   // gain below and `eq` is NOT used: eq works in 8-bit, and the 10->8->10 bit conversion around it was measured to
@@ -2715,6 +2718,10 @@ function buildHdrPixelFilters(){
   // (better processing precision, unchanged final compatibility).
   // Chroma 4:4:4 -> 4:2:0 with a sharper (lanczos) filter than swscale's default: keeps thin coloured details
   // (e.g. the flashlight rim) stronger - measured rim colour 24.2 -> 29.2 (source 43.4).
+  // Chroma-only sharpening just before the 4:2:0 downsample (luma untouched): thin items that differ from their
+  // background mostly by COLOUR (hair-thin wires on a metal wall) lose that colour contrast in the half-resolution
+  // chroma planes. Measured on the Maze clip (red-difference contrast of such wires vs the SDR original): 0.63 -> 0.70.
+  if (!use444Output) filters.push('format=yuv444p10le', 'unsharp=luma_msize_x=3:luma_msize_y=3:luma_amount=0:chroma_msize_x=5:chroma_msize_y=5:chroma_amount=5');
   if (!use444Output) filters.push('zscale=filter=lanczos');
   filters.push(`format=${use444Output ? 'yuv444p10le' : 'yuv420p10le'}`);
   return filters;
