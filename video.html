@@ -346,6 +346,7 @@
   <div class="slbl">Smoothing / Sharpening</div>
   <div class="card">
     <div class="ti" id="tog-denoise" onclick="toggle(this)"><div class="sw"></div><div class="ti-txt">Minimal smoothing (hqdn3d) — OFF by default. Turned off after a real report of visible softness on a heavily-grained film (Blade Runner 2049) resembling streaming-service processing — temporal denoising specifically is well-documented to smooth frame-to-frame-uncorrelated film grain, which is exactly the deliberate texture a film like this relies on. Worth enabling only for genuinely noisy/low-quality sources where grain isn't an intentional part of the look.</div></div>
+    <div class="ti on" id="tog-mc-denoise" onclick="toggle(this)"><div class="sw"></div><div class="ti-txt">Motion-compensated grain removal (av-denoise) — ON by default, SDR→HDR conversions only. Removes film grain/noise by following each pixel through neighbouring frames (motion-compensated NLMeans, run on your GPU through CUDA/Vulkan) instead of blurring each frame on its own, so fine detail (thin cables, hair, branches, shadow texture) stays and nothing ghosts behind moving objects. Needs VapourSynth + <code>pip install vsavd</code> (same Python as your vspipe) and the ffms2 plugin; if either is missing the app says so in the log and falls back to the built-in single-frame filter automatically. Uses <code>C:\\Python314\\Scripts\\vspipe.exe</code> unless you changed the vspipe path field in the interpolation section.</div></div>
     <div class="ti on" id="tog-sharpen" onclick="toggle(this)"><div class="sw"></div><div class="ti-txt">Automatic sharpening (unsharp) — ON by default, strength chosen per video. When the queue starts each SDR job, the app measures how sharp the picture's strong edges actually are (after crop / downscale, the way it will be encoded) and how grainy it is, then sets the amount itself: already-sharp sources get <strong>no filter at all</strong>, clearly soft ones get up to a capped amount (0.45, where halos stay under ~0.15% of pixels in testing), reduced further for grainy footage so grain isn't amplified. Skipped automatically for 4K sources downscaled to 1080p (the downscale already keeps real detail), for HDR sources, and for pictures outside 1280-2600 px wide. The measured values and the chosen amount are written to the log as [AUTO SHARPEN]. Turn OFF to disable it completely.</div></div>
     <div class="path-hint" style="margin-top:8px">
       If used together, smoothing runs first, then sharpening — so sharpening enhances real detail
@@ -724,6 +725,7 @@
 // in the app's own UI is never overwritten (only used as each field's
 // STARTING value, exactly like the hardcoded HTML values before this).
 // ══════════════════════════════════════════════════════════════════
+let mcDenoiseOn = false; // set per job: true when the av-denoise stage runs ahead of the ffmpeg chain
 const DEFAULT_PATHS = {
   ffmpeg: 'C:\\Users\\Angel\\Documents\\ffmpeg-8.0.1-full_build\\bin\\ffmpeg.exe',
   nvenc: 'C:\\Users\\Angel\\Documents\\Aviutl_NVEnc_9.29\\exe_files\\NVEncC\\x64\\NVEncC64.exe',
@@ -2688,7 +2690,16 @@ function buildHdrPixelFilters(){
   const hiExpr = Math.abs(slopeAbove - 1) < 0.001
     ? `${bpCode}+(1023-${bpCode})*pow(max(0,(x-${bpCode})/(1023-${bpCode})),1.25)`
     : `min(1023,${bpCode}+(x-${bpCode})*${slopeAbove.toFixed(4)})`;
-  filters.push(`format=yuv444p10le,split=2[tA][tB];[tB]gblur=sigma=2:planes=1[tBB];[tA][tBB]lut2=c0='if(gte(x,${bpCode}),${hiExpr},clip(${toeOf('y')}+clip(x-y,-24,24)*(1+2.4*clip((307-y)/150,0,1))+(x-y-clip(x-y,-24,24)),0,1023))'`);
+  // Denoise before the shadow lift/detail boost. The lift makes dark areas ~1.5-3x brighter, so film grain gets that much
+  // more visible too; on grainy sources (VC-1/old film) the output ended up with 16-29% MORE grain than the source.
+  // Grain removal, SPATIAL ONLY - no frame averaging of any kind. A frame-averaging denoise (hqdn3d temporal, atadenoise, motion-masked averaging) blends neighbouring frames into
+  // dark, low-contrast moving things (Maze Runner: the dark head/shoulder of the moving man showed a ghost; measured 12-17% of other frames mixed in) and the shadow lift then makes it visible.
+  // Bilateral smoothing, but only the small part of its change is applied (|change| < 8 fully, fading out by 40 codes) so real structure like cables and edges is left alone.
+  // Measured: Maze cables 0.75 / dark jacket 0.52 of the no-denoise detail kept (plain bilateral 0.70 / 0.48), HP grain ~1.1x / 0.9x source (no denoise 1.8x / 2.4x).
+  // When the motion-compensated denoise stage (av-denoise, run before this chain) is active, the grain is already gone and this single-frame filter is skipped.
+  if (!mcDenoiseOn) filters.push(`split=2[o][o2];[o2]bilateral=sigmaS=3:sigmaR=0.12:planes=1[dn];[o][dn]lut2=c0='x+(y-x)*clip((40-abs(y-x))/(40-8),0,1)'`);
+  // Fine-detail gain now also applies in mid-tones and highlights (x2.0, +/-36-code limit; 1.0 was still too faint on screen, 3.0 showed halos along edges): thin dark wires over a bright panel (Maze control box) lost contrast on screen after the HDR tone curve, because the highlight branch had no detail gain at all and the curve's slope there is below 1.
+  filters.push(`format=yuv444p10le,split=2[tA][tB];[tB]gblur=sigma=2:planes=1[tBB];[tA][tBB]lut2=c0='if(gte(x,${bpCode}),clip(${hiExpr}+clip(x-y,-36,36)*2.0,0,1023),clip(${toeOf('y')}+clip(x-y,-24,24)*(1+2.4*clip((307-y)/150,0,1))+clip(x-y,-36,36)*2.0*clip((y-307)/250,0,1)+(x-y-clip(x-y,-24,24)),0,1023))'`);
   const vibA = parseFloat(document.getElementById('hdrVibStrength').value) || 0;
   // When vibrance is on, the uniform saturation (1.0 in auto mode, or the slider value) is folded into the vibrance
   // gain below and `eq` is NOT used: eq works in 8-bit, and the 10->8->10 bit conversion around it was measured to
@@ -3493,10 +3504,46 @@ async function buildJobFromCurrentSettings(chaptersPath){
       : encodeGpuVendor === 'amd' ? ['-hwaccel', 'd3d11va', '-hwaccel_output_format', 'd3d11']
       : [];
 
+    // ---- Motion-compensated grain removal (av-denoise through VapourSynth) ----
+    // Decided BEFORE the filter chain is built, because when it is active the single-frame bilateral
+    // inside buildHdrPixelFilters is skipped and ffmpeg reads the already-denoised y4m from vspipe.
+    mcDenoiseOn = false;
+    let mcVspipePath = '';
+    let mcCrop = null; // crop done inside the vpy script (before the denoise) so black bars are never denoised
+    const mcWanted = isOn('tog-mc-denoise') && isOn('tog-hdr') && !isSelectedVideoTrackHDR() && !useLibplacebo
+      && !isOn('tog-motion-interp-gpu') && !isOn('tog-motion-interp-gpu-trt') && !isOn('tog-motion-interp-mvtools')
+      && !isOn('tog-motion-interp-gpu-vk') && !isOn('tog-motion-interp-cpu');
+    if (mcWanted){
+      mcVspipePath = (document.getElementById('vspipePath').value.trim()) || DEFAULT_PATHS.vspipe314;
+      try {
+        const testPath = tmpDir + '_tmp_mccheck_' + jobId + '.vpy';
+        const testScript = `import vapoursynth as vs
+from vapoursynth import core
+import vsavd as avd
+assert hasattr(core, 'ffms2'), 'the ffms2 VapourSynth plugin is not installed (vsrepo install ffms2)'
+c = core.std.BlankClip(width=256, height=144, format=vs.YUV420P10, length=4, fpsnum=24, fpsden=1)
+d = avd.NlmHQ(c, preset='veryfast', channel_mode='luma', motion_compensation=True, accelerators=['vulkan'])
+d.get_frame(1)
+core.std.BlankClip(width=16, height=16, format=vs.YUV420P10, length=1).set_output()
+`;
+        const w = await window.electronAPI.writeTextFile({ path: testPath, content: testScript });
+        if (!w.written) throw new Error('could not write the check script: ' + w.error);
+        const r = await window.electronAPI.runToolSimple({ toolPath: mcVspipePath, args: ['--info', testPath, '-'] });
+        if (r.code === 0){ mcDenoiseOn = true;
+          if (isOn('tog-crop')){
+            const cw = parseInt(document.getElementById('cropW').value), ch = parseInt(document.getElementById('cropH').value),
+                  cx = parseInt(document.getElementById('cropX').value), cy = parseInt(document.getElementById('cropY').value); // blank X/Y means 'centred' - left to the ffmpeg crop
+            if (cw > 0 && ch > 0 && !isNaN(cx) && !isNaN(cy) && cw % 2 === 0 && ch % 2 === 0 && cx % 2 === 0 && cy % 2 === 0) mcCrop = { w: cw, h: ch, x: cx, y: cy };
+          } console.log('[MC denoise preflight] OK - av-denoise will run before the HDR chain (vspipe: ' + mcVspipePath + ')'); }
+        else console.log('[MC denoise preflight] NOT available (exit ' + r.code + ') - falling back to the built-in single-frame denoise. Reason: ' + String((r.stderr || r.stdout || '')).trim().split('\n').slice(-6).join(' | ') + '  -> to enable: install VapourSynth, run "pip install vsavd" with the Python that owns this vspipe, and "vsrepo install ffms2"');
+        await window.electronAPI.deleteTempFile({ path: testPath }).catch(()=>{});
+      } catch (e){ try { await window.electronAPI.deleteTempFile({ path: tmpDir + '_tmp_mccheck_' + jobId + '.vpy' }); } catch(_){} console.log('[MC denoise preflight] check failed (' + (e && e.message) + ') - falling back to the built-in single-frame denoise'); }
+    }
+
     // Non-color filters (crop/fps/denoise/sharpen) built the same way
     // regardless of which color path is used below.
     const preColorFilters = [];
-    if (isOn('tog-crop')){
+    if (isOn('tog-crop') && !mcCrop){
       const w = document.getElementById('cropW').value, h = document.getElementById('cropH').value,
             x = document.getElementById('cropX').value, y = document.getElementById('cropY').value;
       if (w && h) preColorFilters.push(buildCropFilter(w, h, x, y));
@@ -3564,7 +3611,7 @@ async function buildJobFromCurrentSettings(chaptersPath){
       // error ("incorrect codec parameters"), not just a cosmetic warning.
       y4mArgs.push('-pix_fmt', 'yuv420p10le');
     } else {
-      const useGpuInterp = isOn('tog-motion-interp-gpu') || isOn('tog-motion-interp-gpu-trt') || isOn('tog-motion-interp-mvtools');
+      const useGpuInterp = isOn('tog-motion-interp-gpu') || isOn('tog-motion-interp-gpu-trt') || isOn('tog-motion-interp-mvtools') || mcDenoiseOn;
       if (useGpuInterp){
         // Reading from vspipe's Y4M output via stdin instead of the
         // original file - RIFE already decoded and interpolated the
@@ -3583,7 +3630,8 @@ async function buildJobFromCurrentSettings(chaptersPath){
       const colorFilters = buildHdrPixelFilters();
       const fullChain = [...preColorFilters, ...colorFilters];
       const hwdownloadPrefix = `hwdownload,format=${encodeNativeFormat},`;
-      const effectiveChain = encodeGpuVendor
+      // Frames arriving from vspipe through the pipe are ordinary CPU frames - no hwdownload there.
+      const effectiveChain = (encodeGpuVendor && !useGpuInterp)
         ? (fullChain.length ? hwdownloadPrefix + fullChain.join(',') : `hwdownload,format=${encodeNativeFormat}`)
         : fullChain.join(',');
       if (effectiveChain) y4mArgs.push('-vf', effectiveChain);
@@ -3995,6 +4043,46 @@ clip.set_output()
         name: `RIFE interpolation (GPU${useTrt ? ', TensorRT' : ''}) → ${toolConfig.label} HDR10 encode`,
         triplePiped: true,
         vspipePath, vspipeArgs: ['-c', 'y4m', '--progress', vpyScriptPath, '-'],
+        vpyScriptPath, vpyScriptContent, totalOutputFrames,
+        ffmpegArgs: y4mArgs, toolPath, toolArgs,
+        totalDuration: videoDuration, cleanup: [vpyScriptPath, ffindexPath]
+      };
+    } else if (mcDenoiseOn){
+      // vspipe reads + denoises the source (ffms2 -> av-denoise NLMeans-HQ, motion compensated, luma only, GPU), writes y4m;
+      // ffmpeg then does crop / sharpen / HDR chain; NVEncC encodes. Same three-process pipe the interpolation options use.
+      const safeSourcePath = filePath.replace(/'/g, "\\'");
+      const srcFps = detectedSourceFps || 24;
+      const fracOf = (f) => {
+        const cands = [[24000,1001],[30000,1001],[60000,1001],[120000,1001],[24,1],[25,1],[30,1],[48,1],[50,1],[60,1],[120,1]];
+        for (const [n,d] of cands) if (Math.abs(n/d - f) < 0.002) return [n,d];
+        return [Math.round(f*1000), 1000];
+      };
+      const [srcN, srcD] = fracOf(srcFps);
+      const conformPipeFps = (conformTargetFps && !isOn('tog-conform-drop-frames')) ? fracOf(conformTargetFps) : null;
+      const trackSel = document.querySelector('input[name="videoTrackSel"]:checked');
+      const trackArg = trackSel && /^\d+$/.test(String(trackSel.value)) ? `, track=${trackSel.value}` : '';
+      const mcSigma = 2.0; // measured: 1.0 left visible grain; 1.6 clean; 2.2-3.0 cut HP file size by 18-29% vs 1.6 and still kept every Maze cable (x265 proxy)
+      const vpyScriptContent = `import vapoursynth as vs
+from vapoursynth import core
+import vsavd as avd
+clip = core.ffms2.Source(r'${safeSourcePath}'${trackArg})
+# av-denoise takes 8/10/12-bit; lift 8-bit sources to 10-bit first (exact shift) so the denoised result is not re-rounded to 8-bit
+if clip.format.color_family != vs.YUV or clip.format.bits_per_sample > 12 or clip.format.bits_per_sample < 10:
+    sw, sh = (clip.format.subsampling_w, clip.format.subsampling_h) if clip.format.color_family == vs.YUV else (1, 1)
+    clip = core.resize.Point(clip, format=core.query_video_format(vs.YUV, vs.INTEGER, 10, sw, sh))
+${mcCrop ? `clip = core.std.CropAbs(clip, width=${mcCrop.w}, height=${mcCrop.h}, left=${mcCrop.x}, top=${mcCrop.y})\n` : ''}if clip.fps_num == 0:
+    clip = core.std.AssumeFPS(clip, fpsnum=${srcN}, fpsden=${srcD})
+${conformPipeFps ? `clip = core.std.AssumeFPS(clip, fpsnum=${conformPipeFps[0]}, fpsden=${conformPipeFps[1]})\n` : ''}clip = avd.NlmHQ(clip, preset='fast', channel_mode='luma', motion_compensation=True, sigma_scale=${mcSigma}, accelerators=['vulkan'])
+clip.set_output()
+`;
+      const vpyScriptPath = tmpDir + '_tmp_mcdenoise_' + jobId + '.vpy';
+      const ffindexPath = filePath + '.ffindex';
+      const outFpsMc = conformTargetFps && !isOn('tog-conform-drop-frames') ? conformTargetFps : srcFps;
+      const totalOutputFrames = Math.round(videoDuration * parseFloat(outFpsMc));
+      pipedStage = {
+        name: `Motion-compensated denoise (av-denoise) → ${toolConfig.label} HDR10 encode`,
+        triplePiped: true,
+        vspipePath: mcVspipePath, vspipeArgs: ['-c', 'y4m', '--progress', vpyScriptPath, '-'],
         vpyScriptPath, vpyScriptContent, totalOutputFrames,
         ffmpegArgs: y4mArgs, toolPath, toolArgs,
         totalDuration: videoDuration, cleanup: [vpyScriptPath, ffindexPath]
