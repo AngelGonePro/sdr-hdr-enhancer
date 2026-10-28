@@ -1970,6 +1970,62 @@ ipcMain.handle('write-text-file', async (event, payload) => {
   });
 });
 
+// Re-times an extracted HDR10+ metadata JSON (hdr10plus_tool output) to the OUTPUT frame rate.
+// Real bug: when the encode changes the frame rate (frame-drop conform, interpolation), the JSON still has one entry per SOURCE
+// frame, so NVEncC / dovi_tool applied entry N to output frame N - the brightness data drifted out of step with the picture and was
+// cut off part-way ("mismatched lengths. video 21210, RPU 39080"). Each output frame at time k/fps now takes the entry of the
+// source frame nearest in time (the same choice ffmpeg's fps filter makes), using the source's real frame timestamps (also right for VFR).
+ipcMain.handle('resample-hdr10plus-json', async (event, payload) => {
+  const { execFile } = require('child_process');
+  try {
+    const { jsonPath, ffmpegPath: ffm, sourcePath, streamSelector, targetFps } = payload;
+    const fps = Number(targetFps);
+    if (!(fps > 0)) return { ok: false, error: 'invalid target frame rate' };
+    const ffprobeBin = ffm.replace(/ffmpeg(\.exe)?$/i, (m, ext) => 'ffprobe' + (ext || ''));
+    const out = await new Promise((resolve, reject) => {
+      execFile(ffprobeBin, ['-v', 'error', '-select_streams', streamSelector || 'v:0', '-show_entries', 'packet=pts_time', '-of', 'csv=p=0', sourcePath],
+        { maxBuffer: 512 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => err ? reject(new Error(stderr || err.message)) : resolve(stdout));
+    });
+    const pts = out.split(/\r?\n/).map(l => parseFloat(l.split(',')[0])).filter(Number.isFinite).sort((a, b) => a - b);
+    const data = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+    const src = data.SceneInfo;
+    if (!Array.isArray(src) || src.length === 0) return { ok: false, error: 'no frames in the HDR10+ JSON' };
+    const N = src.length;
+    if (Math.abs(pts.length - N) > Math.max(2, N * 0.01)) return { ok: false, error: `frame count mismatch (video has ${pts.length} frames, HDR10+ data has ${N})` };
+    const n = Math.min(N, pts.length);
+    const deltas = []; for (let i = 1; i < n; i++) deltas.push(pts[i] - pts[i - 1]);
+    deltas.sort((a, b) => a - b);
+    const d = deltas.length ? deltas[Math.floor(deltas.length / 2)] : 1 / fps;
+    const first = pts[0];
+    const dur = pts[n - 1] + d - first;
+    const M = Math.max(1, Math.round(dur * fps));
+    const outInfo = [];
+    let j = 0;
+    for (let k = 0; k < M; k++) {
+      const t = first + k / fps;
+      while (j + 1 < n && Math.abs(pts[j + 1] - t) <= Math.abs(pts[j] - t)) j++;
+      outInfo.push(JSON.parse(JSON.stringify(src[Math.min(j, N - 1)])));
+    }
+    // renumber scenes/frame indices for the new sequence (a new scene starts wherever the source scene id changes)
+    const firstIdx = [], counts = [];
+    let prevId = null, sceneNo = -1, inScene = 0;
+    outInfo.forEach((e, k) => {
+      const origId = e.SceneId;
+      if (k === 0 || origId !== prevId) { sceneNo++; inScene = 0; firstIdx.push(k); counts.push(0); }
+      e.SceneId = sceneNo; e.SceneFrameIndex = inScene++; e.SequenceFrameIndex = k; counts[sceneNo]++;
+      prevId = origId;
+    });
+    data.SceneInfo = outInfo;
+    data.SceneInfoSummary = { SceneFirstFrameIndex: firstIdx, SceneFrameNumbers: counts };
+    const tmp = jsonPath + '.resampled';
+    fs.writeFileSync(tmp, JSON.stringify(data), 'utf8');
+    fs.renameSync(tmp, jsonPath);
+    return { ok: true, inFrames: N, outFrames: M };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
 // Pipes ffmpeg's video output DIRECTLY into an external encoder's stdin,
 // with ZERO intermediate disk file — this replaces an earlier design that
 // wrote an uncompressed Y4M temp file, which was a real, serious bug:

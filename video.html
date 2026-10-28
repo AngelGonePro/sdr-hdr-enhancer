@@ -310,7 +310,7 @@
     </div>
 
   <div class="slbl">Custom Dolby Vision Metadata (SDR-to-HDR conversions, or already-HDR sources with no existing Dolby Vision/HDR10+ — not for sources that already have either)</div>
-    <div class="ti" id="tog-dv-dynamic" onclick="toggleMirrored(this, 'tog-dv-dynamic-top'); document.getElementById('mkvdoviPathRow').style.display = isOn('tog-dv-dynamic') ? 'block' : 'none'; document.getElementById('mediaInfoPathRow').style.display = isOn('tog-dv-dynamic') ? 'block' : 'none'; document.getElementById('mediaInfoSetupHint').style.display = isOn('tog-dv-dynamic') ? 'block' : 'none';" style="margin-top:10px"><div class="sw"></div><div class="ti-txt"><strong>To use this: download mkvdovi (link and path field below appear once this is on), set its path, then just convert normally - nothing else changes.</strong> Adds real, dynamic (scene-by-scene) Dolby Vision Profile 8.1 metadata on top of this app's existing, accurate HDR10 output — OFF by default. Result is still exactly ONE file: your same static-HDR10 configuration stays in it, unchanged, as the base layer and automatic fallback for any non-Dolby-Vision player or display - this only adds the extra dynamic layer on top, it never replaces or re-processes the video itself. Applies to genuine SDR-to-HDR conversions, and to already-HDR sources that don't already have their own Dolby Vision or HDR10+ (a source that already has either keeps using this app's own existing Dolby Vision/HDR10+ Preservation toggles above for that real, existing metadata, untouched - this only ever adds NEW dynamic metadata where none already exists).<br><br><strong>What this adds, and why it's different from the static HDR10 metadata this app already produces:</strong> everything else on this page for SDR conversion produces accurate, but STATIC, HDR10 metadata - one brightness number for the entire file. This uses a real, free, open-source, third-party project (<a href="https://github.com/tinof/hdr-analyze" target="_blank">hdr-analyze</a>, MIT-licensed, not affiliated with Dolby) to analyze this app's own finished HDR10 output frame-by-frame and generate genuine Dolby Vision Profile 8.1 (CM v4.0) dynamic metadata on top of it - real per-scene brightness guidance, not one static number.<br><br><strong>The existing HDR10 output is the automatic fallback by the format's own design, not something built separately:</strong> Profile 8.1 always carries a fully valid, complete HDR10 base layer underneath its dynamic metadata - any player or display without Dolby Vision support simply ignores the extra metadata and plays the same accurate HDR10 stream this app already produces. Nothing about the existing HDR10 configuration changes - this adds the dynamic metadata directly on top, replacing the file in place, not creating a second copy.<br><br><strong>Real, important limitation to know before turning this on - Dolby Vision is not supported everywhere:</strong> confirmed directly via YouTube's own official HDR upload documentation that YouTube does not support Dolby Vision uploads at all (HDR10 and optional HDR10+ dynamic metadata are the only types listed). If YouTube upload is part of your workflow, keep using the plain HDR10 output for that specifically - this feature is for local playback and devices/apps that do support real Dolby Vision.<br><br><strong>Honest, direct disclosure about this specific integration, please read:</strong> every other external-tool integration on this page (dovi_tool, hdr10plus_tool, mkvmerge, PgsToSrt) was built and verified by directly running that exact tool during development. <code>mkvdovi</code> is a Windows-only prebuilt binary that could not be run or tested in the environment that built this feature - the integration below follows the tool's own documented command-line behavior exactly (including its documented default of deleting the source file after a successful conversion, which this app always overrides by passing <code>--keep-source</code>, and its own <code>--verify</code> self-check), but has not been confirmed end-to-end against a real run the way everything else here has. Use the "Keep intermediate files" debug toggle above and check the console output from this step directly the first time you use it.<br><br><strong>Could the same over/under-exposure-style issues already fixed for plain HDR10 metadata recur here, inside the dynamic layer specifically?</strong> A fair, specific question - honest answer after real testing: potentially, but a real attempt at fixing this made things WORSE, so it's been removed. <code>hdr-analyze</code>'s own documentation names a real limitation - its default peak-brightness estimator is sensitive to film grain. A "grain-robust" alternative was tried as a separate pre-analysis step, but a real test on real content showed it reporting a MaxCLL of 1205 nits for a scene this app's own, separately-verified accurate measurement puts at 223 nits - a 5.4x overshoot, the opposite of the intended fix. Rather than risk shipping something confirmed to make real content worse, that pre-step has been removed entirely - this now uses mkvdovi's own, native, default analysis, which was already directly confirmed correct via a real successful run with valid DV Profile 8 output. The underlying grain-sensitivity limitation itself is real and unaddressed - stated honestly, not silently worked around with something unverified.<br><br><strong>Mechanism:</strong> after this app's normal SDR-to-HDR job finishes and produces its usual, accurate static-HDR10 .mkv, this runs <code>mkvdovi &lt;output.mkv&gt; --keep-source</code> as one additional, final step. <code>--keep-source</code> is used only as a safety net during that run itself (this tool can't be tested directly here, so both files existing momentarily protects against a partial/corrupt conversion) - once the new file is confirmed present and a sane size, the original static-HDR10 file is removed and the Dolby Vision result takes its exact place, so you end up with exactly one final file, not two.</div></div>
+    <div class="ti" id="tog-dv-dynamic" onclick="toggleMirrored(this, 'tog-dv-dynamic-top'); document.getElementById('mkvdoviPathRow').style.display = isOn('tog-dv-dynamic') ? 'block' : 'none'; document.getElementById('mediaInfoPathRow').style.display = isOn('tog-dv-dynamic') ? 'block' : 'none'; document.getElementById('mediaInfoSetupHint').style.display = isOn('tog-dv-dynamic') ? 'block' : 'none';" style="margin-top:10px"><div class="sw"></div><div class="ti-txt"><strong>To use this: download mkvdovi (link and path field below appear once this is on), set its path, then just convert normally - nothing else changes.</strong> Adds real, dynamic (scene-by-scene) Dolby Vision Profile 8.1 metadata on top of this app's existing, accurate HDR10 output — OFF by default. <strong>HDR10+ sources:</strong> if the source carries HDR10+ and "Preserve HDR10+ dynamic metadata" is also on (needs hdr10plus_tool and dovi_tool paths set), Dolby Vision 8.1 is generated FROM that HDR10+ metadata with dovi_tool (same per-frame peak/average brightness) and added after the encode, so the file carries both HDR10+ and Dolby Vision. If that step fails the file keeps HDR10+ only. Result is still exactly ONE file: your same static-HDR10 configuration stays in it, unchanged, as the base layer and automatic fallback for any non-Dolby-Vision player or display - this only adds the extra dynamic layer on top, it never replaces or re-processes the video itself. Applies to genuine SDR-to-HDR conversions, and to already-HDR sources that don't already have their own Dolby Vision or HDR10+ (a source that already has either keeps using this app's own existing Dolby Vision/HDR10+ Preservation toggles above for that real, existing metadata, untouched - this only ever adds NEW dynamic metadata where none already exists).<br><br><strong>What this adds, and why it's different from the static HDR10 metadata this app already produces:</strong> everything else on this page for SDR conversion produces accurate, but STATIC, HDR10 metadata - one brightness number for the entire file. This uses a real, free, open-source, third-party project (<a href="https://github.com/tinof/hdr-analyze" target="_blank">hdr-analyze</a>, MIT-licensed, not affiliated with Dolby) to analyze this app's own finished HDR10 output frame-by-frame and generate genuine Dolby Vision Profile 8.1 (CM v4.0) dynamic metadata on top of it - real per-scene brightness guidance, not one static number.<br><br><strong>The existing HDR10 output is the automatic fallback by the format's own design, not something built separately:</strong> Profile 8.1 always carries a fully valid, complete HDR10 base layer underneath its dynamic metadata - any player or display without Dolby Vision support simply ignores the extra metadata and plays the same accurate HDR10 stream this app already produces. Nothing about the existing HDR10 configuration changes - this adds the dynamic metadata directly on top, replacing the file in place, not creating a second copy.<br><br><strong>Real, important limitation to know before turning this on - Dolby Vision is not supported everywhere:</strong> confirmed directly via YouTube's own official HDR upload documentation that YouTube does not support Dolby Vision uploads at all (HDR10 and optional HDR10+ dynamic metadata are the only types listed). If YouTube upload is part of your workflow, keep using the plain HDR10 output for that specifically - this feature is for local playback and devices/apps that do support real Dolby Vision.<br><br><strong>Honest, direct disclosure about this specific integration, please read:</strong> every other external-tool integration on this page (dovi_tool, hdr10plus_tool, mkvmerge, PgsToSrt) was built and verified by directly running that exact tool during development. <code>mkvdovi</code> is a Windows-only prebuilt binary that could not be run or tested in the environment that built this feature - the integration below follows the tool's own documented command-line behavior exactly (including its documented default of deleting the source file after a successful conversion, which this app always overrides by passing <code>--keep-source</code>, and its own <code>--verify</code> self-check), but has not been confirmed end-to-end against a real run the way everything else here has. Use the "Keep intermediate files" debug toggle above and check the console output from this step directly the first time you use it.<br><br><strong>Could the same over/under-exposure-style issues already fixed for plain HDR10 metadata recur here, inside the dynamic layer specifically?</strong> A fair, specific question - honest answer after real testing: potentially, but a real attempt at fixing this made things WORSE, so it's been removed. <code>hdr-analyze</code>'s own documentation names a real limitation - its default peak-brightness estimator is sensitive to film grain. A "grain-robust" alternative was tried as a separate pre-analysis step, but a real test on real content showed it reporting a MaxCLL of 1205 nits for a scene this app's own, separately-verified accurate measurement puts at 223 nits - a 5.4x overshoot, the opposite of the intended fix. Rather than risk shipping something confirmed to make real content worse, that pre-step has been removed entirely - this now uses mkvdovi's own, native, default analysis, which was already directly confirmed correct via a real successful run with valid DV Profile 8 output. The underlying grain-sensitivity limitation itself is real and unaddressed - stated honestly, not silently worked around with something unverified.<br><br><strong>Mechanism:</strong> after this app's normal SDR-to-HDR job finishes and produces its usual, accurate static-HDR10 .mkv, this runs <code>mkvdovi &lt;output.mkv&gt; --keep-source</code> as one additional, final step. <code>--keep-source</code> is used only as a safety net during that run itself (this tool can't be tested directly here, so both files existing momentarily protects against a partial/corrupt conversion) - once the new file is confirmed present and a sane size, the original static-HDR10 file is removed and the Dolby Vision result takes its exact place, so you end up with exactly one final file, not two.</div></div>
     <div class="row" id="mkvdoviPathRow" style="margin-top:10px;display:none">
       <div class="field"><label>mkvdovi Path</label>
         <input class="path-inp" type="text" id="mkvdoviPath" placeholder="C:\hdr-analyze\mkvdovi.exe" oninput="mirrorInputValue(this, 'mkvdoviPathTop')">
@@ -3422,6 +3422,7 @@ async function buildJobFromCurrentSettings(chaptersPath){
   // specific caveats (real NVEncC bug reports, x265 compile-flag
   // requirement) added on request despite that.
   let hdr10PlusMetaPath = null;
+  let dvFromH10p = null; // set when Dolby Vision is generated from the source's HDR10+ metadata (see below)
   if (isOn('tog-hdr10plus') && isOn('tog-hdr') && dolbyVisionCapableEncoders.includes(encoder)
       && selectedTrackHdrMetadata && selectedTrackHdrMetadata.hasHdr10Plus){
     const hdr10plusToolPath = document.getElementById('hdr10plusToolPath').value.trim();
@@ -3436,6 +3437,53 @@ async function buildJobFromCurrentSettings(chaptersPath){
       optional: true, verifyPath: hdr10PlusMetaPath,
       stripFlagsIfMissing: [['--dhdr10-info', hdr10PlusMetaPath], [`dhdr10-info=${hdr10PlusMetaPath}`, 'EXACT']]
     });
+
+    // The metadata has one entry per SOURCE frame. If the encode changes the frame rate (frame-drop conform / interpolation), re-time it to the
+    // output frame rate so frame N of the picture gets frame N's brightness data (see resample-hdr10plus-json in main.js).
+    let h10pOutFps = null;
+    if (isOn('tog-fps-conform') && isOn('tog-conform-drop-frames') && detectedSourceFps){
+      const t = Number(getConformTargetFps(detectedSourceFps));
+      if (Math.abs(t - detectedSourceFps) > 0.0001) h10pOutFps = t;
+    }
+    if (isOn('tog-motion-interp-gpu') || isOn('tog-motion-interp-gpu-trt') || isOn('tog-motion-interp-mvtools') || isOn('tog-motion-interp-cpu')){
+      h10pOutFps = Number(getMotionInterpTargetFps());
+    }
+    if (h10pOutFps){
+      const m = /^0:(\d+)$/.exec(String(videoSourceMapArg));
+      preStages.push({
+        name: 'Match HDR10+ metadata to the output frame rate',
+        resampleHdr10Plus: { jsonPath: hdr10PlusMetaPath, ffmpegPath: document.getElementById('ffmpegPath').value.trim(), sourcePath: videoSourcePath,
+                             streamSelector: m ? m[1] : 'v:0', targetFps: h10pOutFps },
+        totalDuration: 1, cleanup: null, verifyPath: hdr10PlusMetaPath
+      });
+    }
+
+    // Dolby Vision ON TOP of HDR10+ with the SAME brightness: dovi_tool builds a Profile 8.1 RPU straight from the HDR10+ JSON
+    // (per-frame peak/average brightness -> Dolby Vision Level 1), then it is injected into the encoded stream after the encode.
+    // Verified on a real HDR10+ clip: RPU peak/average match the HDR10+ histogram peak/average; after dovi_tool inject-rpu and the
+    // timing-fix remux the stream still carries the HDR10+ SEI (identical values) AND the Dolby Vision RPU for every frame.
+    if ((isOn('tog-dv-dynamic') || isOn('tog-dolby-vision')) && !selectedTrackHdrMetadata.hasDolbyVision && externalToolEncoders.includes(encoder)){
+      const doviToolPathH = document.getElementById('dovToolPath').value.trim() || DEFAULT_PATHS.doviTool;
+      const hvH = getHdrMetadataValues();
+      dvFromH10p = {
+        cfgPath: tmpDirH10p + '_tmp_dvcfg_' + jobId + '.json',
+        rpuPath: tmpDirH10p + '_tmp_dvfromh10p_' + jobId + '.bin',
+        outPath: tmpDirH10p + '_tmp_encdv_' + jobId + '.hevc',
+        toolPath: doviToolPathH
+      };
+      const cfgObj = { cm_version: 'V40', length: 10, level6: {
+        max_display_mastering_luminance: Math.min(65535, Math.round(hvH.maxLuminance > 65535 ? hvH.maxLuminance/10000 : hvH.maxLuminance)), min_display_mastering_luminance: Math.min(65535, Math.round(hvH.minLuminance)),
+        max_content_light_level: Math.round(hvH.maxCLL), max_frame_average_light_level: Math.round(hvH.maxFALL) } };
+      preStages.push({
+        name: 'Generate Dolby Vision from HDR10+ metadata',
+        isSpawnTool: true,
+        toolPath: doviToolPathH,
+        toolArgs: ['generate', '-j', dvFromH10p.cfgPath, '--hdr10plus-json', hdr10PlusMetaPath, '-o', dvFromH10p.rpuPath],
+        writeFiles: [{ path: dvFromH10p.cfgPath, content: JSON.stringify(cfgObj) }],
+        totalDuration: 1, cleanup: [dvFromH10p.cfgPath, dvFromH10p.rpuPath, dvFromH10p.outPath],
+        optional: true, verifyPath: dvFromH10p.rpuPath, requireFile: hdr10PlusMetaPath
+      });
+    }
   }
 
   if (externalToolEncoders.includes(encoder)){
@@ -4249,9 +4297,21 @@ clip.set_output()
       '-c:v', 'copy',
       '-video_track_timescale', String(Math.round(effectiveFps * 1000)),
       '-y', tmpRemuxedPath];
+    if (dvFromH10p){
+      preStages.push({
+        name: 'Add Dolby Vision (from HDR10+) to the encoded stream',
+        isSpawnTool: true,
+        toolPath: dvFromH10p.toolPath,
+        toolArgs: ['inject-rpu', '-i', tmpEncOutPath, '--rpu-in', dvFromH10p.rpuPath, '-o', dvFromH10p.outPath],
+        totalDuration: 1, cleanup: [dvFromH10p.outPath],
+        optional: true, verifyPath: dvFromH10p.outPath, requireFile: dvFromH10p.rpuPath
+      });
+    }
     preStages.push({
       name: 'Fix HDR10 stream timing',
-      args: remuxArgs, totalDuration: videoDuration, cleanup: tmpEncOutPath, tool: 'ffmpeg', cleanupNow: true
+      args: remuxArgs, totalDuration: videoDuration, cleanup: dvFromH10p ? [tmpEncOutPath, dvFromH10p.outPath] : tmpEncOutPath, tool: 'ffmpeg', cleanupNow: true,
+      // use the Dolby Vision-injected stream when the injection produced one, otherwise the plain HDR10+ encode
+      preferInput: dvFromH10p ? { path: dvFromH10p.outPath, replace: tmpEncOutPath } : null
     });
 
     videoSourcePath = tmpRemuxedPath;
@@ -5441,6 +5501,31 @@ async function processNextInQueue(){
       setStatus(`${next.label} — Step ${i+1}/${next.stages.length}: ${stage.name}...`, '');
       renderQueue();
       let result;
+      if (stage.requireFile){
+        // A stage that only makes sense with an earlier stage's output (e.g. Dolby Vision built FROM the HDR10+ metadata): if that
+        // output was never produced, skip it - never run it with its input flag stripped, which would silently build a bogus static result.
+        const rq = await window.electronAPI.checkFileExists({ path: stage.requireFile }).catch(() => ({ exists: false }));
+        if (!rq.exists || !(rq.size > 0)){
+          logJobWarning(`${stage.name} was skipped because the HDR10+ metadata it needs was not extracted - continuing without it.`);
+          if (stage.verifyPath) stripPathFromLaterStages(next.stages, i + 1, stage.verifyPath);
+          continue;
+        }
+      }
+      if (stage.resampleHdr10Plus){
+        const rs = await window.electronAPI.resampleHdr10PlusJson(stage.resampleHdr10Plus).catch(e => ({ ok: false, error: e.message }));
+        if (rs && rs.ok){
+          console.log(`[HDR10+] metadata re-timed to the output frame rate: ${rs.inFrames} source frames -> ${rs.outFrames} output frames`);
+        } else {
+          // Misaligned brightness data is worse than none, so drop HDR10+ (and Dolby Vision built from it) for this job.
+          logJobWarning(`${stage.name} failed (${rs && rs.error}) - HDR10+ (and Dolby Vision from it) is left out of this encode so it cannot be out of step with the picture. Static HDR10 metadata is still used.`);
+          stripPathFromLaterStages(next.stages, i + 1, stage.verifyPath);
+          for (let q = i + 1; q < next.stages.length; q++){ const st = next.stages[q]; if (st.requireFile === stage.verifyPath) st.requireFile = stage.verifyPath + '.missing'; }
+        }
+        continue;
+      }
+      if (stage.writeFiles){
+        for (const wf of stage.writeFiles) await window.electronAPI.writeTextFile({ path: wf.path, content: wf.content });
+      }
       if (stage.isNvencNative){
         // Video-only native GPU encode stage - uses the dedicated
         // handler built for this (real progress reporting, unlike
@@ -5654,6 +5739,15 @@ async function processNextInQueue(){
             finalStageArgs = [...withInputs.slice(0, mapInsertPoint), ...newMapArgs, ...newMetadataArgs, ...withInputs.slice(mapInsertPoint)];
           }
         }
+        if (stage.preferInput){
+          const pc = await window.electronAPI.checkFileExists({ path: stage.preferInput.path }).catch(() => ({ exists: false }));
+          if (pc && pc.exists && pc.size > 0){
+            finalStageArgs = finalStageArgs.map(a => a === stage.preferInput.replace ? stage.preferInput.path : a);
+            console.log('[Dolby Vision from HDR10+] using the Dolby Vision-injected stream for the next step');
+          } else {
+            logJobWarning('Dolby Vision from HDR10+ was not added - continuing with the HDR10+ stream only.');
+          }
+        }
         result = await window.electronAPI.runFFmpegWithProgress({
           ffmpeg: stageExecutable, args: finalStageArgs, totalDuration: stage.totalDuration, jobId: next.id
         });
@@ -5692,7 +5786,8 @@ async function processNextInQueue(){
         const ok = result.code === 0 && check.exists && check.size > 0;
         if (!ok){
           const reason = result.code !== 0 ? (result.stderr || `exited with code ${result.code}`) : 'produced no output file';
-          logJobWarning(`${stage.name} failed (${reason}) - continuing without it. The rest of the encode (including static HDR10 metadata) proceeds normally.`);
+          const notFoundHint = /ENOENT/.test(String(reason)) && stage.toolPath ? ` The program was not found at "${stage.toolPath}" - install it or set the correct path in the tool paths section.` : '';
+          logJobWarning(`${stage.name} failed (${reason})${notFoundHint} - continuing without it. The rest of the encode (including static HDR10 metadata) proceeds normally.`);
           stripPathFromLaterStages(next.stages, i + 1, stage.verifyPath);
         }
         finalResult = { code: 0 }; // never let an optional stage's own result abort the job
