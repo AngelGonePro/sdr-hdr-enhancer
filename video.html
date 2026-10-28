@@ -3353,6 +3353,17 @@ async function buildJobFromCurrentSettings(chaptersPath){
   // instead of requiring a raw, unfiltered NVEncC-reads-the-file-directly
   // path the way NVEncC's own built-in `--dolby-vision-rpu copy` mode
   // would have required.
+  // Output frame rate when the encode CHANGES the number of frames (frame-drop conform / interpolation); null otherwise.
+  // Per-frame metadata (Dolby Vision RPU, HDR10+) carried over from the source has one entry per SOURCE frame and must be re-timed to it.
+  let metaOutFps = null;
+  if (isOn('tog-fps-conform') && isOn('tog-conform-drop-frames') && detectedSourceFps){
+    const t = Number(getConformTargetFps(detectedSourceFps));
+    if (Math.abs(t - detectedSourceFps) > 0.0001) metaOutFps = t;
+  }
+  if (isOn('tog-motion-interp-gpu') || isOn('tog-motion-interp-gpu-trt') || isOn('tog-motion-interp-mvtools') || isOn('tog-motion-interp-cpu')){
+    metaOutFps = Number(getMotionInterpTargetFps());
+  }
+  const metaStreamSelector = (() => { const m = /^0:(\d+)$/.exec(String(videoSourceMapArg)); return m ? m[1] : 'v:0'; })();
   let dvRpuPath = null;
   // Computed once here, used by the extraction stage below AND both
   // encoder-injection sites (NVEncC/QSVEncC's toolArgs, libx265's
@@ -3414,6 +3425,15 @@ async function buildJobFromCurrentSettings(chaptersPath){
       // file never reaches the actual encoder command line.
       optional: true, verifyPath: dvRpuPath
     });
+    if (metaOutFps){
+      // The RPU has one entry per SOURCE frame; re-time it to the output frame rate (see resample-dv-rpu in main.js).
+      preStages.push({
+        name: 'Match Dolby Vision data to the output frame rate',
+        resampleDvRpu: { rpuPath: dvRpuPath, doviToolPath: doviToolPath, ffmpegPath: document.getElementById('ffmpegPath').value.trim(),
+                         sourcePath: videoSourcePath, streamSelector: metaStreamSelector, targetFps: metaOutFps },
+        totalDuration: 1, cleanup: null, verifyPath: dvRpuPath
+      });
+    }
   }
 
   // HDR10+ - same mechanism as Dolby Vision above (separate standard,
@@ -3440,20 +3460,12 @@ async function buildJobFromCurrentSettings(chaptersPath){
 
     // The metadata has one entry per SOURCE frame. If the encode changes the frame rate (frame-drop conform / interpolation), re-time it to the
     // output frame rate so frame N of the picture gets frame N's brightness data (see resample-hdr10plus-json in main.js).
-    let h10pOutFps = null;
-    if (isOn('tog-fps-conform') && isOn('tog-conform-drop-frames') && detectedSourceFps){
-      const t = Number(getConformTargetFps(detectedSourceFps));
-      if (Math.abs(t - detectedSourceFps) > 0.0001) h10pOutFps = t;
-    }
-    if (isOn('tog-motion-interp-gpu') || isOn('tog-motion-interp-gpu-trt') || isOn('tog-motion-interp-mvtools') || isOn('tog-motion-interp-cpu')){
-      h10pOutFps = Number(getMotionInterpTargetFps());
-    }
+    const h10pOutFps = metaOutFps;
     if (h10pOutFps){
-      const m = /^0:(\d+)$/.exec(String(videoSourceMapArg));
       preStages.push({
         name: 'Match HDR10+ metadata to the output frame rate',
         resampleHdr10Plus: { jsonPath: hdr10PlusMetaPath, ffmpegPath: document.getElementById('ffmpegPath').value.trim(), sourcePath: videoSourcePath,
-                             streamSelector: m ? m[1] : 'v:0', targetFps: h10pOutFps },
+                             streamSelector: metaStreamSelector, targetFps: h10pOutFps },
         totalDuration: 1, cleanup: null, verifyPath: hdr10PlusMetaPath
       });
     }
@@ -5510,6 +5522,20 @@ async function processNextInQueue(){
           if (stage.verifyPath) stripPathFromLaterStages(next.stages, i + 1, stage.verifyPath);
           continue;
         }
+      }
+      if (stage.resampleDvRpu){
+        // Skipped if the RPU extraction before it already failed (its path was stripped from this stage's inputs by then).
+        const ex = await window.electronAPI.checkFileExists({ path: stage.resampleDvRpu.rpuPath }).catch(() => ({ exists: false }));
+        if (!ex.exists || !(ex.size > 0)) continue;
+        const rs = await window.electronAPI.resampleDvRpu(stage.resampleDvRpu).catch(e => ({ ok: false, error: e.message }));
+        if (rs && rs.ok){
+          console.log(`[Dolby Vision] RPU re-timed to the output frame rate: ${rs.inFrames} source frames -> ${rs.outFrames} output frames`);
+        } else {
+          // Misaligned Dolby Vision data is worse than none: leave it out of this encode (static HDR10 metadata is still used).
+          logJobWarning(`${stage.name} failed (${rs && rs.error}) - Dolby Vision is left out of this encode so it cannot be out of step with the picture. Static HDR10 metadata is still used.`);
+          stripPathFromLaterStages(next.stages, i + 1, stage.verifyPath);
+        }
+        continue;
       }
       if (stage.resampleHdr10Plus){
         const rs = await window.electronAPI.resampleHdr10PlusJson(stage.resampleHdr10Plus).catch(e => ({ ok: false, error: e.message }));

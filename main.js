@@ -1975,37 +1975,54 @@ ipcMain.handle('write-text-file', async (event, payload) => {
 // frame, so NVEncC / dovi_tool applied entry N to output frame N - the brightness data drifted out of step with the picture and was
 // cut off part-way ("mismatched lengths. video 21210, RPU 39080"). Each output frame at time k/fps now takes the entry of the
 // source frame nearest in time (the same choice ffmpeg's fps filter makes), using the source's real frame timestamps (also right for VFR).
-ipcMain.handle('resample-hdr10plus-json', async (event, payload) => {
+function probeVideoPts(ffmpegBin, sourcePath, streamSelector) {
   const { execFile } = require('child_process');
+  const ffprobeBin = ffmpegBin.replace(/ffmpeg(\.exe)?$/i, (m, ext) => 'ffprobe' + (ext || ''));
+  return new Promise((resolve, reject) => {
+    execFile(ffprobeBin, ['-v', 'error', '-select_streams', streamSelector || 'v:0', '-show_entries', 'packet=pts_time', '-of', 'csv=p=0', sourcePath],
+      { maxBuffer: 512 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+        if (err) return reject(new Error(stderr || err.message));
+        resolve(stdout.split(/\r?\n/).map(l => parseFloat(l.split(',')[0])).filter(Number.isFinite).sort((a, b) => a - b));
+      });
+  });
+}
+
+// For every OUTPUT frame k (at time k/fps) the index of the SOURCE frame nearest in time - the same choice ffmpeg's fps filter makes.
+function mapOutputToSourceFrames(pts, fps) {
+  const n = pts.length;
+  const deltas = []; for (let i = 1; i < n; i++) deltas.push(pts[i] - pts[i - 1]);
+  deltas.sort((a, b) => a - b);
+  const d = deltas.length ? deltas[Math.floor(deltas.length / 2)] : 1 / fps;
+  const first = pts[0];
+  const M = Math.max(1, Math.round((pts[n - 1] + d - first) * fps));
+  const map = new Array(M);
+  let j = 0;
+  for (let k = 0; k < M; k++) {
+    const t = first + k / fps;
+    while (j + 1 < n && Math.abs(pts[j + 1] - t) <= Math.abs(pts[j] - t)) j++;
+    map[k] = j;
+  }
+  return map;
+}
+
+// Re-times an extracted HDR10+ metadata JSON (hdr10plus_tool output) to the OUTPUT frame rate.
+// Real bug: when the encode changes the frame rate (frame-drop conform, interpolation), the JSON still has one entry per SOURCE
+// frame, so NVEncC / dovi_tool applied entry N to output frame N - the brightness data drifted out of step with the picture and was
+// cut off part-way ("mismatched lengths. video 21210, RPU 39080"). Each output frame takes the entry of the source frame nearest in
+// time, using the source's real frame timestamps (also right for VFR).
+ipcMain.handle('resample-hdr10plus-json', async (event, payload) => {
   try {
     const { jsonPath, ffmpegPath: ffm, sourcePath, streamSelector, targetFps } = payload;
     const fps = Number(targetFps);
     if (!(fps > 0)) return { ok: false, error: 'invalid target frame rate' };
-    const ffprobeBin = ffm.replace(/ffmpeg(\.exe)?$/i, (m, ext) => 'ffprobe' + (ext || ''));
-    const out = await new Promise((resolve, reject) => {
-      execFile(ffprobeBin, ['-v', 'error', '-select_streams', streamSelector || 'v:0', '-show_entries', 'packet=pts_time', '-of', 'csv=p=0', sourcePath],
-        { maxBuffer: 512 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => err ? reject(new Error(stderr || err.message)) : resolve(stdout));
-    });
-    const pts = out.split(/\r?\n/).map(l => parseFloat(l.split(',')[0])).filter(Number.isFinite).sort((a, b) => a - b);
+    const pts = await probeVideoPts(ffm, sourcePath, streamSelector);
     const data = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
     const src = data.SceneInfo;
     if (!Array.isArray(src) || src.length === 0) return { ok: false, error: 'no frames in the HDR10+ JSON' };
     const N = src.length;
     if (Math.abs(pts.length - N) > Math.max(2, N * 0.01)) return { ok: false, error: `frame count mismatch (video has ${pts.length} frames, HDR10+ data has ${N})` };
-    const n = Math.min(N, pts.length);
-    const deltas = []; for (let i = 1; i < n; i++) deltas.push(pts[i] - pts[i - 1]);
-    deltas.sort((a, b) => a - b);
-    const d = deltas.length ? deltas[Math.floor(deltas.length / 2)] : 1 / fps;
-    const first = pts[0];
-    const dur = pts[n - 1] + d - first;
-    const M = Math.max(1, Math.round(dur * fps));
-    const outInfo = [];
-    let j = 0;
-    for (let k = 0; k < M; k++) {
-      const t = first + k / fps;
-      while (j + 1 < n && Math.abs(pts[j + 1] - t) <= Math.abs(pts[j] - t)) j++;
-      outInfo.push(JSON.parse(JSON.stringify(src[Math.min(j, N - 1)])));
-    }
+    const map = mapOutputToSourceFrames(pts.slice(0, Math.min(N, pts.length)), fps);
+    const outInfo = map.map(j => JSON.parse(JSON.stringify(src[Math.min(j, N - 1)])));
     // renumber scenes/frame indices for the new sequence (a new scene starts wherever the source scene id changes)
     const firstIdx = [], counts = [];
     let prevId = null, sceneNo = -1, inScene = 0;
@@ -2020,9 +2037,67 @@ ipcMain.handle('resample-hdr10plus-json', async (event, payload) => {
     const tmp = jsonPath + '.resampled';
     fs.writeFileSync(tmp, JSON.stringify(data), 'utf8');
     fs.renameSync(tmp, jsonPath);
+    return { ok: true, inFrames: N, outFrames: outInfo.length };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+// Same real bug for a source that already carries Dolby Vision: the extracted RPU has one entry per SOURCE frame. With a frame-rate
+// change the entries are re-timed with dovi_tool's own editor (remove the source frames that get dropped, duplicate the ones that
+// get repeated), so RPU frame N belongs to output frame N. The result is verified (frame count) before it replaces the original.
+ipcMain.handle('resample-dv-rpu', async (event, payload) => {
+  const { execFile } = require('child_process');
+  const run = (bin, args) => new Promise((resolve, reject) => {
+    execFile(bin, args, { maxBuffer: 64 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => err ? reject(new Error((stderr || '') + (stdout || '') || err.message)) : resolve(stdout + stderr));
+  });
+  const cleanup = [];
+  try {
+    const { rpuPath, doviToolPath, ffmpegPath: ffm, sourcePath, streamSelector, targetFps } = payload;
+    const fps = Number(targetFps);
+    if (!(fps > 0)) return { ok: false, error: 'invalid target frame rate' };
+    const frameCount = async (p) => {
+      const out = await run(doviToolPath, ['info', '-i', p, '-s']);
+      const m = /Frames:\s*(\d+)/.exec(out);
+      if (!m) throw new Error('could not read the RPU frame count');
+      return parseInt(m[1], 10);
+    };
+    const pts = await probeVideoPts(ffm, sourcePath, streamSelector);
+    const N = await frameCount(rpuPath);
+    if (Math.abs(N - pts.length) > Math.max(2, N * 0.01)) return { ok: false, error: `frame count mismatch (video has ${pts.length} frames, Dolby Vision data has ${N})` };
+    const map = mapOutputToSourceFrames(pts, fps).map(j => Math.min(j, N - 1));
+    const counts = new Array(N).fill(0);
+    map.forEach(j => { counts[j]++; });
+    const remove = [];
+    let runStart = -1;
+    for (let j = 0; j <= N; j++) {
+      const dropped = j < N && counts[j] === 0;
+      if (dropped && runStart < 0) runStart = j;
+      if (!dropped && runStart >= 0) { remove.push(runStart === j - 1 ? String(runStart) : `${runStart}-${j - 1}`); runStart = -1; }
+    }
+    // indices for "duplicate" are positions AFTER the removals
+    const duplicate = [];
+    let pos = 0;
+    for (let j = 0; j < N; j++) {
+      if (counts[j] === 0) continue;
+      if (counts[j] > 1) duplicate.push({ source: pos, offset: pos + 1, length: counts[j] - 1 });
+      pos++;
+    }
+    const cfg = {};
+    if (remove.length) cfg.remove = remove;
+    if (duplicate.length) cfg.duplicate = duplicate;
+    const jsonP = rpuPath + '.edit.json', outP = rpuPath + '.resampled';
+    cleanup.push(jsonP, outP);
+    fs.writeFileSync(jsonP, JSON.stringify(cfg), 'utf8');
+    await run(doviToolPath, ['editor', '-i', rpuPath, '-j', jsonP, '-o', outP]);
+    const M = await frameCount(outP);
+    if (M !== map.length) return { ok: false, error: `re-timed Dolby Vision data has ${M} frames, expected ${map.length}` };
+    fs.renameSync(outP, rpuPath);
     return { ok: true, inFrames: N, outFrames: M };
   } catch (e) {
     return { ok: false, error: e.message };
+  } finally {
+    for (const f of cleanup) { try { fs.unlinkSync(f); } catch (_) {} }
   }
 });
 

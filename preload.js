@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteTempFile: (payload) => ipcRenderer.invoke('delete-temp-file', payload),
   writeTextFile: (payload) => ipcRenderer.invoke('write-text-file', payload),
   resampleHdr10PlusJson: (payload) => ipcRenderer.invoke('resample-hdr10plus-json', payload),
+  resampleDvRpu: (payload) => ipcRenderer.invoke('resample-dv-rpu', payload),
   extractAndScaleChapters: (payload) => ipcRenderer.invoke('extract-and-scale-chapters', payload),
   onFFmpegProgress: (callback) => ipcRenderer.on('ffmpeg-progress', (event, data) => callback(data))
 });
