@@ -2702,10 +2702,10 @@ function buildHdrPixelFilters(){
   filters.push(`format=yuv444p10le,split=2[tA][tB];[tB]gblur=sigma=2:planes=1[tBB];[tA][tBB]lut2=c0='if(gte(x,${bpCode}),clip(${hiExpr}+clip(x-y,-36,36)*2.0,0,1023),clip(${toeOf('y')}+clip(x-y,-24,24)*(1+2.4*clip((307-y)/150,0,1))+clip(x-y,-36,36)*2.0*clip((y-307)/250,0,1)+(x-y-clip(x-y,-24,24)),0,1023))'`);
   const vibA = parseFloat(document.getElementById('hdrVibStrength').value) || 0;
   // When vibrance is on, the uniform saturation (1.0 in auto mode, or the slider value) is folded into the vibrance
-  // gain below and `eq` is NOT used: eq works in 8-bit, and the 10->8->10 bit conversion around it was measured to
-  // shift levels when followed by the plane-splitting vibrance sub-graph.
+  // gain below and no separate saturation filter is used. (The plain case uses chromaSatFilter(): ffmpeg's `eq` is 8-bit only and
+  // its hidden 10->8->10 bit conversion was measured to crush shadow levels 4:1 and shift near-black tone.)
   if (deferAutoColor) filters.push(AUTO_COLOR_TOKEN);   // real filter chosen when the job starts (resolveDeferredAuto)
-  else if (!(vibA > 0)) filters.push(`eq=saturation=${sat}`);
+  else if (!(vibA > 0)) filters.push(chromaSatFilter(sat));
   // Automatic perceptual vibrance: chroma-adaptive gain, 1 + A*(1 - chroma/0.30)^1.5, so muted colours get
   // the biggest lift and colours above 0.30 chroma get none; skin / warm hues (angle 2.36 rad +-0.45, fading out by
   // +-0.85 in the Cb/Cr plane - measured from real skin pixels in six clips, 108..163 deg) get zero lift.
@@ -2813,6 +2813,15 @@ function buildCropFilter(w, h, x, y){
 // the real filter text (or removes the placeholder) once the measurements are done.
 const AUTO_SHARP_TOKEN = '__AUTO_SHARPEN_FILTER__';
 const AUTO_COLOR_TOKEN = '__AUTO_COLOR_FILTER__';
+// Uniform saturation on 10-bit chroma. ffmpeg's `eq` filter only accepts 8-bit input, so every frame was silently converted 10->8->10 bit
+// around it (even at saturation 1.0): a dark 10-bit luma ramp of 257 levels came out with 65 (visible banding, shadow tone shifted).
+// This scales U/V about the 10-bit mid-point (512) with lutyuv instead, luma untouched; 1.0 needs no filter at all ('null').
+function chromaSatFilter(s){
+  const v = parseFloat(s);
+  if (!(v > 0) || Math.abs(v - 1) < 1e-6) return 'null';
+  const e = `clip((val-512)*${v}+512,0,1023)`;
+  return `lutyuv=u='${e}':v='${e}'`;
+}
 let deferAutoSharpen = false, deferAutoColor = false;   // true only while addToQueue builds a job
 function autoSharpenFilter(){
   return (deferAutoSharpen && isOn('tog-sharpen')) ? AUTO_SHARP_TOKEN : null;
@@ -2853,7 +2862,7 @@ async function measureAutoSharpen(job, c){
 // Same decisions the queue-time version made; on any failure: the slider value, no vibrance.
 async function measureAutoColor(job, c){
   const name = (job.filePath || '').split(/[\\/]/).pop();
-  const plain = (v) => `eq=saturation=${v}`;
+  const plain = (v) => chromaSatFilter(v);
   try {
     const r = await window.electronAPI.analyzeSaturation({ ffmpeg: c.ffmpeg, filePath: job.filePath, duration: c.duration, videoTrackIndex: c.videoTrackIndex });
     if (!r || r.error){
